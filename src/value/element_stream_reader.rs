@@ -372,6 +372,14 @@ impl IonReader for ElementStreamReader {
         // Since `Element`s are an in-memory representation fo Ion data, all versions of 1.x share the same Ion version.
         (1, 0)
     }
+
+    fn current_position(&self) -> crate::result::Position {
+        // There isn't really a sensible position to use in this case, unless we make Position an
+        // enum of BinaryPosition, TextPosition, and IteratorPosition; or we change the function
+        // signature to be Option<Position>. However, Option<Position> opens a can of worms about
+        // _why_ there is no position.
+        todo!()
+    }
 }
 
 #[cfg(test)]

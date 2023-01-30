@@ -9,7 +9,7 @@ use crate::constants::v1_0::system_symbol_ids;
 use crate::data_source::ToIonDataSource;
 use crate::raw_reader::{RawReader, RawStreamItem};
 use crate::raw_symbol_token::RawSymbolToken;
-use crate::result::{decoding_error, decoding_error_raw, IonResult};
+use crate::result::{decoding_error, decoding_error_raw, IonResult, Position};
 use crate::stream_reader::IonReader;
 use crate::symbol::Symbol;
 use crate::symbol_table::SymbolTable;
@@ -309,6 +309,10 @@ impl<R: RawReader> IonReader for UserReader<R> {
             };
         }
         StreamItem::Nothing
+    }
+
+    fn current_position(&self) -> Position {
+        self.raw_reader.current_position()
     }
 
     /// Advances the raw reader to the next user-level Ion value, processing any system-level directives

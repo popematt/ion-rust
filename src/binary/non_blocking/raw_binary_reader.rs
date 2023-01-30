@@ -5,10 +5,7 @@ use crate::binary::non_blocking::type_descriptor::{Header, TypeDescriptor};
 use crate::binary::uint::DecodedUInt;
 use crate::binary::var_uint::VarUInt;
 use crate::binary::IonTypeCode;
-use crate::result::{
-    decoding_error, decoding_error_raw, illegal_operation, illegal_operation_raw,
-    incomplete_data_error,
-};
+use crate::result::{decoding_error, decoding_error_raw, illegal_operation, illegal_operation_raw, incomplete_data_error, Position};
 use crate::types::integer::IntAccess;
 use crate::types::SymbolId;
 use crate::{
@@ -555,6 +552,10 @@ impl<A: AsRef<[u8]>> IonReader for RawBinaryBufferReader<A> {
 
     fn ion_version(&self) -> (u8, u8) {
         self.ion_version
+    }
+
+    fn current_position(&self) -> Position {
+        Position::with_offset(self.buffer.total_consumed())
     }
 
     #[inline]

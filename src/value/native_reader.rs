@@ -34,6 +34,10 @@ impl<R: RawReader> NativeElementIterator<R> {
     /// If an error occurs while materializing the value, returns an `Err`.
     /// Calling this method advances the reader and consumes the current value.
     fn materialize_current(&mut self) -> IonResult<Option<Element>> {
+
+        #[cfg(feature = "position")]
+        let start_of_value = self.reader.current_position();
+
         // Collect this item's annotations into a Vec. We have to do this before materializing the
         // value itself because materializing a collection requires advancing the reader further.
         let mut annotations = Vec::new();
@@ -72,7 +76,26 @@ impl<R: RawReader> NativeElementIterator<R> {
                 }
             }
         };
-        Ok(Some(Element::new(annotations, value)))
+
+        let element = Element::new(annotations, value);
+
+        #[cfg(feature = "position")]
+        let element = {
+            use crate::value::metas::ElementPositionBuilder;
+
+            let end_of_value = self.reader.current_position();
+
+            let element_position = ElementPositionBuilder::default()
+                .with_value_start(start_of_value)
+                .with_value_end(end_of_value)
+                .build();
+
+            let mut element= element;
+            element.set_position(element_position);
+            element
+        };
+
+        Ok(Some(element))
     }
 
     /// Steps into the current sequence and materializes each of its children to construct

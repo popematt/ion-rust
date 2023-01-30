@@ -6,7 +6,7 @@ use delegate::delegate;
 use crate::constants::v1_0::{system_symbol_ids, SYSTEM_SYMBOLS};
 use crate::raw_reader::{RawReader, RawStreamItem};
 use crate::raw_symbol_token::RawSymbolToken;
-use crate::result::{decoding_error, decoding_error_raw, illegal_operation, IonError, IonResult};
+use crate::result::{decoding_error, decoding_error_raw, illegal_operation, IonError, IonResult, Position};
 use crate::symbol::Symbol;
 use crate::system_reader::LstPosition::*;
 use crate::types::decimal::Decimal;
@@ -521,6 +521,10 @@ impl<R: RawReader> IonReader for SystemReader<R> {
 
     fn current(&self) -> Self::Item {
         self.current_item
+    }
+
+    fn current_position(&self) -> Position {
+        self.raw_reader.current_position()
     }
 
     fn step_in(&mut self) -> IonResult<()> {

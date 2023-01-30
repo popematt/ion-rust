@@ -679,6 +679,10 @@ impl<A: AsRef<[u8]>> IonReader for RawTextReader<A> {
         (1, 0)
     }
 
+    fn current_position(&self) -> Position {
+        self.buffer.get_position()
+    }
+
     fn next(&mut self) -> IonResult<RawStreamItem> {
         // Failures due to incomplete data can occur any time the reader needs to advance, which
         // can occur in a call to `next()` or `step_out()`. (Note that in some cases the

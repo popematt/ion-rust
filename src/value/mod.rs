@@ -217,6 +217,7 @@ pub mod native_writer;
 pub mod owned;
 pub mod reader;
 pub mod writer;
+pub mod metas;
 
 /// A view of a symbolic token.
 ///
@@ -422,6 +423,9 @@ where
     // TODO add all the accessors to the trait
 
     // TODO add mutation methods to the trait
+
+    #[cfg(feature = "position")]
+    fn get_element_position(&self) -> &Option<metas::ElementPosition>;
 }
 
 /// Represents the _value_ of sequences of Ion elements (i.e. `list` and `sexp`).

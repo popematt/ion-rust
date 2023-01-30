@@ -21,7 +21,7 @@ use crate::{
 use std::io;
 
 use crate::raw_symbol_token::RawSymbolToken;
-use crate::result::{decoding_error_raw, IonError};
+use crate::result::{decoding_error_raw, IonError, Position};
 use crate::stream_reader::IonReader;
 use crate::types::decimal::Decimal;
 use crate::types::integer::{IntAccess, Integer};
@@ -279,6 +279,11 @@ macro_rules! read_safety_checks {
 impl<R: IonDataSource> IonReader for RawBinaryReader<R> {
     type Item = RawStreamItem;
     type Symbol = RawSymbolToken;
+
+
+    fn current_position(&self) -> Position {
+        Position::with_offset(self.cursor.bytes_read)
+    }
 
     fn ion_version(&self) -> (u8, u8) {
         self.cursor.ion_version

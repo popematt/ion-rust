@@ -1,4 +1,4 @@
-use crate::result::IonResult;
+use crate::result::{IonResult, Position};
 use crate::types::decimal::Decimal;
 use crate::types::integer::Integer;
 use crate::types::timestamp::Timestamp;
@@ -180,4 +180,9 @@ pub trait IonReader {
     /// times the Reader has stepped into a container without later stepping out. At the top level,
     /// this method returns `0`.
     fn depth(&self) -> usize;
+
+    // TODO:
+    /// This is the current position after reading a value. I.e. the byte and/or row/column that is
+    /// after the last byte of the current value.
+    fn current_position(&self) -> Position;
 }

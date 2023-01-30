@@ -645,6 +645,11 @@ impl<'val> IonElement for ElementRef<'val> {
             _ => None,
         }
     }
+
+    #[cfg(feature = "position")]
+    fn get_element_position(&self) -> &Option<crate::value::metas::ElementPosition> {
+        &None
+    }
 }
 
 #[cfg(test)]

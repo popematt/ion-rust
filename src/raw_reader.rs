@@ -3,6 +3,7 @@ use crate::stream_reader::IonReader;
 use crate::types::IonType;
 use crate::{Decimal, Integer, IonResult, Timestamp};
 use std::fmt::{Display, Formatter};
+use crate::result::Position;
 
 /// `RawReader` is a shorthand for a [Reader](crate::Reader) implementation that returns [RawStreamItem]s and
 /// uses [RawSymbolToken] to represent its field names, annotations, and symbol values.
@@ -150,6 +151,10 @@ impl<R: RawReader + ?Sized> IonReader for Box<R> {
 
     fn depth(&self) -> usize {
         (**self).depth()
+    }
+
+    fn current_position(&self) -> Position {
+        (**self).current_position()
     }
 }
 

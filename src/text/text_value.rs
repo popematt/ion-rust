@@ -11,6 +11,7 @@ pub(crate) struct AnnotatedTextValue {
 }
 
 impl AnnotatedTextValue {
+
     pub(crate) fn new(annotations: Vec<RawSymbolToken>, value: TextValue) -> Self {
         AnnotatedTextValue { annotations, value }
     }

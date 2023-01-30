@@ -27,6 +27,13 @@ members = [
   "ion-hash"
 ]
 
+[features]
+default = [
+  "position" # TODO: remove; this only included in default to make testing easier
+]
+position = []
+# TODO: hash = []
+
 [dependencies]
 base64 = "0.12"
 bigdecimal = "0.2"

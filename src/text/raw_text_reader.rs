@@ -1,10 +1,10 @@
 use crate::data_source::ToIonDataSource;
 use crate::raw_reader::RawStreamItem;
 use crate::raw_symbol_token::RawSymbolToken;
-use crate::result::IonResult;
+use crate::result::{IonResult, Position};
 use crate::stream_reader::IonReader;
 use crate::types::timestamp::Timestamp;
-use crate::{Decimal, Integer, IonError, IonType};
+use crate::{Decimal, Integer, IonError, IonType, RawReader};
 
 use crate::text::non_blocking::raw_text_reader::RawTextReader as NonBlockingReader;
 
@@ -56,6 +56,10 @@ impl<T: ToIonDataSource> IonReader for RawTextReader<T> {
 
     fn ion_version(&self) -> (u8, u8) {
         (1, 0)
+    }
+
+    fn current_position(&self) -> Position {
+        (&self.reader as &dyn RawReader).current_position()
     }
 
     fn next(&mut self) -> IonResult<RawStreamItem> {

@@ -70,6 +70,43 @@ pub fn element_reader() -> impl ElementReader {
     native_element_reader()
 }
 
+// A quick and dirty test to see if we can get good positions from a text reader.
+#[test]
+#[cfg(feature = "position")]
+fn test_text_position() {
+    let values = element_reader().read_all(r#"1
+foo::bar
+[
+  a,
+  // abc
+  b,
+  (
+    true
+  )
+]
+null.string
+    "#.as_bytes()).expect("");
+    for e in values {
+        println!("{e} -- {}", if let Some(epm) = e.get_element_position() { epm.value.to_string() } else { "".to_string() });
+    }
+}
+
+// A quick and dirty test to see if we can get good positions from a binary reader.
+#[test]
+#[cfg(feature = "position")]
+fn test_binary_position() {
+    let data: Vec<u8> = vec![
+        0xE0, 0x01, 0x00, 0xEA, // IVM
+        0xE4, 0x81, 0x84, 0x21, 0x01, // $4::1
+        0xE4, 0x81, 0x85, 0x21, 0x02, // $5::2
+        0xE6, 0x83, 0x86, 0x87, 0x88, 0x21, 0x03, // $6::$7::$8::3
+    ];
+    let values = element_reader().read_all(data.as_bytes()).expect("");
+    for e in values {
+        println!("{e} -- {}", if let Some(epm) = e.get_element_position() { epm.value.to_string() } else { "".to_string() });
+    }
+}
+
 pub fn native_element_reader() -> NativeElementReader {
     NativeElementReader {}
 }

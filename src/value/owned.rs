@@ -24,6 +24,8 @@ use crate::symbol_ref::AsSymbolRef;
 use crate::value::iterators::{
     ElementsIterator, FieldIterator, FieldValuesIterator, IndexVec, SymbolsIterator,
 };
+#[cfg(feature = "position")]
+use crate::value::metas::ElementPosition;
 
 impl IonSymbolToken for Symbol {
     fn text(&self) -> Option<&str> {
@@ -445,11 +447,23 @@ pub enum Value {
 pub struct Element {
     annotations: Vec<Symbol>,
     value: Value,
+
+    #[cfg(feature = "position")]
+    position: Option<ElementPosition>,
 }
 
 impl Element {
     pub fn new(annotations: Vec<Symbol>, value: Value) -> Self {
-        Self { annotations, value }
+        #[cfg(not(feature = "position"))]
+        return Self { annotations, value };
+
+        #[cfg(feature = "position")]
+        return Self { annotations, value, position: None::<ElementPosition> };
+    }
+
+    #[cfg(feature = "position")]
+    pub(crate) fn set_position(&mut self, position: ElementPosition) {
+        self.position = Some(position)
     }
 }
 
@@ -697,6 +711,11 @@ impl IonElement for Element {
             Value::Struct(structure) => Some(structure),
             _ => None,
         }
+    }
+
+    #[cfg(feature = "position")]
+    fn get_element_position(&self) -> &Option<ElementPosition> {
+        &self.position
     }
 }
 
