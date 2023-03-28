@@ -30,6 +30,7 @@ members = [
 [features]
 default = []
 ion-hash = ["digest"]
+ion-diff = []
 
 [dependencies]
 base64 = "0.12"
