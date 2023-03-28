@@ -28,7 +28,7 @@ members = [
 ]
 
 [features]
-default = []
+default = ["ion-hash"]
 ion-hash = ["digest"]
 ion-diff = []
 
@@ -47,6 +47,8 @@ arrayvec = "0.7"
 smallvec = "1.9.0"
 digest = { version = "0.9", optional = true }
 sha2 = { version = "0.9", optional = true }
+#similar = { version = "2.2.1", optional = true }
+similar = "2.2.1"
 
 [dev-dependencies]
 rstest = "0.16.0"
