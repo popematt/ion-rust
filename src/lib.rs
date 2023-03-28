@@ -155,6 +155,7 @@ mod shared_symbol_table;
 mod symbol_ref;
 mod symbol_table;
 mod system_reader;
+mod ion_diff;
 mod text;
 
 // Publicly-visible modules with nested items which users may choose to import

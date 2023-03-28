@@ -52,6 +52,8 @@ experimental-lazy-reader = []
 # Experimental serde API to serialize and deserialize Ion data into Rust objects using serde crate
 experimental-serde = ["dep:serde_with", "dep:serde"]
 
+ion-diff = []
+
 [dependencies]
 base64 = "0.12"
 bytes = "0.4"
