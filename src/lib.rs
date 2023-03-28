@@ -190,6 +190,7 @@ mod symbol_ref;
 mod symbol_table;
 mod system_reader;
 mod writer;
+mod ion_diff;
 
 #[doc(inline)]
 pub use data_source::IonDataSource;
