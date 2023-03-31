@@ -1,478 +1,180 @@
-use crate::element::Value as IonValue;
-use crate::element::{Element, IntoAnnotatedElement, IonSequence, List, SExp};
-use crate::{ion_sexp, ion_struct, IonType, Symbol};
-use std::cmp::Ordering;
-use std::collections::BTreeSet;
-use std::fmt;
+// Copyright Amazon.com, Inc. or its affiliates.
 
-// Seems to be working
-// TODO: deal with duplicate field names
-// TODO: deal with top-level streams
+//! An experimental feature for computing the difference between two Ion values or Ion streams.
+//!
+//! ## Limitations
+//!
+//! * Current implementation does not handle repeated field names in structs correctly.
+//!   Sometimes, it may detect no change, and other times, it may detect an incorrect change.
+//!
 
-fn ion_diff(e1: &Element, e2: &Element) -> () {
-    let mut d = Recorder::default();
-    diff::<Element, _>(e1, e2, &mut d);
+// TODO: Deal with duplicate field names—see 'FIXME' test cases below
+// The problem is that the diff between two structs is currently determined by modeling as an
+// associative array with one (unique) key for one value. We can fix this by modelling it as an
+// associative array with one (unique) key for a bag of values, or by relaxing the uniqueness
+// requirement (i.e. use a bag of key-value pairs).
+// TODO: Better diff for sequences–see 'FIXME' test cases below
+// https://crates.io/crates/similar is a mature library with multiple diff algorithms.
+// It might be possible to use it directly, or we may need to be inspired by it and write our own.
 
-    for change in d.calls {
-        let e: Element = change.into();
-        if !e.has_annotation("unchanged") {
-            println!("{}", e)
+
+mod diff;
+mod key;
+mod recorder;
+mod traits;
+mod ord_element;
+
+use std::cmp::{max, Ordering};
+use std::ops::Deref;
+use crate::element::{Element as A, IonSequence, Struct, Value};
+use crate::ion_diff::recorder::DefaultChangeListener;
+use rstest::rstest;
+use ord_element::*;
+use crate::{IonType, Symbol};
+
+pub use traits::*;
+pub use key::Key;
+pub use recorder::ChangeType;
+
+
+
+
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+    use crate::ion_diff::recorder::ChangeType::Unchanged;
+    use rstest::*;
+
+    #[rstest]
+    #[case::change_container_type("[A, B]", "(A B)", "value_modified::{path: (), old: [A, B], new: (A B)}")]
+    #[case::add_list_element("[a, b]", "[a, b, c]", "added::{ path: (2), new: c }")]
+    #[case::remove_list_element("[a, b, c]", "[a, b]", "removed::{ path: (2), old: c }")]
+    #[case::add_sexp_element("(a b)", "(a  b  c)", "added::{ path: (2), new: c }")]
+    #[case::add_sexp_element("(a b c)", "(a  b)", "removed::{ path: (2), old: c }")]
+    #[case::add_struct_element(
+        "{ a: A, b: B }",
+        "{ a: A, b: B, c: C }",
+        "added::{ path: (c), new: C }"
+    )]
+    #[case::remove_struct_element(
+        "{ a: A, b: B, c: C }",
+        "{ a: A, b: B }",
+        "removed::{ path: (c), old: C }"
+    )]
+    #[case::change_annotations(
+        "a::1",
+        "b::1",
+        "annotations_modified::{ path: (), old: a::null, new: b::null }"
+    )]
+    #[case::change_value("a::1", "a::2", "value_modified::{ path: (), old: 1, new: 2 }")]
+    #[case::change_nested_list_element(
+        "[a, [b, c], d]",
+        "[a, [b, e], d]",
+        "value_modified::{ path: (1 1), old: c, new: e }"
+    )]
+    #[case::change_nested_list_element_and_annotations(
+        "[a, [b, c], d]",
+        "[a, foo::[b, e], d]",
+        r"
+        annotations_modified::{path: (1), old: null, new: foo::null}
+        value_modified::{ path: (1 1), old: c, new: e }
+        "
+    )]
+    #[case::modify_field(
+    "{ a: B }",
+    "{ a: C }",
+    r"
+        removed::{path: (a), old: B}
+        added::{path: (a), new: C}
+        "
+    )]
+    #[case::modify_field_annotations(
+    "{ a: c::B }",
+    "{ a: d::B }",
+    r"
+        removed::{path: (a), old: c::B}
+        added::{path: (a), new: d::B}
+        "
+    )]
+    #[case::duplicate_field_names(
+        "{ a: A, a: B }",
+        "{ a: C, a: A }",
+        r"
+        removed::{path: (a), old: B}
+        added::{path: (a), new: C}
+        "
+    )]
+    #[case::duplicate_field_names(
+    "{ a: A, a: B }",
+    "{ a: B, a: A }",
+    ""
+    )]
+    #[case::duplicate_field_names(
+    "{ a: A, a: B }",
+    "{ a: A, a: C }",
+    r"
+        removed::{path: (a), old: B}
+        added::{path: (a), new: C}
+    "
+    )]
+    #[case::duplicate_field_names(
+        "{ a: A }",
+        "{ a: A, a: A }",
+        "added::{ path: (a), new: A }"
+    )]
+    // FIXME: Add better diff for lists/sexps.
+    // Ideally, this should say that `a` is removed, and mention that other elements were moved.
+    #[case::remove_at_start_of_seq(
+    "(a b c)",
+    "(b c)",
+    r"
+    value_modified::{path: (0), old: a, new: b}
+    value_modified::{path: (1), old: b, new: c}
+    removed::{path: (2), old: c}
+    "
+    )]
+    #[case::remove_at_start_of_seq(
+    "(a b c)",
+    "(b c)",
+    r"
+    removed::{path: (0), old: a}
+    "
+    )]
+    fn test_element_diffs(#[case] old: &str, #[case] new: &str, #[case] diff: &str) {
+        let e1 = Element::read_one(old).unwrap();
+        let e2 = Element::read_one(new).unwrap();
+
+        let expected_diff_ion = Element::read_all(diff).unwrap();
+
+        let mut d = DefaultChangeListener::default();
+        Element::diff_with_delegate(&mut d, &e1, &e2, );
+        let actual_diff_ion: Vec<Element> = d
+            .calls
+            .iter()
+            .filter(|x| !matches!(x, Unchanged(_, _)))
+            .map(|x| x.into())
+            .collect::<Vec<_>>();
+        let actual_diff_ion_for_display: Vec<Element> = d
+            .calls
+            .iter()
+            .map(|x| x.into())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            expected_diff_ion,
+            actual_diff_ion,
+            "Expected: {}\n Actual: {}",
+            display_for_assertion(&expected_diff_ion),
+            display_for_assertion(&actual_diff_ion_for_display)
+        )
+    }
+
+    fn display_for_assertion(elements: &Vec<Element>) -> String {
+        let mut s = String::new();
+        for e in elements {
+            s.push_str(&*format!("\n  {e}"));
         }
-    }
-}
-
-
-impl From<Key> for Element {
-    fn from(value: Key) -> Self {
-        match value {
-            Key::Index(i) => Element::integer(i),
-            Key::Symbol(s) => Element::symbol(s),
-        }
-    }
-}
-
-impl<'a> From<ChangeType<'a, Key, Element>> for Element {
-    fn from(value: ChangeType<'a, Key, Element>) -> Self {
-        match value {
-            ChangeType::Removed(k, v) => {
-                let mut kel = SExp::builder();
-                for e in k {
-                    kel = kel.push(e);
-                }
-                let s = ion_struct! {
-                    "path": kel.build(),
-                    "old": v.clone()
-                };
-                s.with_annotations(["removed"])
-            }
-            ChangeType::Added(k, v) => {
-                let mut kel = SExp::builder();
-                for e in k {
-                    kel = kel.push(e);
-                }
-                let s = ion_struct! {
-                    "path": kel.build(),
-                    "new": v.clone()
-                };
-                s.with_annotations(["added"])
-            }
-            ChangeType::Unchanged(k, v) => {
-                let mut kel = SExp::builder();
-                for e in k {
-                    kel = kel.push(e);
-                }
-                let s = ion_struct! {
-                    "path": kel.build(),
-                    "value": v.clone()
-                };
-                s.with_annotations(["unchanged"])
-            }
-            ChangeType::Modified(k, old, new) => {
-                let mut kel = SExp::builder();
-                for e in k {
-                    kel = kel.push(e);
-                }
-                let s = ion_struct! {
-                    "path": kel.build(),
-                    "old": old.clone(),
-                    "new": new.clone()
-                };
-                s.with_annotations(["modified"])
-            }
-            ChangeType::AnnotationsModified(k, old, new) => {
-                let mut kel = SExp::builder();
-                for e in k {
-                    kel = kel.push(e);
-                }
-                let mut old_ann = List::builder();
-                for e in &old {
-                    old_ann = old_ann.push(e.clone());
-                }
-                let mut new_ann = List::builder();
-                for e in &new {
-                    new_ann = new_ann.push(e.clone());
-                }
-                let s = ion_struct! {
-                    "path": kel.build(),
-                    "old": Element::null(IonType::Null).with_annotations(old),
-                    "new": Element::null(IonType::Null).with_annotations(new)
-                };
-                s.with_annotations(["annotations_modified"])
-            }
-        }
-    }
-}
-
-impl Value for Element {
-    type Key = Key;
-    type Item = Element;
-
-    fn items<'a>(&'a self) -> Option<Box<dyn Iterator<Item = (Self::Key, &'a Self::Item)> + 'a>> {
-        match self.value() {
-            IonValue::SExp(sexp) => Some(Box::new(
-                sexp.elements().enumerate().map(|(k, v)| (Key::Index(k), v)),
-            )),
-            IonValue::List(list) => Some(Box::new(
-                list.elements().enumerate().map(|(k, v)| (Key::Index(k), v)),
-            )),
-            IonValue::Struct(struct_) => Some(Box::new(
-                struct_.fields().map(|(k, v)| (Key::Symbol(k.clone()), v)),
-            )),
-            _ => None,
-        }
-    }
-
-    fn annotations<'a>(&'a self) -> Option<Box<dyn Iterator<Item=&'a Symbol> + 'a>> {
-        Some(Box::new(self.annotations()))
-    }
-}
-
-// impl <'b, T: Iterator<Item = &'b Element> + PartialEq + 'b> Value for T {
-//     type Key = Key;
-//     type Item = Element;
-//
-//     fn items<'a>(&'a self) -> Option<Box<dyn Iterator<Item=(Self::Key, &'a Self::Item)> + 'a>> {
-//         let v = &self.enumerate().map(|(i, e)| (Key::Index(i), e));
-//         Some(Box::new(v))
-//     }
-//
-//     fn annotations<'a>(&'a self) -> Option<Box<dyn Iterator<Item=&'a Symbol> + 'a>> {
-//         None
-//     }
-// }
-
-#[test]
-fn test_diff() {
-    let e1 = Element::read_one(
-        r#"
-        type::{
-  name: CustomerFieldTypes,
-  fields: closed::{
-    title: { valid_values: ["Dr.", "Mr.", "Mrs.", "Ms."] },
-    firstName: string,
-    middleName: string,
-    lastName: string,
-    suffix: { valid_values: ["Jr.", "Sr.", "PhD"] },
-    preferredName: string,
-    customerId: {
-      one_of: [
-        { type: string, codepoint_length: 18 },
-        { type: int, valid_values: range::[100000, 999999] },
-      ],
-    },
-    addresses: { type: list, element: Address },
-    lastUpdated: { timestamp_precision: second },
-  },
-}
-    "#,
-    )
-        .unwrap();
-
-    let e2 = Element::read_one(
-        r#"
-type::{
-  name: CustomerFieldTypes,
-  fields: closed::{
-    title: { valid_values: ["Dr.", "Mr.", "Mrs.", "Ms."] },
-    firstName: string,
-    middleName: $string,
-    lastName: string,
-    suffix: { valid_values: ["Jr.", "Sr.", "PhD"] },
-    preferredName: string,
-    customerId: {
-      one_of: [
-        { type: string, codepoint_length: 18 },
-        { type: int, valid_values: range::[100000, 999999] },
-        { type: blob, byte_length: 18 },
-      ],
-    },
-    addresses: { type: list, element: Address },
-    lastUpdated: { timestamp_precision: second },
-    created: { timestamp_precision: second },
-  },
-}
-    "#,
-    )
-        .unwrap();
-
-    ion_diff(&e1, &e2);
-}
-
-
-/// A generic diff algorithm suitable for `Value` types as seen in serialization/deserialization
-/// libraries.
-///
-/// Such types can represent any tree-like data structure, which will be traversed to find
-/// *additions*, *removals*, *modifications* and even portions that did not change at all.
-///
-/// # Parameters
-/// * `l` - the left Value
-/// * `r` - the right Value
-/// * `d` - a `Delegate` to receive information about changes between `l` and `r`
-pub fn diff<'a, V, D>(l: &'a V, r: &'a V, d: &mut D)
-    where
-        V: Value<Item = V>,
-        V::Key: Ord + Clone,
-        D: Delegate<'a, V::Key, V>,
-{
-    match (l.items(), r.items()) {
-        // two scalars, equal
-        (None, None) if l == r => d.unchanged(l),
-        // two scalars, different
-        (None, None) => {
-            match (l.annotations(), r.annotations()) {
-                (Some(la), Some(ra)) => {
-                    let r_ann: Vec<_> = ra.cloned().collect();
-                    let l_ann: Vec<_> = la.cloned().collect();
-                    if r_ann != l_ann {
-                        d.annotations_modified(l_ann, r_ann);
-                    }
-                }
-                (None, None) => {}
-                _ => unreachable!("Whether a value could have annotations depends on its type")
-            }
-            d.modified(l, r)
-        },
-        // two objects, equal
-        (Some(_), Some(_)) if l == r => d.unchanged(l),
-        // object and scalar
-        (Some(_), None) | (None, Some(_)) => d.modified(l, r),
-        // two objects, different
-        (Some(li), Some(ri)) => {
-            let mut sl: BTreeSet<OrdByKey<_, _>> = BTreeSet::new();
-            // let mut sl: Vec<OrdByKey<_, _>> = Vec::new();
-            sl.extend(li.map(Into::into));
-            let mut sr: BTreeSet<OrdByKey<_, _>> = BTreeSet::new();
-            // let mut sr: Vec<OrdByKey<_, _>> = Vec::new();
-            sr.extend(ri.map(Into::into));
-            for k in sr.intersection(&sl) {
-                let v1 = sl.get(k).expect("intersection to work");
-                let v2 = sr.get(k).expect("intersection to work");
-                d.push(&k.0);
-                diff(v1.1, v2.1, d);
-                d.pop();
-            }
-            for k in sr.difference(&sl) {
-                d.added(&k.0, sr.get(k).expect("difference to work").1);
-            }
-            for k in sl.difference(&sr) {
-                d.removed(&k.0, sl.get(k).expect("difference to work").1);
-            }
-
-            match (l.annotations(), r.annotations()) {
-                (Some(la), Some(ra)) => {
-                    let r_ann: Vec<_> = ra.cloned().collect();
-                    let l_ann: Vec<_> = la.cloned().collect();
-                    if r_ann != l_ann {
-                        d.annotations_modified(l_ann, r_ann);
-                    }
-                }
-                (None, None) => {}
-                _ => unreachable!()
-            }
-
-        }
-    }
-
-
-}
-
-struct OrdByKey<'a, K, V: 'a>(pub K, pub &'a V);
-
-impl<'a, K, V> From<(K, &'a V)> for OrdByKey<'a, K, V> {
-    fn from(src: (K, &'a V)) -> Self {
-        OrdByKey(src.0, src.1)
-    }
-}
-
-impl<'a, K, V> Eq for OrdByKey<'a, K, V> where K: Eq + PartialOrd {}
-
-impl<'a, K, V> PartialEq for OrdByKey<'a, K, V>
-    where
-        K: PartialOrd,
-{
-    fn eq(&self, other: &OrdByKey<'a, K, V>) -> bool {
-        self.0.eq(&other.0)
-    }
-}
-
-impl<'a, K, V> PartialOrd for OrdByKey<'a, K, V>
-    where
-        K: PartialOrd,
-{
-    fn partial_cmp(&self, other: &OrdByKey<'a, K, V>) -> Option<Ordering> {
-        self.0.partial_cmp(&other.0)
-    }
-}
-
-impl<'a, K, V> Ord for OrdByKey<'a, K, V>
-    where
-        K: Ord + PartialOrd + Eq,
-{
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-/// Represents a scalar value or an associative array.
-pub trait Value: PartialEq<Self> {
-    /// The Key type used to find Values in a mapping.
-    type Key;
-    /// The Value type itself.
-    type Item;
-
-    /// Returns `None` if this is a scalar value, and an iterator yielding (Key, Value) pairs
-    /// otherwise. It is entirely possible for it to yield no values though.
-    #[allow(clippy::type_complexity)]
-    fn items<'a>(&'a self) -> Option<Box<dyn Iterator<Item = (Self::Key, &'a Self::Item)> + 'a>>;
-
-    /// Returns an iterator yielding (Key, Value) pairs if the implementing type could have
-    /// annotations (i.e. it's an [Element]). It is entirely possible for it to yield no values.
-    /// Returns [None] if it's not possible for the value to have annotations (e.g. because it's
-    /// [Vec<Element>]).
-    #[allow(clippy::type_complexity)]
-    fn annotations<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a Symbol> + 'a>>;
-}
-
-/// The delegate receiving callbacks by the `diff` algorithm, which compares an old to a new value.
-///
-/// # Type Parameters
-/// * `K` is the Key's type
-/// * `V` is the Value's type
-///
-/// Methods will be called if...
-pub trait Delegate<'a, K, V> {
-    /// ... we recurse into the `Value` at the given `Key`.
-    ///
-    /// Delegates should memoize the current Key path to be able to compute
-    /// the full Key path when needed.
-    fn push(&mut self, _k: &K) {}
-    /// ... we have processed all items and leave the object previously `push`ed.
-    fn pop(&mut self) {}
-    /// ... the Value `v` at the given Key `k` should be removed.
-    ///
-    /// *Note* that the Key is partial, and should be used in conjunction with the recorded Keys
-    /// received via `push(...)`
-    fn removed<'b>(&mut self, _k: &'b K, _v: &'a V) {}
-    /// .. the Value `v` at the given Key `k` should be added.
-    ///
-    /// *Note* that the Key is partial, and should be used in conjunction with the recorded Keys
-    /// received via `push(...)`
-    fn added<'b>(&mut self, _k: &'b K, _v: &'a V) {}
-    /// The Value `v` was not changed.
-    fn unchanged(&mut self, _v: &'a V) {}
-
-    /// ... the `old` Value was modified, and is now the `new` Value.
-    fn modified(&mut self, _old: &'a V, _new: &'a V) {}
-
-    /// ... the `old` Value was modified, and is now the `new` Value.
-    fn annotations_modified(&mut self, _old: Vec<Symbol>, _new: Vec<Symbol>);
-}
-
-/// Identifies a type of change at a given Key path, for use with the `Recorder`.
-///
-/// The Key path is followed to know what happened with the Value `V` contained in the variants.
-#[derive(Debug, PartialEq)]
-pub enum ChangeType<'a, K, V: 'a> {
-    /// The Value was removed
-    Removed(Vec<K>, &'a V),
-    /// The Value was added
-    Added(Vec<K>, &'a V),
-    /// No change was performed to the Value
-    Unchanged(Vec<K>, &'a V),
-    /// The first Value was modified and became the second Value
-    Modified(Vec<K>, &'a V, &'a V),
-    AnnotationsModified(Vec<K>, Vec<Symbol>, Vec<Symbol>),
-}
-
-/// A `Delegate` to record all calls made to it.
-///
-/// It can be useful if you don't want to implement your own custom delegate, but instead just want
-/// to quickly see a flat list of all results of the `diff` run.
-///
-/// # Examples
-/// Please see the [tests][tests] for how to use this type.
-///
-/// [tests]: https://github.com/Byron/treediff-rs/blob/master/tests/diff.rs#L21
-#[derive(Debug, PartialEq)]
-pub struct Recorder<'a, K, V: 'a> {
-    cursor: Vec<K>,
-    /// A list of all calls the `diff` function made on us.
-    pub calls: Vec<ChangeType<'a, K, V>>,
-}
-
-impl<'a, K, V> Default for Recorder<'a, K, V> {
-    fn default() -> Self {
-        Recorder {
-            cursor: Vec::new(),
-            calls: Vec::new(),
-        }
-    }
-}
-
-fn mk<K>(c: &[K], k: Option<&K>) -> Vec<K>
-    where
-        K: Clone,
-{
-    let mut c = Vec::from(c);
-    match k {
-        Some(k) => {
-            c.push(k.clone());
-            c
-        }
-        None => c,
-    }
-}
-
-impl<'a, K, V> Delegate<'a, K, V> for Recorder<'a, K, V>
-    where
-        K: Clone,
-{
-    fn push(&mut self, k: &K) {
-        self.cursor.push(k.clone())
-    }
-    fn pop(&mut self) {
-        self.cursor.pop();
-    }
-    fn removed<'b>(&mut self, k: &'b K, v: &'a V) {
-        self.calls
-            .push(ChangeType::Removed(mk(&self.cursor, Some(k)), v));
-    }
-    fn added<'b>(&mut self, k: &'b K, v: &'a V) {
-        self.calls
-            .push(ChangeType::Added(mk(&self.cursor, Some(k)), v));
-    }
-    fn unchanged<'b>(&mut self, v: &'a V) {
-        self.calls
-            .push(ChangeType::Unchanged(self.cursor.clone(), v));
-    }
-    fn modified<'b>(&mut self, v1: &'a V, v2: &'a V) {
-        self.calls
-            .push(ChangeType::Modified(mk(&self.cursor, None), v1, v2));
-    }
-    fn annotations_modified(&mut self, v1: Vec<Symbol>, v2: Vec<Symbol>) {
-        self.calls.push(ChangeType::AnnotationsModified(
-            mk(&self.cursor, None),
-            v1,
-            v2,
-        ));
-    }
-}
-
-/// A representation of all key types typical Value types will assume.
-#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
-pub enum Key {
-    /// An array index
-    Index(usize),
-    /// A string index for mappings
-    Symbol(Symbol),
-}
-
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Key::Symbol(ref v) => v.fmt(f),
-            Key::Index(ref v) => v.fmt(f),
-        }
+        s
     }
 }
