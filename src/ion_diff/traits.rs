@@ -5,13 +5,6 @@ use crate::ion_diff::Key;
 use crate::{Element, Symbol};
 use crate::ion_diff::recorder::{ChangeType, DefaultChangeListener};
 
-/// Type alias for the return type in [ContainsElements].
-pub type ContainedElements<'a> = Box<dyn Iterator<Item = (Key, &'a Element)> + 'a>;
-
-pub trait ContainsElements {
-    fn get_children(&self) -> ContainedElements;
-}
-
 pub trait Diffable {
     fn diff_with_delegate<'a, D: ChangeListener<'a>>(d: &mut D, left: &'a Self, right: &'a Self);
 

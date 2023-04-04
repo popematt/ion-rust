@@ -1,11 +1,9 @@
 
 
-use std::cmp::{max, Ordering};
+use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use crate::element::{Element, IonSequence, Struct, Value};
-use crate::ion_diff::recorder::DefaultChangeListener;
-use rstest::rstest;
 use crate::{IonType, Symbol};
 
 #[derive(Copy, Clone)]
@@ -22,9 +20,20 @@ impl <'a> From<&'a Element> for OrdElement<'a> {
         OrdElement(value)
     }
 }
+impl <'a> From<&&'a Element> for OrdElement<'a> {
+    fn from(value: &&'a Element) -> Self {
+        OrdElement(value)
+    }
+}
 
 impl <'a> From<OrdElement<'a>> for &'a Element {
     fn from(value: OrdElement<'a>) -> Self {
+        value.0
+    }
+}
+
+impl <'a> From<&'a OrdElement<'a>> for &'a Element {
+    fn from(value: &'a OrdElement<'a>) -> Self {
         value.0
     }
 }
@@ -89,7 +98,7 @@ fn cmp_fields(this: &(&Symbol, &Element), that: &(&Symbol, &Element)) -> Orderin
     cmp_elements(this.1, that.1)
 }
 
-fn cmp_seq_by<T, R: Deref<Target = T>, I1: IntoIterator<Item = R>, I2: IntoIterator<Item = R>>(mut this: I1, mut that: I2, cmp: fn(&T, &T) -> Ordering) -> Ordering {
+fn cmp_seq_by<T, R: Deref<Target = T>, I1: IntoIterator<Item = R>, I2: IntoIterator<Item = R>>(this: I1, that: I2, cmp: fn(&T, &T) -> Ordering) -> Ordering {
     let mut that = that.into_iter();
     for this_i in this {
         let that_i = that.next();

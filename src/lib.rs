@@ -175,6 +175,9 @@ pub mod types;
 #[cfg(feature = "ion-hash")]
 pub mod ion_hash;
 
+#[cfg(feature = "ion-diff")]
+pub mod ion_diff;
+
 mod catalog;
 // Public as a workaround for: https://github.com/amazon-ion/ion-rust/issues/484
 pub mod constants;
@@ -190,7 +193,6 @@ mod symbol_ref;
 mod symbol_table;
 mod system_reader;
 mod writer;
-mod ion_diff;
 
 #[doc(inline)]
 pub use data_source::IonDataSource;

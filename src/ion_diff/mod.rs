@@ -24,13 +24,7 @@ mod recorder;
 mod traits;
 mod ord_element;
 
-use std::cmp::{max, Ordering};
-use std::ops::Deref;
-use crate::element::{Element as A, IonSequence, Struct, Value};
 use crate::ion_diff::recorder::DefaultChangeListener;
-use rstest::rstest;
-use ord_element::*;
-use crate::{IonType, Symbol};
 
 pub use traits::*;
 pub use key::Key;
@@ -45,6 +39,7 @@ mod diff_tests {
     use super::*;
     use crate::ion_diff::recorder::ChangeType::Unchanged;
     use rstest::*;
+    use crate::Element;
 
     #[rstest]
     #[case::change_container_type("[A, B]", "(A B)", "value_modified::{path: (), old: [A, B], new: (A B)}")]
@@ -85,17 +80,15 @@ mod diff_tests {
     "{ a: B }",
     "{ a: C }",
     r"
-        removed::{path: (a), old: B}
-        added::{path: (a), new: C}
-        "
+    value_modified::{path: (a), old: B, new: C}
+    "
     )]
     #[case::modify_field_annotations(
     "{ a: c::B }",
     "{ a: d::B }",
     r"
-        removed::{path: (a), old: c::B}
-        added::{path: (a), new: d::B}
-        "
+    annotations_modified::{path: (a), old: c::null, new: d::null}
+    "
     )]
     #[case::duplicate_field_names(
         "{ a: A, a: B }",
@@ -123,23 +116,63 @@ mod diff_tests {
         "{ a: A, a: A }",
         "added::{ path: (a), new: A }"
     )]
-    // FIXME: Add better diff for lists/sexps.
-    // Ideally, this should say that `a` is removed, and mention that other elements were moved.
-    #[case::remove_at_start_of_seq(
-    "(a b c)",
-    "(b c)",
-    r"
-    value_modified::{path: (0), old: a, new: b}
-    value_modified::{path: (1), old: b, new: c}
-    removed::{path: (2), old: c}
-    "
-    )]
     #[case::remove_at_start_of_seq(
     "(a b c)",
     "(b c)",
     r"
     removed::{path: (0), old: a}
+    moved::{old_path: (1), new_path: (0), value: b}
+    moved::{old_path: (2), new_path: (1), value: c}
     "
+    )]
+    #[case::remove_at_start_of_seq_and_modify_later_value(
+    "(a b c d e)",
+    "(b c foo::d e)",
+    r"
+    removed::{path: (0), old: a}
+    moved::{old_path: (1), new_path: (0), value: b}
+    moved::{old_path: (2), new_path: (1), value: c}
+    annotations_modified::{ path: (3), old: null, new: foo::null}
+    moved::{old_path: (3), new_path: (2), value: foo::d}
+    moved::{old_path: (4), new_path: (3), value: e}
+    "
+    )]
+    #[case::complicated_nesting(
+    r#"
+    {
+      name: "Fido",
+      age: years::4,
+      birthday: 2012-03-01T,
+      toys: [
+        ball::{ type: rubber, size: cm::25 },
+        rope,
+        ball::{ type: squeaky, size: cm::15 },
+      ],
+      weight: pounds::41.2,
+      buzz: {{VG8gaW5maW5pdHkuLi4gYW5kIGJleW9uZCE=}},
+    }
+    "#,
+    r#"
+    {
+      name: "Fido",
+      age: years::5,
+      birthday: 2012-03-01T,
+      toys: [
+        rope,
+        ball::{ type: squeaky, size: cm::20 },
+      ],
+      weight: kg::41.2,
+      buzz: {{VG8gaW5maW5pdHkuLi4gYW5kIGJleW9uZCE=}},
+    }
+    "#,
+    r#"
+      value_modified::{path: (age), old: 4, new: 5}
+      removed::{path: (toys 0), old: ball::{type: rubber, size: cm::25}}
+      moved::{old_path: (toys 1), new_path: (toys 0), value: rope}
+      value_modified::{path: (toys 2 size), old: 15, new: 20}
+      moved::{old_path: (toys 2), new_path: (toys 1), value: ball::{type: squeaky, size: cm::20}}
+      annotations_modified::{path: (weight), old: pounds::null, new: kg::null}
+    "#
     )]
     fn test_element_diffs(#[case] old: &str, #[case] new: &str, #[case] diff: &str) {
         let e1 = Element::read_one(old).unwrap();

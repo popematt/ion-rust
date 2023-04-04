@@ -2,7 +2,7 @@
 
 use crate::element::builders::ListBuilder;
 use crate::element::{IntoAnnotatedElement, List, SExp, Value};
-use crate::ion_diff::{ChangeListener, Diffable, Key};
+use crate::ion_diff::{ChangeListener, Key};
 use crate::{ion_struct, Element, IonType, Symbol};
 
 /// Identifies a type of change at a given Key path, for use with the [DefaultChangeListener].

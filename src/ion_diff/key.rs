@@ -1,10 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates.
 
 use crate::element::Value;
-use crate::{Element, Symbol};
-use std::cmp::Ordering;
+use crate::Symbol;
 use std::fmt;
-use crate::ion_diff::ord_element::OrdElement;
 
 /// A representation of all key types typical Value types will assume.
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
