@@ -108,7 +108,7 @@
 //! ## Traversing an `Element`
 //!
 //! ```
-//! use ion_rs::IonResult;
+//! # use ion_rs::IonResult;
 //! # fn main() -> IonResult<()> {
 //! use ion_rs::element::{Element, IntoAnnotatedElement,  Value};
 //! use ion_rs::{ion_struct, ion_list};
@@ -135,7 +135,7 @@
 //! ## Writing an `Element` to an `io::Write`
 //!
 //! ```
-//! use ion_rs::IonResult;
+//! # use ion_rs::IonResult;
 //! # fn main() -> IonResult<()> {
 //! use ion_rs::element::{Element, IntoAnnotatedElement,  Value};
 //! use ion_rs::{ion_struct, ion_list, TextWriterBuilder, IonWriter};
@@ -176,10 +176,14 @@ mod ion_data;
 #[cfg(feature = "ion-hash")]
 pub mod ion_hash;
 
+#[cfg(feature = "ion-diff")]
+pub mod ion_diff;
+
 mod blocking_reader;
 mod catalog;
 // Public as a workaround for: https://github.com/amazon-ion/ion-rust/issues/484
 pub mod constants;
+pub mod ion_eq;
 mod raw_symbol_token;
 mod raw_symbol_token_ref;
 // Public as a workaround for: https://github.com/amazon-ion/ion-rust/issues/484
@@ -191,7 +195,6 @@ mod symbol_ref;
 mod symbol_table;
 mod system_reader;
 mod writer;
-mod ion_diff;
 
 #[doc(inline)]
 pub use data_source::IonDataSource;

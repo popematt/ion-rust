@@ -1,85 +1,24 @@
 // Copyright Amazon.com, Inc. or its affiliates.
 
-use std::cmp::{max, min, Ordering};
-use crate::element::{IonSequence, List, SExp, Struct, Value};
-use crate::ion_diff::{ContainedElements, ContainsElements, ChangeListener, Diffable, Key};
+use std::cmp::Ordering;
+use crate::ion_diff::{ChangeListener, Diffable, Key};
 use crate::{Element, IonType, Symbol};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Deref;
-use similar::{Algorithm, capture_diff_slices, DiffOp};
+use crate::ion_diff::diff::patience::{Diff, Equal, Unequal};
 use crate::ion_diff::ord_element::OrdElement;
-
-impl ContainsElements for Struct {
-    fn get_children<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, &'a Element)> + 'a> {
-        Box::new(self.fields().map(|(k, v)| (k.into(), v)))
-    }
-}
-
-// impl<T: IonSequence> ContainsElements for T {
-//     fn get_children<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, &'a Element)> + 'a> {
-//         Box::new(self.elements().enumerate().map(|(k, v)| (k.into(), v)))
-//     }
-// }
-// impl <I: IntoIterator<Item = Element>> ContainsElements for I {
-//     fn get_children<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, &'a Element)> + 'a> {
-//         Box::new(&self.into_iter().enumerate().map(|(k, v)| (k.into(), &v)))
-//     }
-// }
-
-
-fn maybe_get_children(value: &Value) -> Option<ContainedElements> {
-    match value {
-        Value::SExp(sexp) => Some(Box::new(sexp.elements().enumerate().map(|(k, v)| (k.into(), v)))),
-        Value::List(list) => Some(Box::new(list.elements().enumerate().map(|(k, v)| (k.into(), v)))),
-        Value::Struct(struct_) => Some(struct_.get_children()),
-        _ => None,
-    }
-}
 
 impl Diffable for Element {
     fn diff_with_delegate<'a, D: ChangeListener<'a>>(d: &mut D, left: &'a Self, right: &'a Self) {
         diff_element(left, right, d);
     }
 }
-impl <T: ContainsElements> Diffable for T {
+
+impl Diffable for Vec<&Element> {
     fn diff_with_delegate<'a, D: ChangeListener<'a>>(d: &mut D, left: &'a Self, right: &'a Self) {
-        let li = left.get_children();
-        let ri = right.get_children();
-        diff_children(li, ri, d)
+        diff_sequence(&left, &right, d);
     }
 }
 
-fn diff_element3<'a, D>(l: &'a Element, r: &'a Element, d: &mut D)
-    where
-        D: ChangeListener<'a>,
-{
-    let l_items: Option<Box<dyn Iterator<Item = (Key, &Element)>>> = maybe_get_children(l.value());
-    let r_items: Option<Box<dyn Iterator<Item = (Key, &Element)>>> = maybe_get_children(r.value());
-
-    match (l_items, r_items) {
-        // two scalars, equal
-        (None, None) if l == r => d.unchanged(l),
-        // two scalars, different
-        (None, None) => {
-            diff_annotations(l, r, d);
-            if l.value() != r.value() {
-                d.value_modified(l.value(), r.value())
-            }
-        }
-        // two containers, equal
-        (Some(_), Some(_)) if l == r => d.unchanged(l),
-        // container and scalar
-        (Some(_), None) | (None, Some(_)) => {
-            diff_annotations(l, r, d);
-            d.value_modified(l.value(), r.value())
-        }
-        // two containers, different
-        (Some(li), Some(ri)) => {
-            diff_children(li, ri, d);
-            diff_annotations(l, r, d);
-        }
-    }
-}
 
 fn diff_element<'a, D>(l: &'a Element, r: &'a Element, d: &mut D)
     where
@@ -91,7 +30,7 @@ fn diff_element<'a, D>(l: &'a Element, r: &'a Element, d: &mut D)
         (_, _) if l == r => d.unchanged(l),
         (IonType::SExp, IonType::SExp) |
         (IonType::List, IonType::List) => {
-            diff_sequence(l.as_sequence().unwrap().elements().collect(), r.as_sequence().unwrap().elements().collect(), d);
+            diff_sequence(&l.as_sequence().unwrap().elements().collect(), &r.as_sequence().unwrap().elements().collect(), d);
         }
         (IonType::Struct, IonType::Struct) => {
             diff_fields(l.as_struct().unwrap().fields(), r.as_struct().unwrap().fields(), d);
@@ -110,34 +49,6 @@ fn diff_annotations<'a, D: ChangeListener<'a>>(l: &'a Element, r: &'a Element, d
     let ra: Vec<_> = r.annotations().cloned().collect();
     if la != ra {
         d.annotations_modified(la, ra);
-    }
-}
-
-fn diff_children<'a, D: ChangeListener<'a>>(
-    li: ContainedElements<'a>,
-    ri: ContainedElements<'a>,
-    d: &mut D,
-) {
-    let mut sl: BTreeSet<OrdByKey> = BTreeSet::new();
-    sl.extend(li.map(Into::into));
-
-    let mut sr: BTreeSet<OrdByKey> = BTreeSet::new();
-    sr.extend(ri.map(Into::into));
-
-    for k in sr.intersection(&sl) {
-        let v1 = sl.get(k).expect("intersection to work");
-        let v2 = sr.get(k).expect("intersection to work");
-        d.push(&k.0);
-        diff_element(v1.1.into(), v2.1.into(), d);
-        d.pop();
-    }
-    // Possible modifications
-
-    for k in sr.difference(&sl) {
-        d.added(&k.0, sr.get(k).expect("difference to work").1.into());
-    }
-    for k in sl.difference(&sr) {
-        d.removed(&k.0, sl.get(k).expect("difference to work").1.into());
     }
 }
 
@@ -163,17 +74,23 @@ fn diff_fields<'a, I: Iterator<Item = (&'a Symbol, &'a Element)> + 'a, D: Change
 
     for field_name in all_keys {
         let k: Key = field_name.into();
-        match (sl.get(field_name), sr.get(field_name)) {
-            (Some(lv), Some(mut rv)) => {
-                diff_for_field_name(field_name, lv, rv, d);
+        match (sl.remove(field_name), sr.remove(field_name)) {
+            (Some(mut lv), Some(mut rv)) => {
+                if lv.len() == 1 && rv.len() == 1 {
+                    d.push(&k);
+                    diff_element(lv.pop().unwrap().into(), rv.pop().unwrap().into(), d);
+                    d.pop();
+                } else {
+                    diff_for_repeated_field_name(field_name, &lv, &rv, d);
+                }
             }
             (Some(lv), None) => {
-                for &x in lv {
+                for x in lv {
                     d.removed(&k, x.into());
                 }
             }
             (None, Some(rv)) => {
-                for &x in rv {
+                for x in rv {
                     d.added(&k, x.into());
                 }
             }
@@ -182,12 +99,12 @@ fn diff_fields<'a, I: Iterator<Item = (&'a Symbol, &'a Element)> + 'a, D: Change
     }
 }
 
-fn diff_for_field_name<'a, 'b, D: ChangeListener<'a>>(field_name: &'a Symbol, lv: &'b Vec<OrdElement<'a>>, rv: &'b Vec<OrdElement<'a>>, d: &mut D) {
+fn diff_for_repeated_field_name<'a, 'b, D: ChangeListener<'a>>(field_name: &'a Symbol, lv: &'b Vec<OrdElement<'a>>, rv: &'b Vec<OrdElement<'a>>, d: &mut D) {
+    let k: Key = field_name.into();
     let mut l_iter = lv.iter();
     let mut r_iter = rv.iter();
     let mut l_curr = l_iter.next();
     let mut r_curr = r_iter.next();
-    let k: Key = field_name.into();
     loop {
         match (l_curr, r_curr) {
             (None, None) => { return; }
@@ -227,27 +144,459 @@ fn diff_for_field_name<'a, 'b, D: ChangeListener<'a>>(field_name: &'a Symbol, lv
 }
 
 fn diff_sequence<'a, D: ChangeListener<'a>>(
-    li: Vec<&'a Element>,
-    ri: Vec<&'a Element>,
+    li: &Vec<&'a Element>,
+    ri: &Vec<&'a Element>,
     d: &mut D,
 ) {
-    for i in 0..max(li.len(), ri.len()) {
-        match (li.get(i), ri.get(i)) {
-            (Some(&l), Some(&r)) => {
-                d.push(&i.into());
-                diff_element(l, r, d);
-                d.pop();
+    let l_ord_elements: Vec<OrdElement> = li.iter().map(OrdElement::from).collect();
+    let r_ord_elements: Vec<OrdElement> = ri.iter().map(OrdElement::from).collect();
+
+    let diff_chunks = patience::patience_diff(l_ord_elements.as_slice(), r_ord_elements.as_slice());
+
+    for chunk in diff_chunks {
+        match chunk {
+            Diff::Equal(Equal { l_start, r_start, len }) => {
+                if l_start == r_start {
+                    for i in 0..len {
+                        d.push(&i.into());
+                        d.unchanged(li.get(l_start + i).unwrap());
+                        d.pop()
+                    }
+                } else {
+                    for i in 0..len {
+                        d.moved(&(i + l_start).into(), &(i + r_start).into(), li.get(i + l_start).unwrap());
+                    }
+                }
             }
-            (Some(&l), None) => d.removed(&i.into(), l),
-            (None, Some(&r)) => d.added(&i.into(), r),
-            (None, None) => {
-                unreachable!("We can't go past the end of both lists.")
+            Diff::Unequal(Unequal { l_start, l_len, r_start, r_len }) => {
+                // TODO: heuristics (maybe _another_ patience-style diff) to see if there are similar
+                // items (i.e. only the annotations have changed, or a single field was added to a nested struct)
+                if l_len != r_len {
+                    for i in l_start..(l_start + l_len) {
+                        d.removed(&i.into(), li.get(i).unwrap());
+                    }
+                    for i in r_start..(r_start + r_len) {
+                        d.added(&i.into(), ri.get(i).unwrap());
+                    }
+                } else {
+                    for i in 0..l_len {
+                        d.push(&(i + l_start).into());
+                        diff_element(li.get(i + l_start).unwrap(), ri.get(i + r_start).unwrap(), d);
+                        d.pop();
+                        if l_start != r_start {
+                            d.moved(&(i + l_start).into(), &(i + r_start).into(), ri.get(i + r_start).unwrap())
+                        }
+                    }
+                }
+
             }
         }
     }
 }
 
 
+// 1. Match the first lines of both if they're identical, then match the second, third, etc. until a pair doesn't match.
+// 2. Match the last lines of both if they're identical, then match the next to last, second to last, etc. until a pair doesn't match.
+// 3. Find all lines which occur exactly once on both sides, then do longest common subsequence on those lines, matching them up.
+// 4. Do steps 1-2 on each section between matched lines
+mod patience {
+    use std::cmp::{max, min, Ordering};
+    use std::collections::BTreeMap;
+
+    #[derive(Default, Debug)]
+    struct MatchCounts {
+        l_count: usize,
+        r_count: usize,
+        l_line: Option<usize>,
+        r_line: Option<usize>,
+    }
+
+    #[derive(PartialEq, Debug, Clone, Copy)]
+    struct MatchedIndices(usize, usize);
+    impl PartialOrd for MatchedIndices {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            match (self.0.cmp(&other.0), self.1.cmp(&other.1)) {
+                (x, y) if x == y => Some(x),
+                (_, _) => None,
+            }
+        }
+    }
+
+    #[derive(PartialEq, PartialOrd, Ord,Eq, Debug, Copy, Clone)]
+    pub struct Equal {
+        pub l_start: usize,
+        pub r_start: usize,
+        pub len: usize,
+    }
+    #[derive(PartialEq, Debug, Copy, Clone)]
+    pub struct Unequal {
+        pub l_start: usize,
+        pub l_len: usize,
+        pub r_start: usize,
+        pub r_len: usize,
+    }
+    #[derive(PartialEq, Debug, Copy, Clone)]
+    pub enum Diff {
+        Equal(Equal),
+        Unequal(Unequal),
+    }
+
+    pub fn patience_diff<T: Ord>(l: &[T], r: &[T]) -> Vec<Diff> {
+
+        // Deal with some trivial cases
+        // Both empty
+        if l.is_empty() && r.is_empty() {
+            return vec![]
+        }
+        // One empty
+        if l.is_empty() || r.is_empty() {
+            return vec![
+                Diff::Unequal(Unequal {
+                    l_start: 0,
+                    l_len: l.len(),
+                    r_start: 0,
+                    r_len: r.len(),
+                })
+            ]
+        }
+
+        let mut equal_sections: Vec<Equal> = vec![];
+        if l[0] == r[0] {
+            // Find longest common subsequence from start
+            let start_lcs = find_longest_common_subsequence_for_position((0, 0), l, r);
+            let Equal { len: start_lcs_len, .. } = start_lcs.clone();
+
+            // If both sides equal, return now.
+            if start_lcs_len == r.len() && start_lcs_len == l.len() {
+                return vec![Diff::Equal(start_lcs)];
+            }
+
+            // If one side is append only at end, add Unequal and return
+            if start_lcs_len == r.len() || start_lcs_len == l.len() {
+                return vec![
+                    Diff::Equal(start_lcs),
+                    Diff::Unequal(Unequal {
+                        l_start: start_lcs_len,
+                        l_len: l.len() - start_lcs_len,
+                        r_start: start_lcs_len,
+                        r_len: r.len() - start_lcs_len,
+                    })
+                ];
+            }
+
+            equal_sections.push(start_lcs)
+        }
+        if l[l.len() - 1] == r[r.len() - 1] {
+            let end_lcs = find_longest_common_subsequence_for_position((l.len() - 1, r.len() - 1), l, r);
+            equal_sections.push(end_lcs);
+        }
+
+        // Find unique matches
+        let unique_matches = find_unique_matching_elements(l, r);
+        // This is the patience part of the patience diff -- find the longest increasing subsequence of unique matches
+        let longest_increasing_unique_matches = longest_increasing_subsequence(unique_matches);
+
+        // Turn the unique matches into longest matching subsequence
+        for m in longest_increasing_unique_matches {
+            if !is_in_any_diff_range(&m, &equal_sections) {
+                let MatchedIndices(a, b) = m;
+                equal_sections.push(find_longest_common_subsequence_for_position((a, b), l, r))
+            }
+        }
+        equal_sections.sort();
+
+        if equal_sections.is_empty() {
+            return vec![
+                Diff::Unequal(Unequal {
+                    l_start: 0,
+                    l_len: l.len(),
+                    r_start: 0,
+                    r_len: r.len(),
+                })
+            ]
+        }
+
+        // Now we go and create the [Unequal]s to fill in the gaps between the [Equal]s.
+        // Also clean up any overlapping equal sequences. (E.g. "abcde" and "abcd_bcde")
+        let mut chunks_iter = equal_sections.iter();
+        let mut previous = Equal { l_start: 0, r_start: 0, len: 0 };
+        let mut diffs: Vec<Diff> = vec![];
+        while let Some(current) = chunks_iter.next() {
+            let l_unequal_len: isize = (current.l_start - (previous.l_start + previous.len)) as isize;
+            let r_unequal_len: isize = (current.r_start - (previous.r_start + previous.len)) as isize;
+            if previous.len > 0 {
+                diffs.push(Diff::Equal(previous.clone()));
+            }
+            if l_unequal_len > 0 || r_unequal_len > 0 {
+                diffs.push(Diff::Unequal(Unequal{
+                    l_start: previous.l_start + previous.len,
+                    l_len: max(l_unequal_len, 0) as usize,
+                    r_start: previous.r_start + previous.len,
+                    r_len: max(r_unequal_len, 0) as usize,
+                }))
+            }
+            previous = if l_unequal_len < 0 || r_unequal_len < 0 {
+                let overlap_correction = min(l_unequal_len, r_unequal_len).abs() as usize;
+                let Equal { l_start, r_start, len }  = current;
+                Equal {
+                    l_start: l_start + overlap_correction,
+                    r_start: r_start + overlap_correction,
+                    len: len - overlap_correction,
+                }
+            } else {
+                *current
+            };
+        }
+        let l_unequal_len = l.len() - (previous.l_start + previous.len);
+        let r_unequal_len = r.len() - (previous.r_start + previous.len);
+        diffs.push(Diff::Equal(previous));
+        if l_unequal_len > 0 || r_unequal_len > 0 {
+            diffs.push(Diff::Unequal(Unequal{
+                l_start: previous.l_start + previous.len,
+                l_len: max(l_unequal_len, 0),
+                r_start: previous.r_start + previous.len,
+                r_len: max(r_unequal_len, 0),
+            }))
+        }
+        diffs
+    }
+
+    fn is_in_any_diff_range(m: &MatchedIndices, diffs: &Vec<Equal>) -> bool {
+        for d in diffs {
+            if d.l_start <= m.0 && m.0 < d.l_start + d.len {
+                return true;
+            }
+            if d.r_start <= m.1 && m.1 < d.r_start + d.len {
+                return true;
+            }
+        }
+        false
+    }
+
+    mod test_patience_diff {
+            use rstest::*;
+            use crate::ion_diff::diff::patience::{Diff, Equal, patience_diff, Unequal};
+
+        #[rstest]
+        #[case::empty("", "", "\n")]
+        #[case::equal("abc", "abc", "abc\nabc")]
+        #[case::entirely_unequal("abc", "def", "abc   \n   def")]
+        #[case::add_in_middle("abcd", "abXcd", "ab cd\nabXcd")]
+        #[case::append("abcd", "abcdefg", "abcd   \nabcdefg")]
+        #[case::prepend("defg", "abcdefg", "   defg\nabcdefg")]
+        #[case::add_all("", "abcdefg", "       \nabcdefg")]
+        #[case::delete_beginning("abcdefg", "defg", "abcdefg\n   defg")]
+        #[case::delete_end("abcdefg", "abcd", "abcdefg\nabcd   ")]
+        #[case::delete_middle("abcdefg", "abfg", "abcdefg\nab   fg")]
+        #[case::delete_all("abcde", "", "abcde\n     ")]
+        fn test_p_diff(#[case] left: &str, #[case] right: &str, #[case] expected: &str) {
+            let result = patience_diff(left.as_bytes(), right.as_bytes());
+
+            println!("{result:?}");
+
+            let o = left.chars().collect::<Vec<_>>();
+            let n = right.chars().collect::<Vec<_>>();
+            let mut old = String::new();
+            let mut new = String::new();
+            let mut d = String::new();
+            for chunk in result {
+                match chunk {
+                    Diff::Equal(Equal { l_start, r_start, len }) => {
+                        for i in 0..len {
+                            old.push(*o.get(l_start + i).unwrap());
+                            new.push(*n.get(r_start + i).unwrap());
+                            d.push(' ');
+                        }
+                    }
+                    Diff::Unequal(Unequal { l_start, l_len, r_start, r_len }) => {
+                        for i in 0..l_len {
+                            old.push(*o.get(l_start + i).unwrap());
+                            new.push(' ');
+                            d.push('-');
+                        }
+                        for i in 0..r_len {
+                            new.push(*n.get(r_start + i).unwrap());
+                            old.push(' ');
+                            d.push('+');
+                        }
+                    }
+                }
+            }
+
+            // println!("\x1b[93mError\x1b[0m");
+
+            println!("{old}\n{d}\n{new}");
+            assert_eq!(expected, format!("{old}\n{new}"));
+        }
+    }
+
+
+    fn longest_increasing_subsequence<T: PartialOrd + Clone, I: IntoIterator<Item = T>>(vals: I) -> Vec<T> {
+        let mut vals_iter = vals.into_iter();
+        let mut stacks : Vec<Vec<(T, usize)>> = if let Some(x) = vals_iter.next() {
+            vec![vec![(x, 0)]]
+        } else {
+            return vec![];
+        };
+        'outer: for x in vals_iter {
+            let mut p = 0;
+            for s in &mut stacks {
+                let (top, _) = s.last().unwrap();
+                if &x < top {
+                    s.push((x.clone(), p));
+                    continue 'outer;
+                }
+                p = s.len() - 1;
+            }
+            stacks.push(vec![(x, p)]);
+        }
+
+        let mut sub_sequence = vec![];
+        let mut stacks_iter = stacks.iter().rev();
+        let (value, mut p) = stacks_iter.next().unwrap().last().cloned().unwrap();
+        sub_sequence.push(value);
+        for s in stacks_iter {
+            let (value, p0) = s.get(p).unwrap();
+            p = *p0;
+            sub_sequence.push(value.clone());
+        }
+        sub_sequence.reverse();
+        sub_sequence
+    }
+
+    mod test_longest_increasing_subsequence {
+        use rstest::*;
+        use crate::ion_diff::diff::patience::longest_increasing_subsequence;
+
+        #[rstest]
+        #[case::foo(&[], vec![])]
+        #[case::foo(&[1], vec![1])]
+        #[case::foo(&[1, 2], vec![1, 2])]
+        #[case::foo(&[1, 3, 2], vec![1, 2])]
+        #[case::foo(&[1, 3, 2, 8, 0, 9, 5, 4, 6, 7], vec![1, 2, 4, 6, 7])]
+        #[case::foo(
+            &[9, 4, 6, 12, 8, 7, 1, 5, 10, 11, 3, 2, 13],
+            vec![4, 6, 7, 10, 11, 13]
+        )]
+        fn test_lis(#[case] vals: &[u8], #[case] expected: Vec<u8>) {
+            let result = longest_increasing_subsequence::<u8, _>(vals.to_owned());
+            assert_eq!(expected, result);
+        }
+    }
+
+
+    fn build_patience_sort_stacks<T: PartialOrd + Clone, I: IntoIterator<Item = T>>(vals: I) -> Vec<Vec<T>> {
+        let mut vals_iter = vals.into_iter();
+        let mut stacks : Vec<Vec<T>> = if let Some(x) = vals_iter.next() {
+            vec![vec![x]]
+        } else {
+            return vec![];
+        };
+        'outer: for m in vals_iter {
+            for s in &mut stacks {
+                if &m < s.last().unwrap() {
+                    s.push(m.clone());
+                    continue 'outer;
+                }
+            }
+            stacks.push(vec![m]);
+        }
+        return stacks;
+    }
+
+    mod test_patience_sort_stacks {
+        use rstest::*;
+        use crate::ion_diff::diff::patience::build_patience_sort_stacks;
+
+        #[rstest]
+        #[case::foo(&[], vec![])]
+        #[case::foo(&[1], vec![vec![1]])]
+        #[case::foo(&[1, 2], vec![vec![1], vec![2]])]
+        #[case::foo(&[1, 3, 2], vec![vec![1], vec![3, 2]])]
+        #[case::foo(&[1, 3, 2, 8, 0, 9, 5, 4, 6, 7], vec![vec![1, 0], vec![3, 2], vec![8, 5, 4], vec![9, 6], vec![7]])]
+        #[case::foo(
+            &[9, 4, 6, 12, 8, 7, 1, 5, 10, 11, 3, 2, 13],
+            vec![vec![9, 4, 1], vec![6, 5, 3, 2], vec![12, 8, 7], vec![10], vec![11], vec![13]]
+        )]
+        fn test_patience(#[case] vals: &[u8], #[case] expected: Vec<Vec<u8>>) {
+            let result = build_patience_sort_stacks::<u8, _>(vals.to_owned());
+            assert_eq!(expected, result);
+        }
+    }
+
+    fn find_longest_common_subsequence_for_position<T: Ord>(pos: (usize, usize), l: &[T], r: &[T]) -> Equal {
+        let (mut l_start, mut r_start) = pos;
+        if  l[l_start] != r[r_start] {
+            panic!("Precondition not met! l[l_start] != r[r_start]")
+        }
+
+        let mut len = 1usize;
+        while l_start > 0 && r_start > 0 {
+            if  l[l_start - 1] == r[r_start - 1] {
+                l_start -= 1;
+                r_start -= 1;
+                len += 1;
+            } else {
+                break;
+            }
+        }
+        while l_start + len < l.len() && r_start + len < r.len() {
+            if  l[l_start + len] == r[r_start + len] {
+                len += 1;
+            } else {
+                break;
+            }
+        }
+        Equal { l_start, r_start, len }
+    }
+
+    mod lcs_tests {
+        use crate::ion_diff::diff::patience::{Equal, find_longest_common_subsequence_for_position};
+        use rstest::*;
+
+        #[rstest]
+        #[case::foo(4, 1, 4, (4, 1), "----abcd--", "_abcd__")]
+        #[case::foo(4, 1, 4, (5, 2), "----abcd--", "_abcd__")]
+        #[case::foo(4, 1, 4, (6, 3), "----abcd--", "_abcd__")]
+        #[case::foo(4, 1, 4, (7, 4), "----abcd--", "_abcd__")]
+        #[case::foo(0, 1, 4, (0, 1), "abcd--", "_abcd__")]
+        #[case::foo(2, 1, 4, (2, 1), "--abcd", "_abcd__")]
+        #[case::foo(2, 3, 4, (3, 4), "--abcd-", "___abcd")]
+        #[case::foo(2, 0, 4, (3, 1), "--abcd-", "abcd___")]
+        fn test_lcs(#[case] l_start: usize, #[case] r_start: usize, #[case] len: usize, #[case] pos: (usize, usize), #[case] l: &str, #[case] r: &str) {
+            let a = l.as_bytes();
+            let b = r.as_bytes();
+            let d1 = find_longest_common_subsequence_for_position(pos, a, b);
+            let expected = Equal { l_start, r_start, len, };
+            assert_eq!(expected, d1);
+        }
+    }
+
+    fn find_unique_matching_elements<T: Ord>(l: &[T], r: &[T]) -> Vec<MatchedIndices> {
+        let mut counts = BTreeMap::<&T, MatchCounts>::new();
+
+        for (i, e) in l.iter().enumerate() {
+            let mut match_info = counts.entry(e).or_default();
+            match_info.l_count += 1;
+            if match_info.l_line.is_none() {
+                match_info.l_line = Some(i);
+            }
+        }
+
+        for (i, e) in r.iter().enumerate() {
+            let mut match_info = counts.entry(e).or_default();
+            match_info.r_count += 1;
+            if match_info.r_line.is_none() {
+                match_info.r_line = Some(i);
+            }
+        }
+
+        counts.into_iter()
+            .filter(|(_, c)| c.l_count == 1 && c.r_count == 1)
+            .map(|(_, c)| MatchedIndices(c.l_line.unwrap(), c.r_line.unwrap()))
+            .collect()
+    }
+}
 
 
 /// A struct that allows us to use a BTreeSet as an associative array but still take advantage of
