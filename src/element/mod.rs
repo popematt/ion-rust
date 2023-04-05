@@ -20,10 +20,13 @@ use crate::element::reader::ElementReader;
 use crate::ion_eq::IonEq;
 use crate::symbol_ref::AsSymbolRef;
 use crate::text::text_formatter::IonValueFormatter;
-use crate::{Decimal, Int, IonResult, IonType, ReaderBuilder, Symbol, Timestamp};
+use crate::{Decimal, Int, IonError, IonResult, IonType, ReaderBuilder, Symbol, Timestamp};
 use num_bigint::BigInt;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::io;
+use crate::IonError::IoError;
+use crate::result::{decoding_error, decoding_error_raw};
 
 pub mod builders;
 mod element_stream_reader;
@@ -553,7 +556,100 @@ pub struct Element {
     value: Value,
 }
 
+#[test]
+fn foo1() {
+    let element = Element::read_one("foo::1").unwrap();
+    match element.spread().unwrap() {
+        ([None, None], _) => println!("An unannotated value!"),
+        (_, Value::Null(_)) => println!("A null value!"),
+        ([Some("foo"), None], value) => println!("A foo value: {value}"),
+        ([Some("foo"), Some("bar")], value) => println!("A foo value: {value}"),
+        _ => println!("Something else!")
+    };
+}
+
+#[test]
+fn foo2() {
+    let element = Element::read_one("foo::1").unwrap();
+    let (ann, val) = element.spread_with_vec().unwrap();
+    match (ann.as_slice(), val) {
+        ([], _) => println!("An unannotated value!"),
+        (_, Value::Null(_)) => println!("A null value!"),
+        (["foo"], value) => println!("A foo value: {value}"),
+        (["foo", "bar"], value) => println!("A foo value: {value}"),
+        _ => println!("Something else!")
+    };
+}
+
+macro_rules! element_spread {
+    (match $subject:ident { $($tt:tt)+ }) => {
+        {
+            match $subject.spread_with_vec() {
+                Ok((ann, val)) => Ok(match (ann.as_slice(), val) { $($tt)+ }),
+                Err(e) => Err(e),
+            }
+        }
+    };
+}
+
+#[test]
+fn foo3() {
+    let element = Element::read_one("foo::1").unwrap();
+    let (ann, val) = element.spread_with_vec().unwrap();
+    let d = match (ann.as_slice(), val) {
+        ([], _) => 1,
+        (_, Value::Null(_)) => 2,
+        (["foo"], value) => 3,
+        (["foo", "bar"], value) => 4,
+        _ => 5,
+    };
+    let element2 = Element::read_one("foo::1").unwrap();
+}
+
+
 impl Element {
+
+    /// Returns a result of a tuple of up to N annotations and the contained value.
+    /// If any annotations have unknown text, returns an Err.
+    /// ```
+    /// use ion_rs::element::Value;
+    /// let image_processing_result = match element.spread()? {
+    ///     ([Some("png"), None], Value::Blob(bytes)) => handle_png(bytes),
+    ///     ([Some("jpg"), None], Value::Blob(bytes)) => handle_jpg(bytes),
+    ///     ([None, _], Value::Blob(bytes)) => handle_raw(bytes),
+    ///     _ => Err("Unknown image format"),
+    /// };
+    /// ```
+    fn spread<const N: usize>(&self) -> IonResult<([Option<&str>; N], &Value)> {
+        let mut array: [Option<&str>; N] = [None; N];
+        let mut annotations = self.annotations.iter().map(Symbol::text_or_error);
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..N {
+            array[i] = annotations.next().transpose()?;
+        }
+        Ok((array, &self.value))
+    }
+
+    fn spread_exact<const N: usize>(&self) -> IonResult<([&str; N], &Value)> {
+        let mut array: [&str; N] = [""; N];
+        let mut annotations = self.annotations.iter();
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..N {
+            array[i] = annotations.next().ok_or(decoding_error_raw(format!("element had {i} annotations, expected {N}")))?
+                .text_or_error()?;
+        }
+        if annotations.next().is_some() {
+            decoding_error(format!("element has more than {N} annotations"))
+        } else {
+            Ok((array, &self.value))
+        }
+    }
+
+    fn spread_with_vec(&self) -> IonResult<(Vec<&str>, &Value)> {
+        let vec: Result<Vec<_>, _> = self.annotations.iter().map(Symbol::text_or_error).collect();
+        Ok((vec?, &self.value))
+    }
+
     pub fn new(annotations: Vec<Symbol>, value: Value) -> Self {
         Self { annotations, value }
     }
