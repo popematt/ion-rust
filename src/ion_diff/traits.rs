@@ -1,9 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates.
 
 use crate::element::Value;
+use crate::ion_diff::recorder::{ChangeType, DefaultChangeListener};
 use crate::ion_diff::Key;
 use crate::{Element, Symbol};
-use crate::ion_diff::recorder::{ChangeType, DefaultChangeListener};
 
 pub trait Diffable {
     fn diff_with_delegate<'a, D: ChangeListener<'a>>(d: &mut D, left: &'a Self, right: &'a Self);

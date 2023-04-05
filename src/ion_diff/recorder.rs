@@ -18,8 +18,9 @@ pub enum ChangeType<'a> {
     ValueModified(Vec<Key>, &'a Value, &'a Value),
     /// The annotations on the value were modified
     AnnotModified(Vec<Key>, Vec<Symbol>, Vec<Symbol>),
-
-    IndexModified(Vec<Key>, Vec<Key>, &'a Element)
+    /// The value was moved to a new position in a list or sexp (because an element was added
+    /// or removed prior to this element in the list or sexp).
+    IndexModified(Vec<Key>, Vec<Key>, &'a Element),
 }
 
 impl<'a> From<Vec<&'a ChangeType<'a>>> for Element {
@@ -143,7 +144,7 @@ pub struct DefaultChangeListener<'a> {
     /// A list of all calls the `diff` function made on us.
     pub calls: Vec<ChangeType<'a>>,
 }
-impl <'a> DefaultChangeListener<'a> {
+impl<'a> DefaultChangeListener<'a> {
     fn make_path_to(&self, k: &Key) -> Vec<Key> {
         let mut c: Vec<Key> = Vec::with_capacity(self.cursor.len() + 1);
         c.extend_from_slice(self.cursor.as_slice());
@@ -190,15 +191,13 @@ impl<'a> ChangeListener<'a> for DefaultChangeListener<'a> {
     }
     fn annotations_modified(&mut self, v1: Vec<Symbol>, v2: Vec<Symbol>) {
         self.calls
-            .push(ChangeType::AnnotModified(self.current_path(), v1, v2, ));
+            .push(ChangeType::AnnotModified(self.current_path(), v1, v2));
     }
     fn moved<'b>(&mut self, _old_location: &'b Key, _new_location: &'b Key, _value: &'a Element) {
-        self.calls.push(
-            ChangeType::IndexModified(
-                self.make_path_to(_old_location),
-                self.make_path_to(_new_location),
-                _value
-            )
-        );
+        self.calls.push(ChangeType::IndexModified(
+            self.make_path_to(_old_location),
+            self.make_path_to(_new_location),
+            _value,
+        ));
     }
 }
