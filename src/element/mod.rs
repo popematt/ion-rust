@@ -31,6 +31,7 @@ pub mod reader;
 mod sequence;
 mod sexp;
 mod r#struct;
+mod typed_element;
 pub mod writer;
 
 // Re-export the Value variant types and traits so they can be accessed directly from this module.
@@ -75,6 +76,26 @@ pub enum Value {
     SExp(Sequence),
     List(Sequence),
     Struct(Struct),
+}
+impl Value {
+    pub fn ion_type(&self) -> IonType {
+        use Value::*;
+        match &self {
+            Null(t) => *t,
+            Int(_) => IonType::Int,
+            Float(_) => IonType::Float,
+            Decimal(_) => IonType::Decimal,
+            Timestamp(_) => IonType::Timestamp,
+            String(_) => IonType::String,
+            Symbol(_) => IonType::Symbol,
+            Bool(_) => IonType::Bool,
+            Blob(_) => IonType::Blob,
+            Clob(_) => IonType::Clob,
+            SExp(_) => IonType::SExp,
+            List(_) => IonType::List,
+            Struct(_) => IonType::Struct,
+        }
+    }
 }
 
 impl Display for Value {
@@ -254,6 +275,7 @@ impl IonEq for Element {
 }
 
 /// An `(annotations, value)` pair representing an Ion value.
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Element {
     annotations: Annotations,
@@ -337,23 +359,7 @@ impl Element {
     }
 
     pub fn ion_type(&self) -> IonType {
-        use Value::*;
-
-        match &self.value {
-            Null(t) => *t,
-            Int(_) => IonType::Int,
-            Float(_) => IonType::Float,
-            Decimal(_) => IonType::Decimal,
-            Timestamp(_) => IonType::Timestamp,
-            String(_) => IonType::String,
-            Symbol(_) => IonType::Symbol,
-            Bool(_) => IonType::Bool,
-            Blob(_) => IonType::Blob,
-            Clob(_) => IonType::Clob,
-            SExp(_) => IonType::SExp,
-            List(_) => IonType::List,
-            Struct(_) => IonType::Struct,
-        }
+        self.value.ion_type()
     }
 
     pub fn annotations(&self) -> &Annotations {
