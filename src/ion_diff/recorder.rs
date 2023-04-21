@@ -1,6 +1,5 @@
 // Copyright Amazon.com, Inc. or its affiliates.
 
-use crate::element::builders::ListBuilder;
 use crate::element::{IntoAnnotatedElement, List, SExp, Value};
 use crate::ion_diff::{ChangeListener, Key};
 use crate::{ion_struct, Element, IonType, Symbol};
@@ -25,21 +24,21 @@ pub enum ChangeType<'a> {
 
 impl<'a> From<Vec<&'a ChangeType<'a>>> for Element {
     fn from(value: Vec<&'a ChangeType<'a>>) -> Self {
-        let mut lb = ListBuilder::new();
+        let mut lb = Element::sequence_builder();
         for v in value {
             lb = lb.push(v);
         }
-        lb.into()
+        lb.build_list().into()
     }
 }
 
 impl<'a> From<Vec<ChangeType<'a>>> for Element {
     fn from(value: Vec<ChangeType<'a>>) -> Self {
-        let mut lb = ListBuilder::new();
+        let mut lb = Element::sequence_builder();
         for v in value {
             lb = lb.push(v);
         }
-        lb.into()
+        lb.build_list().into()
     }
 }
 
@@ -53,82 +52,82 @@ impl<'a> From<&ChangeType<'a>> for Element {
     fn from(value: &ChangeType<'a>) -> Self {
         match value {
             ChangeType::Removed(k, v) => {
-                let mut path_builder = SExp::builder();
+                let mut path_builder = Element::sequence_builder();
                 for e in k {
                     path_builder = path_builder.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_builder.build(),
+                    "path": path_builder.build_sexp(),
                     "old": v.clone()
                 };
                 s.with_annotations(["removed"])
             }
             ChangeType::Added(k, v) => {
-                let mut path_builder = SExp::builder();
+                let mut path_builder = Element::sequence_builder();
                 for e in k {
                     path_builder = path_builder.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_builder.build(),
+                    "path": path_builder.build_sexp(),
                     "new": v.clone()
                 };
                 s.with_annotations(["added"])
             }
             ChangeType::Unchanged(k, v) => {
-                let mut path_builder = SExp::builder();
+                let mut path_builder = Element::sequence_builder();
                 for e in k {
                     path_builder = path_builder.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_builder.build(),
+                    "path": path_builder.build_sexp(),
                     "value": v.clone()
                 };
                 s.with_annotations(["unchanged"])
             }
             ChangeType::ValueModified(k, old, new) => {
-                let mut path_builder = SExp::builder();
+                let mut path_builder = Element::sequence_builder();
                 for e in k {
                     path_builder = path_builder.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_builder.build(),
+                    "path": path_builder.build_sexp(),
                     "old": (*old).clone(),
                     "new": (*new).clone()
                 };
                 s.with_annotations(["value_modified"])
             }
             ChangeType::AnnotModified(k, old, new) => {
-                let mut path_builder = SExp::builder();
+                let mut path_builder = Element::sequence_builder();
                 for e in k {
                     path_builder = path_builder.push(e);
                 }
-                let mut old_ann = List::builder();
-                for e in old {
-                    old_ann = old_ann.push(e.clone());
-                }
-                let mut new_ann = List::builder();
-                for e in new {
-                    new_ann = new_ann.push(e.clone());
-                }
+                // let mut old_ann = Element::sequence_builder();
+                // for e in old {
+                //     old_ann = old_ann.push(e.clone());
+                // }
+                // let mut new_ann = Element::sequence_builder();
+                // for e in new {
+                //     new_ann = new_ann.push(e.clone());
+                // }
                 let s = ion_struct! {
-                    "path": path_builder.build(),
+                    "path": path_builder.build_sexp(),
                     "old": Element::null(IonType::Null).with_annotations(old),
                     "new": Element::null(IonType::Null).with_annotations(new)
                 };
                 s.with_annotations(["annotations_modified"])
             }
             ChangeType::IndexModified(k1, k2, v) => {
-                let mut path_sexp_1 = SExp::builder();
+                let mut path_sexp_1 = Element::sequence_builder();
                 for e in k1 {
                     path_sexp_1 = path_sexp_1.push(e);
                 }
-                let mut path_sexp_2 = SExp::builder();
+                let mut path_sexp_2 = Element::sequence_builder();
                 for e in k2 {
                     path_sexp_2 = path_sexp_2.push(e);
                 }
                 let s = ion_struct! {
-                    "old_path": path_sexp_1.build(),
-                    "new_path": path_sexp_2.build(),
+                    "old_path": path_sexp_1.build_sexp(),
+                    "new_path": path_sexp_2.build_sexp(),
                     "value": v.clone()
                 };
                 s.with_annotations(["moved"])

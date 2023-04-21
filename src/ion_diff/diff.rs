@@ -1,11 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates.
 
 use crate::ion_diff::diff::patience::{Diff, Equal, Unequal};
-use crate::ion_diff::ord_element::OrdElement;
 use crate::ion_diff::{ChangeListener, Diffable, Key};
-use crate::{Element, IonType, Symbol};
+use crate::{Element, IonData, IonType, Symbol};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use crate::ion_data::IonDataAsRef;
 
 impl Diffable for Element {
     fn diff_with_delegate<'a, D: ChangeListener<'a>>(d: &mut D, left: &'a Self, right: &'a Self) {
@@ -51,8 +51,8 @@ where
 }
 
 fn diff_annotations<'a, D: ChangeListener<'a>>(l: &'a Element, r: &'a Element, d: &mut D) {
-    let la: Vec<_> = l.annotations().cloned().collect();
-    let ra: Vec<_> = r.annotations().cloned().collect();
+    let la: Vec<_> = l.annotations().iter().cloned().collect();
+    let ra: Vec<_> = r.annotations().iter().cloned().collect();
     if la != ra {
         d.annotations_modified(la, ra);
     }
@@ -63,12 +63,12 @@ fn diff_fields<'a, I: Iterator<Item = (&'a Symbol, &'a Element)> + 'a, D: Change
     ri: I,
     d: &mut D,
 ) {
-    let mut sl: BTreeMap<&Symbol, Vec<OrdElement>> = BTreeMap::new();
+    let mut sl: BTreeMap<&Symbol, Vec<IonDataAsRef<Element>>> = BTreeMap::new();
     for (k, element) in li {
         sl.entry(k).or_insert_with(Vec::new).push(element.into());
     }
     sl.iter_mut().for_each(|(_, vec)| vec.sort());
-    let mut sr: BTreeMap<&Symbol, Vec<OrdElement>> = BTreeMap::new();
+    let mut sr: BTreeMap<&Symbol, Vec<IonDataAsRef<Element>>> = BTreeMap::new();
     for (k, element) in ri {
         sr.entry(k).or_insert_with(Vec::new).push(element.into());
     }
@@ -84,7 +84,7 @@ fn diff_fields<'a, I: Iterator<Item = (&'a Symbol, &'a Element)> + 'a, D: Change
             (Some(mut lv), Some(mut rv)) => {
                 if lv.len() == 1 && rv.len() == 1 {
                     d.push(&k);
-                    diff_element(lv.pop().unwrap().into(), rv.pop().unwrap().into(), d);
+                    diff_element(lv.pop().unwrap().as_ref(), rv.pop().unwrap().as_ref(), d);
                     d.pop();
                 } else {
                     diff_for_repeated_field_name(field_name, &lv, &rv, d);
@@ -92,12 +92,12 @@ fn diff_fields<'a, I: Iterator<Item = (&'a Symbol, &'a Element)> + 'a, D: Change
             }
             (Some(lv), None) => {
                 for x in lv {
-                    d.removed(&k, x.into());
+                    d.removed(&k, x.as_ref());
                 }
             }
             (None, Some(rv)) => {
                 for x in rv {
-                    d.added(&k, x.into());
+                    d.added(&k, x.as_ref());
                 }
             }
             (None, None) => unreachable!("The key must be in at least one of the maps"),
@@ -107,8 +107,8 @@ fn diff_fields<'a, I: Iterator<Item = (&'a Symbol, &'a Element)> + 'a, D: Change
 
 fn diff_for_repeated_field_name<'a, 'b, D: ChangeListener<'a>>(
     field_name: &'a Symbol,
-    lv: &'b Vec<OrdElement<'a>>,
-    rv: &'b Vec<OrdElement<'a>>,
+    lv: &'b Vec<IonDataAsRef<Element>>,
+    rv: &'b Vec<IonDataAsRef<Element>>,
     d: &mut D,
 ) {
     let k: Key = field_name.into();
@@ -122,29 +122,29 @@ fn diff_for_repeated_field_name<'a, 'b, D: ChangeListener<'a>>(
                 return;
             }
             (Some(&v), None) => {
-                d.removed(&k, v.into());
+                d.removed(&k, v.as_ref());
                 break;
             }
             (None, Some(&v)) => {
-                d.added(&k, v.into());
+                d.added(&k, v.as_ref());
                 break;
             }
             (Some(&l), Some(&r)) => {
                 let o = l.cmp(&r);
                 match o {
                     Ordering::Less => {
-                        d.removed(&k, l.into());
+                        d.removed(&k, l.as_ref());
                         l_curr = l_iter.next();
                     }
                     Ordering::Equal => {
                         d.push(&k);
-                        d.unchanged(r.into());
+                        d.unchanged(r.as_ref());
                         d.pop();
                         r_curr = r_iter.next();
                         l_curr = l_iter.next();
                     }
                     Ordering::Greater => {
-                        d.added(&k, r.into());
+                        d.added(&k, r.as_ref());
                         r_curr = r_iter.next();
                     }
                 }
@@ -155,10 +155,10 @@ fn diff_for_repeated_field_name<'a, 'b, D: ChangeListener<'a>>(
     // Only one of these iterators can still have anything left at this point.
 
     while let Some(&l) = l_iter.next() {
-        d.removed(&k, l.into())
+        d.removed(&k, l.as_ref())
     }
     while let Some(&r) = r_iter.next() {
-        d.added(&k, r.into())
+        d.added(&k, r.as_ref())
     }
 }
 
@@ -167,8 +167,8 @@ fn diff_sequence<'a, D: ChangeListener<'a>>(
     ri: &Vec<&'a Element>,
     d: &mut D,
 ) {
-    let l_ord_elements: Vec<OrdElement> = li.iter().map(OrdElement::from).collect();
-    let r_ord_elements: Vec<OrdElement> = ri.iter().map(OrdElement::from).collect();
+    let l_ord_elements: Vec<IonDataAsRef<Element>> = li.into_iter().cloned().map(IonDataAsRef::from).collect();
+    let r_ord_elements: Vec<IonDataAsRef<Element>> = ri.into_iter().cloned().map(IonDataAsRef::from).collect();
 
     let diff_chunks = patience::patience_diff(l_ord_elements.as_slice(), r_ord_elements.as_slice());
 
@@ -680,13 +680,13 @@ mod patience {
 /// A struct that allows us to use a BTreeSet as an associative array but still take advantage of
 /// the `intersect()` and `difference()` functions of Sets.
 #[derive(Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct OrdByKey<'a>(pub Key, pub OrdElement<'a>);
+pub(crate) struct OrdByKey/*<'a>*/(pub Key, pub IonData<Element>);
 
-impl<'a> From<(Key, &'a Element)> for OrdByKey<'a> {
+impl<'a> From<(Key, &'a Element)> for OrdByKey {
     fn from(src: (Key, &'a Element)) -> Self {
-        OrdByKey(src.0, OrdElement::from(src.1))
+        OrdByKey(src.0, IonData::from(src.1.clone()))
     }
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq)]
-pub(crate) struct GroupedFieldValues<'a>(pub Key, pub Vec<OrdElement<'a>>);
+pub(crate) struct GroupedFieldValues/*<'a>*/(pub Key, pub Vec<IonData<Element>>);

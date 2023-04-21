@@ -67,3 +67,45 @@ impl<T: IonEq + IonOrd> Ord for IonData<T> {
         IonOrd::ion_cmp(&self.0, &other.0)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct IonDataAsRef<'a, T: IonEq>(&'a T);
+
+impl<'a, T: IonEq> PartialEq for IonDataAsRef<'a, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ion_eq(&other.0)
+    }
+}
+
+impl<'a, T: IonEq> Eq for IonDataAsRef<'a, T> {}
+
+impl<'a, T: IonEq + 'a> From<&'a T> for IonDataAsRef<'a, T> {
+    fn from(value: &'a T) -> Self {
+        IonDataAsRef(value)
+    }
+}
+
+impl<'a, T: IonEq> AsRef<T> for IonDataAsRef<'a, T> {
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<'a, T: IonEq + Display> Display for IonDataAsRef<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl<'a, T: IonEq + IonOrd> PartialOrd for IonDataAsRef<'a, T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(IonOrd::ion_cmp(self.0, other.0))
+    }
+}
+
+impl<'a, T: IonEq + IonOrd> Ord for IonDataAsRef<'a, T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        IonOrd::ion_cmp(self.0, other.0)
+    }
+}
+

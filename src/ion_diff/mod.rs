@@ -4,7 +4,6 @@
 
 mod diff;
 mod key;
-mod ord_element;
 mod recorder;
 mod traits;
 
