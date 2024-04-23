@@ -1,6 +1,20 @@
-use crate::element::{Value as IonValue, Value};
-use crate::element::{Element, IntoAnnotatedElement, IonSequence, List, SExp};
-use crate::{ion_sexp, ion_struct, IonType, Symbol};
+// use crate::element::{Value as IonValue, Value};
+// use crate::element::{Element, IntoAnnotatedElement, Sequence, List, SExp};
+// use crate::{ion_sexp, ion_struct, IonType, Symbol};
+use crate::{
+    List,
+    SExp,
+    Sequence,
+    Struct,
+    IonType,
+    Element,
+    ion_struct,
+    ion_sexp,
+    ion_list,
+    Value,
+    Symbol,
+    IntoAnnotatedElement,
+};
 use std::cmp::{max, min, Ordering};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -39,45 +53,45 @@ impl<'a> From<ChangeType<'a, Key, Element>> for Element {
     fn from(value: ChangeType<'a, Key, Element>) -> Self {
         match value {
             ChangeType::Removed(k, v) => {
-                let mut path_sexp = SExp::builder();
+                let mut path_sexp = Sequence::builder();
                 for e in k {
                     path_sexp = path_sexp.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_sexp.build(),
+                    "path": path_sexp.build_sexp(),
                     "old": v.clone()
                 };
                 s.with_annotations(["removed"])
             }
             ChangeType::Added(k, v) => {
-                let mut path_sexp = SExp::builder();
+                let mut path_sexp = Sequence::builder();
                 for e in k {
                     path_sexp = path_sexp.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_sexp.build(),
+                    "path": path_sexp.build_sexp(),
                     "new": v.clone()
                 };
                 s.with_annotations(["added"])
             }
             ChangeType::Unchanged(k, v) => {
-                let mut path_sexp = SExp::builder();
+                let mut path_sexp = Sequence::builder();
                 for e in k {
                     path_sexp = path_sexp.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_sexp.build(),
+                    "path": path_sexp.build_sexp(),
                     "value": v.clone()
                 };
                 s.with_annotations(["unchanged"])
             }
             ChangeType::ValueModified(k, old, new) => {
-                let mut path_sexp = SExp::builder();
+                let mut path_sexp = Sequence::builder();
                 for e in k {
                     path_sexp = path_sexp.push(e);
                 }
                 let s = ion_struct! {
-                    "path": path_sexp.build(),
+                    "path": path_sexp.build_sexp(),
                     "old": old.clone(),
                     "new": new.clone()
                 };
@@ -318,26 +332,26 @@ pub fn diff_iterator<'a, V, D, I1: Iterator<Item = &'a V> + 'a, I2: Iterator<Ite
         match op {
             DiffOp::Equal { old_index, new_index, len } => {
                 for i in 0..len {
-                    d.moved(&(i + old_index).into(), &(i + new_index).into(), a.get(i + old_index).unwrap());
+                    d.moved((i + &old_index).into(), (&i + &new_index).into(), a.get(&i + &old_index).unwrap());
                 }
             }
             DiffOp::Delete { old_index, old_len, new_index } => {
                 for i in 0..old_len {
-                    let k: V::Key = (old_index + i).into();
-                    d.removed(&k, a.get(old_index + i).unwrap());
+                    let k: V::Key = (&old_index + &i).into();
+                    d.removed(&k, a.get(&old_index + &i).unwrap());
                 }
             }
             DiffOp::Insert { old_index, new_index, new_len } => {
                 for i in 0..new_len {
-                    let k: V::Key = (new_index + i).into();
-                    d.added(&k, b.get(new_index + i).unwrap());
+                    let k: V::Key = (&new_index + i).into();
+                    d.added(&k, b.get(&new_index + &i).unwrap());
                 }
             }
             DiffOp::Replace { old_index, old_len, new_index, new_len } => {
                 let old_range = old_index..(old_index + old_len);
                 let new_range = new_index..(new_index + new_len);
 
-                for i in min(old_index, new_index)..max(old_index + old_len, new_index + new_len) {
+                for i in min(&old_index, &new_index)..max(&old_index + &old_len, &new_index + &new_len) {
 
                     match i {
                         i if old_range.contains(&i) && new_range.contains(&i) => {
