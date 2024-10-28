@@ -46,7 +46,7 @@ impl<'top, D: Decoder> Debug for SystemStreamItem<'top, D> {
             SystemStreamItem::SymbolTable(_) => write!(f, "a symbol table"),
             SystemStreamItem::EncodingDirective(_) => write!(f, "an encoding directive"),
             SystemStreamItem::Value(value) => write!(f, "{}", value.ion_type()),
-            SystemStreamItem::EndOfStream(_) => write!(f, "<nothing>"),
+            SystemStreamItem::EndOfStream(_) => write!(f, "<end-of-stream>"),
         }
     }
 }

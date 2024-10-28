@@ -371,11 +371,16 @@ impl<R: Read> IonDataSource for IonStream<R> {
         }
         // Attempt to read as many bytes as will fit in the currently allocated capacity beyond
         // `limit`.
-        let bytes_read = self.input.read(&mut self.buffer[self.limit..])?;
-
-        // Update `self.limit` to mark the newly read in bytes as available.
-        self.limit += bytes_read;
-        Ok(bytes_read)
+        let mut total_bytes_read = 0;
+        loop {
+            let bytes_read = self.input.read(&mut self.buffer[self.limit..])?;
+            if bytes_read == 0 {
+                return Ok(total_bytes_read);
+            }
+            // Update `self.limit` to mark the newly read in bytes as available.
+            self.limit += bytes_read;
+            total_bytes_read += bytes_read
+        }
     }
 
     fn consume(&mut self, number_of_bytes: usize) {
