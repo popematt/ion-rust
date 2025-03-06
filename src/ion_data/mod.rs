@@ -58,6 +58,18 @@ impl<T: IonEq> IonData<T> {
     }
 }
 
+impl<T: IonDataHash> IonData<T> {
+    pub fn hash<H: Hasher>(value: &T, state: &mut H) {
+        T::ion_data_hash(value, state)
+    }
+}
+
+impl<T: IonDataOrd> IonData<T> {
+    pub fn cmp(first: &T, second: &T) -> Ordering {
+        T::ion_cmp(first, second)
+    }
+}
+
 impl<T: IonEq> PartialEq for IonData<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0.ion_eq(&other.0)

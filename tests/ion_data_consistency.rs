@@ -76,12 +76,31 @@ fn check_group<T: Ord + Debug + Hash>(
             h.finish()
         };
         for (that_index, b) in sequence.into_iter().enumerate() {
+
+            // Using the associated functions on IonData without lifting the values
+            let b_hash = {
+                let mut h = DefaultHasher::new();
+                IonData::hash(b, &mut h);
+                h.finish()
+            };
+            assert!(IonData::eq(a, b),
+                    "in group {group_index}, index {this_index} ({this:?}) was not IonData::eq to index {that_index} ({b:?})"
+            );
+            assert_eq!(IonData::cmp(a, b), Ordering::Equal,
+                       "in group {group_index}, index {this_index} ({this:?}) was not Ordering::Equal to index {that_index} ({b:?})"
+            );
+            assert_eq!(this_hash, b_hash,
+                       "in group {group_index}, index {this_index} ({this:?}) did not produce the same IonData::hash as index {that_index} ({b:?})"
+            );
+
+            // Using Eq, Ord, and Hash on values that have been lifted to IonData
             let that = lifter_fn(b);
             let that_hash = {
                 let mut h = DefaultHasher::new();
                 that.hash(&mut h);
                 h.finish()
             };
+
             assert_eq!(this, that,
                        "in group {group_index}, index {this_index} ({this:?}) was not IonData::eq to index {that_index} ({that:?})"
             );
