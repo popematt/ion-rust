@@ -1148,7 +1148,7 @@ mod tests {
 
     use super::*;
     use crate::ion_data::IonEq;
-    use crate::lazy::any_encoding::IonVersion;
+
     use crate::lazy::binary::raw::v1_1::e_expression::BinaryEExpArgsIterator_1_1;
     use crate::lazy::binary::raw::v1_1::RawBinaryAnnotationsIterator_1_1;
     use crate::lazy::expanded::compiler::TemplateCompiler;
@@ -1157,8 +1157,8 @@ mod tests {
     use crate::lazy::expanded::EncodingContext;
     use crate::lazy::text::raw::v1_1::reader::{MacroAddress, MacroIdRef};
     use crate::v1_0::RawValueRef;
-    use crate::RawSymbolRef;
     use crate::{AnyEncoding, Element, ElementReader, Reader, SequenceWriter, Writer};
+    use crate::{IonEncoding, RawSymbolRef};
 
     #[rstest]
     #[case::no_args(0, &[0b00u8], &[])]
@@ -1172,7 +1172,7 @@ mod tests {
         #[case] bitmap_bytes: &[u8],
         #[case] expected_entries: &[ArgGrouping],
     ) -> IonResult<()> {
-        let context = EncodingContext::for_ion_version(IonVersion::v1_1);
+        let context = EncodingContext::for_ion_encoding(IonEncoding::Binary_1_1);
         let buffer = BinaryBuffer::new(context.get_ref(), bitmap_bytes);
         let bitmap =
             ArgGroupingBitmap::new(num_args, buffer.read_eexp_bitmap(bitmap_bytes.len())?.0);
@@ -1309,7 +1309,7 @@ mod tests {
         encode_macro_fn: impl FnOnce(MacroAddress) -> Vec<u8>,
         test_fn: impl FnOnce(BinaryEExpArgsIterator_1_1<'_>) -> IonResult<()>,
     ) -> IonResult<()> {
-        let mut context = EncodingContext::for_ion_version(IonVersion::v1_1);
+        let mut context = EncodingContext::for_ion_encoding(IonEncoding::Binary_1_1);
         let template_macro =
             TemplateCompiler::compile_from_source(context.macro_table(), macro_source)?;
         let macro_address = context

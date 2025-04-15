@@ -1466,7 +1466,7 @@ mod tests {
         ExprRange, ParameterEncoding, TemplateBodyExpr, TemplateMacro, TemplateValue,
     };
     use crate::lazy::expanded::{EncodingContext, EncodingContextRef};
-    use crate::{Int, IntoAnnotations, IonResult, IonVersion, MacroDef, Symbol};
+    use crate::{Int, IntoAnnotations, IonEncoding, IonResult, MacroDef, Symbol};
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
     // XXX: The tests in this module compile inputs and expect a specific output. There is no "correct"
@@ -1567,7 +1567,7 @@ mod tests {
     impl TestResources {
         fn new() -> Self {
             Self {
-                context: EncodingContext::for_ion_version(IonVersion::v1_1),
+                context: EncodingContext::for_ion_encoding(IonEncoding::Text_1_1),
             }
         }
 

@@ -857,7 +857,7 @@ impl MacroTable {
 mod tests {
     use crate::lazy::expanded::template::TemplateMacroRef;
     use crate::{
-        v1_1, Element, EncodingContext, IonResult, IonVersion, MacroDef, TemplateCompiler,
+        v1_1, Element, EncodingContext, IonEncoding, IonResult, MacroDef, TemplateCompiler,
         WriteAsIon,
     };
     use rstest::rstest;
@@ -866,7 +866,7 @@ mod tests {
         // Read the macro source directly to get the expected Ion.
         let expected = Element::read_one(macro_source)?;
         // Compile the source to a `TemplateMacro`.
-        let context = EncodingContext::for_ion_version(IonVersion::v1_1);
+        let context = EncodingContext::for_ion_encoding(IonEncoding::Text_1_1);
         let compiled_template =
             TemplateCompiler::compile_from_source(context.macro_table(), macro_source)?;
         let compiled_macro = MacroDef::from_template_macro(compiled_template.clone());

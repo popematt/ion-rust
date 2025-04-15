@@ -2116,11 +2116,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lazy::any_encoding::IonVersion;
+
     use crate::lazy::expanded::compiler::TemplateCompiler;
     use crate::lazy::expanded::template::{ParameterCardinality, ParameterEncoding};
     use crate::lazy::expanded::EncodingContext;
-    use crate::{AnyEncoding, Reader};
+    use crate::{AnyEncoding, IonEncoding, Reader};
     use rstest::rstest;
 
     /// Returns a parser that discards the output and instead reports the number of bytes that matched.
@@ -2147,14 +2147,14 @@ mod tests {
         fn new(input: &str) -> Self {
             MatchTest {
                 input: input.to_string(),
-                context: EncodingContext::for_ion_version(IonVersion::v1_1),
+                context: EncodingContext::for_ion_encoding(IonEncoding::Text_1_1),
             }
         }
 
         fn new_1_0(input: &str) -> Self {
             MatchTest {
                 input: input.to_string(),
-                context: EncodingContext::for_ion_version(IonVersion::v1_0),
+                context: EncodingContext::for_ion_encoding(IonEncoding::Text_1_1),
             }
         }
 

@@ -242,11 +242,16 @@ impl<'top, D: Decoder> LazyValue<'top, D> {
     }
 
     pub fn location(&self) -> SourceLocation {
-        let context = self.expanded_value.context();
-        // set the value start and end positions, this help in location calculation
-        context
-            .location_for_span(self.expanded_value.span())
-            .unwrap_or_default()
+        let expanded = self.expanded_value;
+        if expanded.context.encoding.is_text() {
+            expanded
+                .context()
+                .location_for_span(expanded.span())
+                .unwrap_or_default()
+        } else {
+            // No row/column for binary Ion
+            SourceLocation::empty()
+        }
     }
 
     pub fn to_owned(&self) -> LazyElement<D> {
@@ -729,7 +734,6 @@ mod tests {
         Ok(())
     }
 
-    #[ignore] // https://github.com/amazon-ion/ion-rust/issues/951
     #[test]
     fn row_and_column_should_not_be_present_for_binary_ion() -> IonResult<()> {
         let ion_bytes = [

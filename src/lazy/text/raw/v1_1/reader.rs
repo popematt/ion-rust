@@ -549,7 +549,7 @@ impl<'top, E: TextEncoding> LazyRawStruct<'top, E> for LazyRawTextStruct<'top, E
 
 #[cfg(test)]
 mod tests {
-    use crate::lazy::any_encoding::IonVersion;
+
     use crate::lazy::expanded::compiler::TemplateCompiler;
     use crate::lazy::expanded::EncodingContext;
     use crate::lazy::raw_value_ref::RawValueRef;
@@ -586,7 +586,7 @@ mod tests {
             false
        "#;
 
-        let mut context = EncodingContext::for_ion_version(IonVersion::v1_1);
+        let mut context = EncodingContext::for_ion_encoding(IonEncoding::Text_1_1);
         let macro_quux =
             TemplateCompiler::compile_from_source(context.macro_table(), "(macro quux (x) null)")?;
         context.macro_table_mut().add_template_macro(macro_quux)?;

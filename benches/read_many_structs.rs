@@ -225,7 +225,7 @@ mod benchmark {
         moderately_compact_1_1_data, TestData_1_1,
     };
     use ion_rs::{
-        v1_0, v1_1, ElementReader, Encoding, EncodingContext, IonData, IonVersion,
+        v1_0, v1_1, ElementReader, Encoding, EncodingContext, IonData, IonEncoding,
         LazyRawBinaryReader_1_1, RawEExpression, RawStreamItem, Reader, Sequence, TemplateCompiler,
         ValueExpr, WriteConfig,
     };
@@ -389,7 +389,7 @@ mod benchmark {
         let binary_1_1_data = test_data_1_1.binary_data.as_slice();
         let name = test_data_1_1.name.as_str();
 
-        let empty_context = EncodingContext::for_ion_version(IonVersion::v1_1);
+        let empty_context = EncodingContext::for_ion_encoding(IonEncoding::Text_1_1);
         let compiled_macro = TemplateCompiler::compile_from_source(
             empty_context.macro_table(),
             &test_data_1_1.template_definition_text,
@@ -429,7 +429,7 @@ mod benchmark {
         //       before they are evaluated when a type knows how to interpret them without evaluation.
         let mut binary_1_1_group = c.benchmark_group(format!("{name} binary 1.1"));
         binary_1_1_group.bench_function("read all from eexp", |b| {
-            let mut context = EncodingContext::for_ion_version(IonVersion::v1_1);
+            let mut context = EncodingContext::for_ion_encoding(IonEncoding::Binary_1_1);
             context
                 .macro_table_mut()
                 .add_template_macro(compiled_macro.clone())

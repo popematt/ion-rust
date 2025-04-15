@@ -107,7 +107,7 @@ impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_1<W> {
 #[cfg(feature = "experimental-ion-1-1")]
 #[cfg(test)]
 mod tests {
-    use crate::lazy::any_encoding::IonVersion;
+
     use crate::lazy::decoder::{LazyRawReader, LazyRawValue};
     use crate::lazy::encoder::text::v1_1::writer::LazyRawTextWriter_1_1;
     use crate::lazy::encoder::value_writer::{SequenceWriter, StructWriter, ValueWriter};
@@ -119,8 +119,8 @@ mod tests {
     use crate::lazy::text::raw::v1_1::reader::{LazyRawTextReader_1_1, MacroIdRef};
     use crate::symbol_ref::AsSymbolRef;
     use crate::{
-        v1_1, Annotatable, Decimal, ElementReader, IonData, IonResult, IonType, Null, RawSymbolRef,
-        Reader, Timestamp, Writer,
+        v1_1, Annotatable, Decimal, ElementReader, IonData, IonEncoding, IonResult, IonType, Null,
+        RawSymbolRef, Reader, Timestamp, Writer,
     };
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         let encoded_text = String::from_utf8(encoded_bytes).unwrap();
         println!("{encoded_text}");
 
-        let mut context = EncodingContext::for_ion_version(IonVersion::v1_1);
+        let mut context = EncodingContext::for_ion_encoding(IonEncoding::Text_1_1);
         let macro_foo =
             TemplateCompiler::compile_from_source(context.macro_table(), "(macro foo (x*) null)")?;
         context.macro_table_mut().add_template_macro(macro_foo)?;

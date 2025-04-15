@@ -124,6 +124,7 @@ pub struct EncodingContext {
     pub(crate) allocator: Rc<BumpAllocator>,
 
     pub(crate) io_buffer_source: UnsafeCell<IoBufferSource>,
+    pub(crate) encoding: IonEncoding,
 }
 
 impl Clone for EncodingContext {
@@ -136,6 +137,7 @@ impl Clone for EncodingContext {
             symbol_table: self.symbol_table.clone(),
             allocator: self.allocator.clone(),
             io_buffer_source: IoBufferSource::IoBuffer(io_buffer).into(),
+            encoding: self.encoding,
         }
     }
 }
@@ -155,18 +157,26 @@ impl EncodingContext {
         macro_table: MacroTable,
         symbol_table: SymbolTable,
         allocator: BumpAllocator,
+        encoding: IonEncoding,
     ) -> Self {
         Self {
             macro_table: Rc::new(macro_table),
             symbol_table: Rc::new(symbol_table),
             allocator: Rc::new(allocator),
             io_buffer_source: IoBufferSource::None.into(),
+            encoding,
         }
     }
 
-    pub fn for_ion_version(version: IonVersion) -> Self {
+    pub fn for_ion_encoding(encoding: IonEncoding) -> Self {
+        let version = encoding.version();
         let macro_table = MacroTable::with_system_macros(version);
-        Self::new(macro_table, SymbolTable::new(version), BumpAllocator::new())
+        Self::new(
+            macro_table,
+            SymbolTable::new(version),
+            BumpAllocator::new(),
+            encoding,
+        )
     }
 
     pub fn empty() -> Self {
@@ -174,6 +184,7 @@ impl EncodingContext {
             MacroTable::empty(),
             SymbolTable::empty(IonVersion::default()),
             BumpAllocator::new(),
+            IonEncoding::Text_1_0,
         )
     }
 
@@ -372,7 +383,7 @@ impl<Encoding: Decoder, Input: IonInput> ExpandingReader<Encoding, Input> {
         Self {
             raw_reader: raw_reader.into(),
             evaluator_ptr: None.into(),
-            encoding_context: EncodingContext::for_ion_version(encoding.version()).into(),
+            encoding_context: EncodingContext::for_ion_encoding(encoding).into(),
             pending_context_changes: PendingContextChanges::new().into(),
             catalog,
         }
