@@ -123,6 +123,7 @@ mod tests {
     use crate::lazy::expanded::EncodingContext;
     use crate::raw_symbol_ref::RawSymbolRef;
     use crate::{IonResult, IonType};
+    use crate::ion_data::assert_ion_eq;
 
     #[test]
     fn nop() -> IonResult<()> {
@@ -487,11 +488,12 @@ mod tests {
     #[case("2024T",                               &[0x80, 0x36])]
     #[case("2023-10T",                            &[0x81, 0x35, 0x05])]
     #[case("2023-10-15T",                         &[0x82, 0x35, 0x7D])]
-    #[case("2023-10-15T05:04Z",                   &[0x83, 0x35, 0x7D, 0x85, 0x00])]
-    #[case("2023-10-15T05:04:03Z",                &[0x84, 0x35, 0x7D, 0x85, 0x30, 0x00])]
-    #[case("2023-10-15T05:04:03.123-00:00",       &[0x85, 0x35, 0x7D, 0x85, 0x38, 0xEC, 0x01])]
-    #[case("2023-10-15T05:04:03.000123-00:00",    &[0x86, 0x35, 0x7D, 0x85, 0x38, 0xEC, 0x01, 0x00])]
-    #[case("2023-10-15T05:04:03.000000123-00:00", &[0x87, 0x35, 0x7D, 0x85, 0x38, 0xEC, 0x01, 0x00, 0x00])]
+    #[case("2023-10-15T05:04Z",                   &[0x83, 0x35, 0x7D, 0x85, 0x08])]
+    #[case("2023-10-15T05:04-00:00",              &[0x83, 0x35, 0x7D, 0x85, 0x00])]
+    #[case("2023-10-15T05:04:03Z",                &[0x84, 0x35, 0x7D, 0x85, 0x38, 0x00])]
+    #[case("2023-10-15T05:04:03.123-00:00",       &[0x85, 0x35, 0x7D, 0x85, 0x30, 0xEC, 0x01])]
+    #[case("2023-10-15T05:04:03.000123-00:00",    &[0x86, 0x35, 0x7D, 0x85, 0x30, 0xEC, 0x01, 0x00])]
+    #[case("2023-10-15T05:04:03.000000123-00:00", &[0x87, 0x35, 0x7D, 0x85, 0x30, 0xEC, 0x01, 0x00, 0x00])]
     #[case("2023-10-15T05:04+01:00",              &[0x88, 0x35, 0x7D, 0x85, 0xE0, 0x01])]
     #[case("2023-10-15T05:04-01:00",              &[0x88, 0x35, 0x7D, 0x85, 0xA0, 0x01])]
     #[case("2023-10-15T05:04:03+01:00",           &[0x89, 0x35, 0x7D, 0x85, 0xE0, 0x0D])]
@@ -507,7 +509,7 @@ mod tests {
         let mut reader_txt = LazyRawTextReader_1_1::new(context, expected_txt.as_bytes(), true);
         let mut reader_bin = LazyRawBinaryReader_1_1::new(context, ion_data);
 
-        assert_eq!(
+        assert_ion_eq!(
             reader_bin
                 .next()?
                 .expect_value()?

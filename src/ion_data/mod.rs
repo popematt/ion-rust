@@ -126,6 +126,17 @@ impl<T: WriteAsIon> WriteAsIon for IonData<T> {
     }
 }
 
+macro_rules! assert_ion_eq {
+        ($left:expr, $right:expr $(, $($tt:tt)*)?) => {
+            assert_eq!(
+                $left,
+                $right
+                $(, $($tt)*)?
+            )
+        };
+    }
+pub(crate) use assert_ion_eq;
+
 #[cfg(test)]
 mod tests {
     use crate::ion_data::{IonDataHash, IonDataOrd, IonEq};
