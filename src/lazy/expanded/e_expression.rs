@@ -8,11 +8,10 @@ use crate::element::iterators::SymbolsIterator;
 use crate::lazy::decoder::{Decoder, RawValueExpr};
 use crate::lazy::expanded::compiler::{ExpansionAnalysis, ExpansionSingleton};
 use crate::lazy::expanded::macro_evaluator::{
-    AnnotateExpansion, ConditionalExpansion, DeltaExpansion, EExpressionArgGroup,
-    ExprGroupExpansion, FlattenExpansion, IsExhaustedIterator, MacroExpansion, MacroExpansionKind,
-    MacroExpr, MacroExprArgsIterator, MakeDecimalExpansion, MakeFieldExpansion,
-    MakeStructExpansion, MakeTextExpansion, MakeTimestampExpansion, RawEExpression,
-    RepeatExpansion, SumExpansion, TemplateExpansion, ValueExpr,
+    AnnotateExpansion, ConditionalExpansion, EExpressionArgGroup, ExprGroupExpansion,
+    FlattenExpansion, IsExhaustedIterator, MacroExpansion, MacroExpansionKind, MacroExpr,
+    MacroExprArgsIterator, MakeDecimalExpansion, MakeFieldExpansion, MakeStructExpansion,
+    MakeTextExpansion, RawEExpression, RepeatExpansion, TemplateExpansion, ValueExpr,
 };
 use crate::lazy::expanded::macro_table::{MacroKind, MacroRef};
 use crate::lazy::expanded::template::TemplateMacroRef;
@@ -129,9 +128,6 @@ impl<'top, D: Decoder> EExpression<'top, D> {
             MacroKind::MakeStruct => {
                 MacroExpansionKind::MakeStruct(MakeStructExpansion::new(arguments))
             }
-            MacroKind::MakeTimestamp => {
-                MacroExpansionKind::MakeTimestamp(MakeTimestampExpansion::new(arguments))
-            }
             MacroKind::MakeField => {
                 MacroExpansionKind::MakeField(MakeFieldExpansion::new(arguments))
             }
@@ -159,13 +155,10 @@ impl<'top, D: Decoder> EExpression<'top, D> {
             MacroKind::IfMulti => {
                 MacroExpansionKind::Conditional(ConditionalExpansion::if_multi(arguments))
             }
-            MacroKind::Delta => MacroExpansionKind::Delta(DeltaExpansion::new(
-                self.context(),
-                environment,
-                arguments,
-            )),
             MacroKind::Repeat => MacroExpansionKind::Repeat(RepeatExpansion::new(arguments)),
-            MacroKind::Sum => MacroExpansionKind::Sum(SumExpansion::new(arguments)),
+            MacroKind::MakeTimestamp | MacroKind::Delta | MacroKind::Sum => {
+                todo!("system macro {}", invoked_macro.name().unwrap())
+            }
         };
         Ok(MacroExpansion::new(
             self.context(),
