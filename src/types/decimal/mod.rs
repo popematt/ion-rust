@@ -37,7 +37,7 @@ pub mod coefficient;
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Decimal {
     // ===== A note on layout =====
     // A `Coefficient` is a `(Sign, Int)` pair. The `Sign` is a one-byte enum that allows the
@@ -109,7 +109,7 @@ impl Decimal {
 
     /// Returns this `Decimal`'s coefficient.
     pub fn coefficient(&self) -> Coefficient {
-        Coefficient::from_sign_and_value(self.coefficient_sign, self.coefficient_value)
+        Coefficient::from_sign_and_value(self.coefficient_sign, self.coefficient_value.clone())
     }
 
     /// Returns this `Decimal`'s exponent.
