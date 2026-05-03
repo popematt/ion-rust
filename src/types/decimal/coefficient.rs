@@ -3,8 +3,6 @@
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 
-use num_traits::Zero;
-
 use crate::result::{IonError, IonFailure};
 use crate::types::CountDecimalDigits;
 use crate::IonResult;

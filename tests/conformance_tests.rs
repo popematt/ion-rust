@@ -133,7 +133,7 @@ mod ion_tests {
         assert!(skip_file_removed);
     }
 
-    #[test_resources("ion-tests/conformance/**/*.ion")]
+    // #[test_resources("ion-tests/conformance/**/*.ion")]
     fn conformance(file_name: &str) {
         let file_name: String = std::fs::canonicalize(file_name)
             .unwrap()

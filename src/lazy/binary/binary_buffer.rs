@@ -354,58 +354,57 @@ impl<'a> BinaryBuffer<'a> {
     ///
     /// See: <https://amazon-ion.github.io/ion-docs/docs/binary.html#uint-and-int-fields>
     pub fn read_int(self, length: usize) -> ParseResult<'a, DecodedInt> {
-        const BUFFER_SIZE: usize = MAX_INT_SIZE_IN_BYTES;
         if length == 0 {
             return Ok((DecodedInt::new(0, false, 0), self.consume(0)));
-        } else if length > BUFFER_SIZE + 1 {
-            //                         ^^^
-            // We support reading i128::MIN, which requires 17 bytes to encode. We reject anything
-            // 18 bytes or larger here; later on, we reject 17-byte encodings of values other than
-            // i128::MIN.
-            return cold_path! {
-            IonResult::decoding_error(format!(
-                "Found a {length}-byte Int. Max supported size is {MAX_INT_SIZE_IN_BYTES} bytes."
-            ))};
         }
 
         let int_bytes = self
             .peek_n_bytes(length)
             .ok_or_else(|| IonError::incomplete("an Int encoding primitive", self.offset()))?;
 
-        // i128::MIN is a special case; it's the only 17-byte encoding we accept.
-        const INT_MIN_ENCODING: &[u8] = &[0x80, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if length == INT_MIN_ENCODING.len() {
-            return cold_path! {{
-                if int_bytes != INT_MIN_ENCODING {
-                    IonResult::decoding_error("Found an int encoding primitive outside the supported range")
-                } else {
-                    Ok((
-                        DecodedInt::new(Int::from(i128::MIN), true, length),
-                        self.consume(length),
-                    ))
-                }
-            }};
-        }
-
-        // Copy the 'n' bytes into a buffer known to be the exact size of a u128
-        let mut buffer = [0u8; mem::size_of::<u128>()];
-        let first_occupied_byte_index = buffer.len() - int_bytes.len();
-        buffer[first_occupied_byte_index..].copy_from_slice(int_bytes);
-
         let is_negative: bool = int_bytes[0] & 0b1000_0000 != 0;
-        // Unset the sign bit in the buffer
-        buffer[first_occupied_byte_index] &= 0b0111_1111;
 
-        // Now our sign-and-magnitude encoding is just a magnitude.
-        let magnitude = u128::from_be_bytes(buffer);
-        let mut value = i128::try_from(magnitude).unwrap();
-        if is_negative {
-            value = value.neg();
+        // Fast path: fits in i128 (≤16 bytes, or 17-byte i128::MIN)
+        if length <= mem::size_of::<u128>() {
+            let mut buffer = [0u8; mem::size_of::<u128>()];
+            let first_occupied_byte_index = buffer.len() - int_bytes.len();
+            buffer[first_occupied_byte_index..].copy_from_slice(int_bytes);
+            // Clear sign bit
+            buffer[first_occupied_byte_index] &= 0b0111_1111;
+            let magnitude = u128::from_be_bytes(buffer);
+            if let Ok(mut value) = i128::try_from(magnitude) {
+                if is_negative {
+                    value = value.neg();
+                }
+                return Ok((
+                    DecodedInt::new(value, is_negative, length),
+                    self.consume(length),
+                ));
+            }
+            // magnitude > i128::MAX — fall through to big path
         }
-        Ok((
-            DecodedInt::new(value, is_negative, length),
-            self.consume(length),
-        ))
+
+        // Big path: sign-and-magnitude BE bytes → Int
+        cold_path! {{
+            let mut magnitude_bytes = int_bytes.to_vec();
+            magnitude_bytes[0] &= 0b0111_1111; // clear sign bit
+
+            // Convert BE magnitude to LE
+            magnitude_bytes.reverse();
+
+            // Build the Int: construct as positive UInt bytes, then negate if needed
+            // We need to go through two's complement. First make a positive Int from the magnitude,
+            // then negate.
+            // Add a zero byte at the end (MSB in LE) to ensure it's interpreted as positive
+            magnitude_bytes.push(0);
+            let value = Int::from_signed_bytes_le(&magnitude_bytes);
+            let value = if is_negative { -value } else { value };
+
+            Ok((
+                DecodedInt::new(value, is_negative, length),
+                self.consume(length),
+            ))
+        }}
     }
 
     /// Attempts to decode an annotations wrapper at the beginning of the buffer and returning
@@ -1047,10 +1046,13 @@ mod tests {
     fn read_int_overflow() -> IonResult<()> {
         let context = EncodingContext::for_ion_version(IonVersion::v1_0);
         let data = vec![1; MAX_INT_SIZE_IN_BYTES + 1];
-        let buffer = BinaryBuffer::new(context.get_ref(), &data); // Negative zero
-        buffer
-            .read_int(buffer.len())
-            .expect_err("This exceeded the configured max Int size.");
+        let buffer = BinaryBuffer::new(context.get_ref(), &data);
+        // With arbitrary-size integer support, large ints are now parsed successfully
+        let (decoded, _) = buffer.read_int(buffer.len())?;
+        assert!(
+            decoded.value().as_i128().is_none(),
+            "Value should exceed i128 range"
+        );
         Ok(())
     }
 }

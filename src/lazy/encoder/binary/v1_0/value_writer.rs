@@ -19,7 +19,8 @@ use crate::lazy::encoder::value_writer::{delegate_value_writer_to_self, Annotata
 use crate::lazy::never::Never;
 use crate::raw_symbol_ref::AsRawSymbolRef;
 use crate::result::{EncodingError, IonFailure};
-use crate::{Decimal, Int, IonError, IonResult, IonType, RawSymbolRef, SymbolId, Timestamp};
+use crate::{Decimal, Int, IonError, IonResult, IonType, RawSymbolRef, SymbolId, Timestamp, UInt};
+use ice_code::ice as cold_path;
 
 /// The largest possible 'L' (length) value that can be written directly in a type descriptor byte.
 /// Larger length values will need to be written as a VarUInt following the type descriptor.
@@ -133,13 +134,41 @@ impl<'value, 'top> BinaryValueWriter_1_0<'value, 'top> {
     }
 
     pub fn write_int(mut self, value: &Int) -> IonResult<()> {
-        let magnitude: u128 = value.unsigned_abs().data;
-        let encoded = uint::encode(magnitude);
-        let bytes_to_write = encoded.as_bytes();
-
-        let encoded_length = bytes_to_write.len();
+        let magnitude = value.unsigned_abs();
         let mut type_descriptor: u8 = if value.is_negative() { 0x30 } else { 0x20 };
 
+        if let Some(mag) = magnitude.as_u128() {
+            // Fast path: no allocation
+            let encoded = uint::encode(mag);
+            let bytes_to_write = encoded.as_bytes();
+            let encoded_length = bytes_to_write.len();
+            if encoded_length <= 13 {
+                type_descriptor |= encoded_length as u8;
+                self.push_byte(type_descriptor);
+            } else {
+                type_descriptor |= 0xEu8;
+                self.push_byte(type_descriptor);
+                VarUInt::write_u64(self.encoding_buffer, encoded_length as u64)?;
+            }
+            self.push_bytes(bytes_to_write);
+        } else {
+            // Big value: convert LE bytes to BE, strip leading zeros
+            self.write_big_int(&magnitude, type_descriptor)?;
+        }
+
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn write_big_int(&mut self, magnitude: &UInt, mut type_descriptor: u8) -> IonResult<()> {
+        let be = magnitude.data.to_be_bytes();
+        let start = be
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(be.len().saturating_sub(1));
+        let bytes_to_write = &be[start..];
+        let encoded_length = bytes_to_write.len();
         if encoded_length <= 13 {
             type_descriptor |= encoded_length as u8;
             self.push_byte(type_descriptor);
@@ -149,7 +178,6 @@ impl<'value, 'top> BinaryValueWriter_1_0<'value, 'top> {
             VarUInt::write_u64(self.encoding_buffer, encoded_length as u64)?;
         }
         self.push_bytes(bytes_to_write);
-
         Ok(())
     }
 

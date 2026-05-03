@@ -2,7 +2,8 @@ use std::io::Write;
 
 use crate::decimal::coefficient::Coefficient;
 use crate::result::IonFailure;
-use crate::{Int, IonResult};
+use crate::{Int, IonError, IonResult};
+use ice_code::ice as cold_path;
 
 /// An Ion 1.1 encoding primitive that represents a fixed-length signed integer.
 #[derive(Debug)]
@@ -97,17 +98,13 @@ impl FixedInt {
     }
 
     pub fn write(output: &mut impl Write, value: &Int) -> IonResult<usize> {
-        Self::write_i128(output, value.data)
+        Self::write_i128(output, value.data.expect_i128()?)
     }
 
     #[inline]
     pub fn encoded_size(value: impl Into<Int>) -> usize {
         let value = value.into();
-        let num_sign_bits = if value.is_negative() {
-            value.data.leading_ones()
-        } else {
-            value.data.leading_zeros()
-        };
+        let num_sign_bits = value.data.leading_sign_bits();
         let num_magnitude_bits = 128 - num_sign_bits;
         (num_magnitude_bits as usize / 8) + 1
     }
@@ -308,7 +305,7 @@ mod tests {
 
     #[test]
     fn encode_fixed_int() -> IonResult<()> {
-        // Make two copies of each of our tests. In the first, each i64 is turned into a Int.
+        // Make two copies of each of our tests. In the first, each i64 is turned into an Int.
         let mut test_cases: Vec<_> = FIXED_INT_TEST_CASES
             .iter()
             .cloned()

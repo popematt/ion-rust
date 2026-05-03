@@ -5,13 +5,11 @@ use crate::types::{CountDecimalDigits, Decimal};
 use chrono::{
     DateTime, Datelike, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike,
 };
-use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::ops::Div;
 
 /// Indicates the most precise time unit that has been specified in the accompanying [Timestamp].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Default, Hash)]
@@ -223,15 +221,17 @@ impl Timestamp {
                 const NANOSECONDS_EXPONENT: i64 = -9;
                 const NANOSECONDS_PER_SECOND: u128 = 1_000_000_000;
                 let exponent_delta = decimal.exponent - NANOSECONDS_EXPONENT;
-                let magnitude = match &decimal.coefficient().magnitude().data {
-                    m if *m >= NANOSECONDS_PER_SECOND => {
-                        // The coefficient is more precise than nanoseconds. We need to truncate a
-                        // copy of it.
-                        m.div(10f64.powi(exponent_delta.abs() as i32) as u128)
-                            .to_u32()
-                            .expect("failed to convert coefficient magnitude to u32 nanos")
-                    }
-                    m => *m as u32,
+                // FIXME-KIRO: This calculation should work for arbitrarily large coefficients.
+                let coeff_magnitude: u128 = decimal
+                    .coefficient()
+                    .magnitude()
+                    .as_u128()
+                    .expect("fractional seconds coefficient too large");
+                let magnitude = if coeff_magnitude >= NANOSECONDS_PER_SECOND {
+                    // The coefficient is more precise than nanoseconds. We need to truncate.
+                    (coeff_magnitude / (10f64.powi(exponent_delta.abs() as i32) as u128)) as u32
+                } else {
+                    coeff_magnitude as u32
                 };
                 // Adjust for the exponent
                 let nanoseconds = (magnitude as f64 * 10f64.powi(exponent_delta as i32)) as u32;
@@ -995,9 +995,10 @@ impl<T> TimestampBuilder<T> {
                     );
                 }
                 if decimal.is_greater_than_or_equal_to_one() {
-                    return IonResult::illegal_operation(
-                        "cannot create a timestamp with a fractional seconds >= 1.0",
-                    );
+                    return IonResult::illegal_operation(format!(
+                        "cannot create a timestamp with a fractional seconds >= 1.0 [{}]",
+                        decimal
+                    ));
                 }
                 if decimal.is_zero() && decimal.exponent >= 0 {
                     timestamp.fractional_seconds = None;
