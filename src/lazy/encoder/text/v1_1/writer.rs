@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use crate::lazy::encoder::text::render::{IonToken, Render};
 use crate::lazy::encoder::text::v1_0::writer::LazyRawTextWriter_1_0;
 use crate::lazy::encoder::text::v1_1::value_writer::TextValueWriter_1_1;
 use crate::lazy::encoder::value_writer::internal::MakeValueWriter;
@@ -16,8 +17,8 @@ use crate::{ContextWriter, IonResult, IonVersion, MacroTable, TextFormat, WriteC
 // delegate nearly all of their functionality to the 1.0 text writer.
 
 /// A raw text Ion 1.1 writer.
-pub struct LazyRawTextWriter_1_1<W: Write> {
-    pub(crate) writer_1_0: LazyRawTextWriter_1_0<W>,
+pub struct LazyRawTextWriter_1_1<R: Render<IonToken>> {
+    pub(crate) writer_1_0: LazyRawTextWriter_1_0<R>,
     macros: WriterMacroTable,
 }
 
@@ -68,10 +69,14 @@ impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_1<W> {
                     TextFormat::Lines => &LINES_WHITESPACE_CONFIG,
                     TextFormat::Pretty => &PRETTY_WHITESPACE_CONFIG,
                 };
-                write!(
-                    output,
-                    "$ion_1_1{}",
-                    whitespace_config.space_between_top_level_values
+                Render::<IonToken>::write_marked(
+                    &mut output,
+                    b"$ion_1_1",
+                    IonToken::VersionMarker,
+                )?;
+                Render::<IonToken>::write_raw(
+                    &mut output,
+                    whitespace_config.space_between_top_level_values.as_bytes(),
                 )?;
                 Ok(LazyRawTextWriter_1_1 {
                     writer_1_0: LazyRawTextWriter_1_0 {
@@ -92,11 +97,11 @@ impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_1<W> {
     }
 
     fn output(&self) -> &W {
-        self.writer_1_0.output()
+        &self.writer_1_0.output
     }
 
     fn output_mut(&mut self) -> &mut W {
-        self.writer_1_0.output_mut()
+        &mut self.writer_1_0.output
     }
 
     fn macro_table(&self) -> &WriterMacroTable {
@@ -112,7 +117,15 @@ impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_1<W> {
             .writer_1_0
             .whitespace_config
             .space_between_top_level_values;
-        write!(self.writer_1_0.output, "$ion_1_1{space_between}")?;
+        Render::<IonToken>::write_marked(
+            &mut self.writer_1_0.output,
+            b"$ion_1_1",
+            IonToken::VersionMarker,
+        )?;
+        Render::<IonToken>::write_raw(
+            &mut self.writer_1_0.output,
+            space_between.as_bytes(),
+        )?;
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use std::io::Write;
 
 use delegate::delegate;
 
+use crate::lazy::encoder::text::render::{IonToken, Render};
 use crate::lazy::encoder::text::v1_0::value_writer::TextValueWriter_1_0;
 use crate::lazy::encoder::value_writer::internal::MakeValueWriter;
 use crate::lazy::encoder::value_writer::SequenceWriter;
@@ -18,9 +19,28 @@ use crate::write_config::WriteConfigKind;
 use crate::{ContextWriter, IonResult, TextFormat, WriteConfig};
 
 /// A raw text Ion 1.0 writer.
-pub struct LazyRawTextWriter_1_0<W: Write> {
-    pub(crate) output: W,
+pub struct LazyRawTextWriter_1_0<R: Render<IonToken>> {
+    pub(crate) output: R,
     pub(crate) whitespace_config: &'static WhitespaceConfig,
+}
+
+impl<R: Render<IonToken>> LazyRawTextWriter_1_0<R> {
+    /// Writes the provided data as a top-level value.
+    pub fn write<V: WriteAsIon>(&mut self, value: V) -> IonResult<&mut Self> {
+        value.write_as_ion(self.value_writer())?;
+        Ok(self)
+    }
+
+    /// Helper method to construct this format's `ValueWriter` implementation.
+    #[inline]
+    fn value_writer(&mut self) -> TextValueWriter_1_0<'_, R> {
+        TextValueWriter_1_0::new(
+            self,
+            0,
+            "", // No delimiter between values at the top level
+            ParentType::TopLevel,
+        )
+    }
 }
 
 impl<W: Write> LazyRawTextWriter_1_0<W> {
@@ -29,27 +49,10 @@ impl<W: Write> LazyRawTextWriter_1_0<W> {
         <Self as LazyRawWriter<W>>::new(output)
     }
 
-    /// Writes the provided data as a top-level value.
-    pub fn write<V: WriteAsIon>(&mut self, value: V) -> IonResult<&mut Self> {
-        value.write_as_ion(self.value_writer())?;
-        Ok(self)
-    }
-
     /// Writes any pending data to the output stream and then calls [`Write::flush`] on it.
     pub fn flush(&mut self) -> IonResult<()> {
         self.output.flush()?;
         Ok(())
-    }
-
-    /// Helper method to construct this format's `ValueWriter` implementation.
-    #[inline]
-    fn value_writer(&mut self) -> TextValueWriter_1_0<'_, W> {
-        TextValueWriter_1_0::new(
-            self,
-            0,
-            "", // No delimiter between values at the top level
-            ParentType::TopLevel,
-        )
     }
 }
 
@@ -129,7 +132,8 @@ impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_0<W> {
 
     fn write_version_marker(&mut self) -> IonResult<()> {
         let space_between = self.whitespace_config.space_between_top_level_values;
-        write!(self.output, "$ion_1_0{space_between}")?;
+        Render::<IonToken>::write_marked(&mut self.output, b"$ion_1_0", IonToken::VersionMarker)?;
+        Render::<IonToken>::write_raw(&mut self.output, space_between.as_bytes())?;
         Ok(())
     }
 }

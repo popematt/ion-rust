@@ -159,6 +159,8 @@ pub use types::{
 // Allow access to less commonly used types like decimal::coefficient::{Coefficient, Sign}
 pub use types::decimal;
 
+pub use crate::lazy::encoder::text::render::{IonToken, Render};
+
 #[cfg(feature = "experimental-tooling-apis")]
 pub use crate::text::text_formatter::{FmtValueFormatter, IoValueFormatter};
 
