@@ -1,4 +1,5 @@
 use crate::lazy::encoder::annotation_seq::AnnotationSeq;
+use crate::lazy::encoder::text::render::{IonToken, RenderedWrite};
 use crate::lazy::encoder::text::v1_0::value_writer::{
     TextAnnotatedValueWriter_1_0, TextContainerWriter_1_0, TextListWriter_1_0, TextSExpWriter_1_0,
     TextStructWriter_1_0, TextValueWriter_1_0,
@@ -24,12 +25,12 @@ use compact_str::format_compact;
 use delegate::delegate;
 use std::io::Write;
 
-pub struct TextValueWriter_1_1<'value, W: Write> {
+pub struct TextValueWriter_1_1<'value, W: RenderedWrite<IonToken>> {
     pub(crate) value_writer_1_0: TextValueWriter_1_0<'value, W>,
     pub(crate) macros: &'value MacroTable,
 }
 
-pub struct TextAnnotatedValueWriter_1_1<'value, W: Write> {
+pub struct TextAnnotatedValueWriter_1_1<'value, W: RenderedWrite<IonToken>> {
     value_writer_1_0: TextAnnotatedValueWriter_1_0<'value, W>,
     macros: &'value MacroTable,
 }
@@ -192,7 +193,7 @@ impl<'value, W: Write + 'value> ValueWriter for TextAnnotatedValueWriter_1_1<'va
     }
 }
 
-pub struct TextListWriter_1_1<'value, W: Write> {
+pub struct TextListWriter_1_1<'value, W: RenderedWrite<IonToken>> {
     writer_1_0: TextListWriter_1_0<'value, W>,
     macros: &'value MacroTable,
 }
@@ -221,7 +222,7 @@ impl<W: Write> SequenceWriter for TextListWriter_1_1<'_, W> {
     }
 }
 
-pub struct TextSExpWriter_1_1<'value, W: Write> {
+pub struct TextSExpWriter_1_1<'value, W: RenderedWrite<IonToken>> {
     writer_1_0: TextSExpWriter_1_0<'value, W>,
     macros: &'value MacroTable,
 }
@@ -250,7 +251,7 @@ impl<W: Write> SequenceWriter for TextSExpWriter_1_1<'_, W> {
     }
 }
 
-pub struct TextStructWriter_1_1<'value, W: Write> {
+pub struct TextStructWriter_1_1<'value, W: RenderedWrite<IonToken>> {
     writer_1_0: TextStructWriter_1_0<'value, W>,
     macros: &'value MacroTable,
 }
@@ -287,7 +288,7 @@ impl<W: Write> StructWriter for TextStructWriter_1_1<'_, W> {
     }
 }
 
-pub struct TextEExpWriter_1_1<'value, W: Write> {
+pub struct TextEExpWriter_1_1<'value, W: RenderedWrite<IonToken>> {
     // There is no e-exp writer in 1.0 to which we can delegate,
     // but we can re-use the TextContainerWriter_1_0 for a lot of the formatting.
     container_writer: TextContainerWriter_1_0<'value, W>,
@@ -385,7 +386,7 @@ impl<'eexp, W: Write + 'eexp> EExpWriter for TextEExpWriter_1_1<'eexp, W> {
     // Default SequenceWriter methods
 }
 
-pub struct TextExprGroupWriter<'group, W: Write> {
+pub struct TextExprGroupWriter<'group, W: RenderedWrite<IonToken>> {
     // There is no expr group writer in 1.0 to which we can delegate,
     // but we can re-use the TextContainerWriter_1_0 for a lot of the formatting.
     container_writer: TextContainerWriter_1_0<'group, W>,

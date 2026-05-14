@@ -4,7 +4,10 @@ use crate::result::IonFailure;
 use crate::{Annotations, Sequence};
 use crate::{Decimal, Int, Struct, Timestamp};
 use crate::{IonResult, IonType};
+use std::iter::Peekable;
+use std::str::CharIndices;
 use std::{fmt, io};
+use std::process::exit;
 
 pub const STRING_ESCAPE_CODES: &[&str] = &string_escape_code_init();
 
@@ -181,6 +184,117 @@ pub(crate) const fn string_escape_code_init() -> [&'static str; 256] {
     string_escape_codes
 }
 
+pub(crate) fn token_is_identifier(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let mut chars = token.chars();
+    let first = chars.next().unwrap();
+    (first == '$' || first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
+}
+
+pub(crate) fn token_is_keyword(token: &str) -> bool {
+    const KEYWORDS: &[&str] = &["true", "false", "nan", "null"];
+    KEYWORDS.contains(&token)
+}
+
+pub(crate) fn token_resembles_symbol_id(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let mut chars = token.chars();
+    let first = chars.next().unwrap();
+    first == '$' && chars.all(|c| c.is_numeric())
+}
+
+/// Returns true if this symbol text requires quoting when used as a token.
+pub(crate) fn token_needs_quoting(token: &str) -> bool {
+    !token_is_identifier(token) || token_is_keyword(token) || token_resembles_symbol_id(token)
+}
+
+/// An iterator that yields `&[u8]` chunks for an Ion string or symbol body, replacing
+/// characters that require escaping with their escape sequences (`\n`, `\t`, `\"`, etc.).
+///
+/// This handles the escape set for Ion text strings and symbols only. It does NOT handle the
+/// full `\xHH` escaping needed for clobs (see `STRING_ESCAPE_CODES` and `format_clob`).
+pub(crate) struct EscapedIonText<'a> {
+    i: usize,
+    text: &'a str,
+    wrapped: Peekable<CharIndices<'a>>,
+    pending_escape: Option<&'static [u8]>,
+}
+
+impl<'a> EscapedIonText<'a> {
+    pub(crate) fn wrap(str_ref: &'a str) -> Self {
+        Self {
+            i: 0,
+            text: str_ref,
+            wrapped: str_ref.char_indices().peekable(),
+            pending_escape: None,
+        }
+    }
+
+    fn escape_for_char(c: char) -> Option<&'static [u8]> {
+        let escape = match c {
+            '\n' => r"\n",
+            '\r' => r"\r",
+            '\t' => r"\t",
+            '\\' => r"\\",
+            '"' => r#"\""#,
+            '\'' => r"\'",
+            '\x00' => r"\0", // NUL
+            '\x07' => r"\a", // alert BEL
+            '\x08' => r"\b", // backspace
+            '\x0B' => r"\v", // vertical tab
+            '\x0C' => r"\f", // form feed
+            _ => return None,
+        };
+        Some(escape.as_bytes())
+    }
+}
+
+impl<'a> Iterator for EscapedIonText<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // If a previous call found an escape but had to emit the preceding chunk first,
+        // emit the escape now.
+        if let Some(escape) = self.pending_escape.take() {
+            return Some(escape);
+        }
+
+        let chars = &mut self.wrapped;
+        let start = self.i;
+
+        while let Some((byte_index, character)) = chars.next() {
+            if let Some(escape) = Self::escape_for_char(character) {
+                // Advance past this character
+                self.i = if let Some((next_i, _)) = chars.peek() {
+                    *next_i
+                } else {
+                    self.text.len()
+                };
+                // If there was unescaped text before this escape, emit it first
+                // and save the escape for the next call.
+                if start < byte_index {
+                    self.pending_escape = Some(escape);
+                    return Some(&self.text.as_bytes()[start..byte_index]);
+                }
+                return Some(escape);
+            }
+        }
+
+        // No more characters — emit any remaining unescaped text
+        if start < self.text.len() {
+            self.i = self.text.len();
+            Some(&self.text.as_bytes()[start..])
+        } else {
+            None
+        }
+    }
+}
+
 /// Provides a text formatter for Ion values
 /// This is used with the Display implementation of `OwnedElement`
 pub struct FmtValueFormatter<'a, W: fmt::Write> {
@@ -249,33 +363,21 @@ impl<W: fmt::Write> FmtValueFormatter<'_, W> {
     /// * `$name`
     ///
     /// Unlike other symbols, identifiers don't have to be wrapped in quotes.
-    fn token_is_identifier(token: &str) -> bool {
-        if token.is_empty() {
-            return false;
-        }
-        let mut chars = token.chars();
-        let first = chars.next().unwrap();
-        (first == '$' || first == '_' || first.is_ascii_alphabetic())
-            && chars.all(|c| c == '$' || c == '_' || c.is_ascii_alphanumeric())
+    pub(crate) fn token_is_identifier(token: &str) -> bool {
+        token_is_identifier(token)
     }
 
     /// Returns `true` if the provided text is an Ion keyword. Keywords like `true` or `null`
     /// resemble identifiers, but writers must wrap them in quotes when using them as symbol text.
-    fn token_is_keyword(token: &str) -> bool {
-        const KEYWORDS: &[&str] = &["true", "false", "nan", "null"];
-        KEYWORDS.contains(&token)
+    pub(crate) fn token_is_keyword(token: &str) -> bool {
+        token_is_keyword(token)
     }
 
     /// Returns `true` if this token's text resembles a symbol ID literal. For example: `'$99'` is a
     /// symbol with the text `$99`. However, `$99` (without quotes) is a symbol ID that maps to
     /// different text.
-    fn token_resembles_symbol_id(token: &str) -> bool {
-        if token.is_empty() {
-            return false;
-        }
-        let mut chars = token.chars();
-        let first = chars.next().unwrap();
-        first == '$' && chars.all(|c| c.is_numeric())
+    pub(crate) fn token_resembles_symbol_id(token: &str) -> bool {
+        token_resembles_symbol_id(token)
     }
 
     pub(crate) fn format_symbol_token<A: AsRawSymbolRef>(&mut self, token: A) -> IonResult<()> {

@@ -2,7 +2,7 @@ use std::io::Write;
 
 use delegate::delegate;
 
-use crate::lazy::encoder::text::render::{IonToken, Render};
+use crate::lazy::encoder::text::render::{IonToken, RenderedWrite};
 use crate::lazy::encoder::text::v1_0::value_writer::TextValueWriter_1_0;
 use crate::lazy::encoder::value_writer::internal::MakeValueWriter;
 use crate::lazy::encoder::value_writer::SequenceWriter;
@@ -19,12 +19,12 @@ use crate::write_config::WriteConfigKind;
 use crate::{ContextWriter, IonResult, TextFormat, WriteConfig};
 
 /// A raw text Ion 1.0 writer.
-pub struct LazyRawTextWriter_1_0<R: Render<IonToken>> {
-    pub(crate) output: R,
+pub struct LazyRawTextWriter_1_0<W: RenderedWrite<IonToken>> {
+    pub(crate) output: W,
     pub(crate) whitespace_config: &'static WhitespaceConfig,
 }
 
-impl<R: Render<IonToken>> LazyRawTextWriter_1_0<R> {
+impl<W: RenderedWrite<IonToken>> LazyRawTextWriter_1_0<W> {
     /// Writes the provided data as a top-level value.
     pub fn write<V: WriteAsIon>(&mut self, value: V) -> IonResult<&mut Self> {
         value.write_as_ion(self.value_writer())?;
@@ -33,7 +33,7 @@ impl<R: Render<IonToken>> LazyRawTextWriter_1_0<R> {
 
     /// Helper method to construct this format's `ValueWriter` implementation.
     #[inline]
-    fn value_writer(&mut self) -> TextValueWriter_1_0<'_, R> {
+    fn value_writer(&mut self) -> TextValueWriter_1_0<'_, W> {
         TextValueWriter_1_0::new(
             self,
             0,
@@ -78,7 +78,7 @@ impl<W: Write> MakeValueWriter for LazyRawTextWriter_1_0<W> {
     }
 }
 
-impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_0<W> {
+impl<W: Write + RenderedWrite<IonToken>> LazyRawWriter<W> for LazyRawTextWriter_1_0<W> {
     fn new(output: W) -> IonResult<Self> {
         Self::build(
             WriteConfig::<TextEncoding_1_0>::new(TextFormat::default()),
@@ -132,8 +132,9 @@ impl<W: Write> LazyRawWriter<W> for LazyRawTextWriter_1_0<W> {
 
     fn write_version_marker(&mut self) -> IonResult<()> {
         let space_between = self.whitespace_config.space_between_top_level_values;
-        Render::<IonToken>::write_marked(&mut self.output, b"$ion_1_0", IonToken::VersionMarker)?;
-        Render::<IonToken>::write_raw(&mut self.output, space_between.as_bytes())?;
+        self.output
+            .write_marked(b"$ion_1_0", IonToken::VersionMarker)?;
+        self.output.write_raw(space_between.as_bytes())?;
         Ok(())
     }
 }
