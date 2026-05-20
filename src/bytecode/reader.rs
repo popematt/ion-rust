@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
@@ -37,7 +38,7 @@ pub(crate) struct ContainerInfo {
     end_index: usize,
 }
 
-pub(crate) struct BytecodeReader {
+pub struct BytecodeReader {
     bytecode: Vec<u32>,
     i: usize,
     instruction: Instruction,
@@ -59,7 +60,7 @@ pub(crate) struct BytecodeReader {
     /// The current local symbol table. Initialized with system symbols
     /// (SIDs 1-9). Updated when DIRECTIVE_SET_SYMBOLS or
     /// DIRECTIVE_ADD_SYMBOLS instructions are encountered.
-    symbol_table: Vec<Option<String>>,
+    symbol_table: Vec<Option<Arc<str>>>,
 }
 
 impl BytecodeReader {
@@ -67,8 +68,8 @@ impl BytecodeReader {
     ///
     /// Encountering a REFILL instruction will panic. This constructor is
     /// intended for tests that supply complete bytecode sequences.
-    pub(crate) fn new(bytecode: Vec<u32>) -> Self {
-        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+    pub fn new(bytecode: Vec<u32>) -> Self {
+        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         Self {
             bytecode,
             i: 0,
@@ -88,8 +89,8 @@ impl BytecodeReader {
     /// Creates a reader backed by a generator that produces bytecode on
     /// demand. The initial bytecode buffer contains only a REFILL
     /// instruction, so the first call to `next()` will trigger a refill.
-    pub(crate) fn with_generator(generator: Box<dyn BytecodeGenerator>) -> Self {
-        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+    pub fn with_generator(generator: Box<dyn BytecodeGenerator>) -> Self {
+        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         Self {
             bytecode: vec![instr::REFILL],
             i: 0,
@@ -106,7 +107,7 @@ impl BytecodeReader {
         }
     }
 
-    pub(crate) fn next(&mut self) -> IonResult<Option<IonType>> {
+    pub fn next(&mut self) -> IonResult<Option<IonType>> {
         self.field_name_index = -1;
         let mut i = self.i;
         let mut instruction = self.instruction;
@@ -217,22 +218,22 @@ impl BytecodeReader {
         Ok(operation_kind::ion_type_of(instruction.operation_kind()))
     }
 
-    pub(crate) fn ion_type(&self) -> Option<IonType> {
+    pub fn ion_type(&self) -> Option<IonType> {
         operation_kind::ion_type_of(self.instruction.operation_kind())
     }
 
-    pub(crate) fn is_null(&self) -> bool {
+    pub fn is_null(&self) -> bool {
         self.instruction.is_null()
     }
 
-    pub(crate) fn bool_value(&self) -> IonResult<bool> {
+    pub fn bool_value(&self) -> IonResult<bool> {
         if self.instruction.operation() != op::BOOL {
             return IonResult::decoding_error("not positioned on a boolean");
         }
         Ok((self.instruction.data() & 1) == 1)
     }
 
-    pub(crate) fn i64_value(&self) -> IonResult<i64> {
+    pub fn i64_value(&self) -> IonResult<i64> {
         let instruction = self.instruction;
         let i = self.i;
         match instruction.operation() {
@@ -267,7 +268,7 @@ impl BytecodeReader {
     ///
     /// Handles inline encodings (i16, i32, i64) as well as constant pool
     /// entries (INT_CP) and source references (INT_REF).
-    pub(crate) fn int_value(&self) -> IonResult<Int> {
+    pub fn int_value(&self) -> IonResult<Int> {
         let instruction = self.instruction;
         let i = self.i;
         match instruction.operation() {
@@ -295,7 +296,7 @@ impl BytecodeReader {
     }
 
     /// Returns the current value as a `Decimal`.
-    pub(crate) fn decimal_value(&self) -> IonResult<Decimal> {
+    pub fn decimal_value(&self) -> IonResult<Decimal> {
         let instruction = self.instruction;
         match instruction.operation() {
             op::DECIMAL_CP => {
@@ -315,7 +316,7 @@ impl BytecodeReader {
     }
 
     /// Returns the current value as a `Timestamp`.
-    pub(crate) fn timestamp_value(&self) -> IonResult<Timestamp> {
+    pub fn timestamp_value(&self) -> IonResult<Timestamp> {
         let instruction = self.instruction;
         match instruction.operation() {
             op::TIMESTAMP_CP => {
@@ -335,7 +336,7 @@ impl BytecodeReader {
     }
 
     /// Returns the current value as a string reference.
-    pub(crate) fn string_value(&self) -> IonResult<Rc<str>> {
+    pub fn string_value(&self) -> IonResult<Rc<str>> {
         let instruction = self.instruction;
         match instruction.operation() {
             op::STRING_CP => {
@@ -348,7 +349,7 @@ impl BytecodeReader {
             op::STRING_REF => {
                 let length = instruction.data();
                 let position = self.bytecode[self.i];
-                let text = self.generator()?.read_text_ref(position, length)?;
+                let text: &str = self.generator()?.read_text_ref(position, length)?;
                 Ok(Rc::from(text))
             }
             _ => IonResult::decoding_error("not positioned on a string"),
@@ -356,7 +357,7 @@ impl BytecodeReader {
     }
 
     /// Returns the current value as a byte slice reference.
-    pub(crate) fn lob_value(&self) -> IonResult<Rc<[u8]>> {
+    pub fn lob_value(&self) -> IonResult<Rc<[u8]>> {
         let instruction = self.instruction;
         match instruction.operation() {
             op::BLOB_CP | op::CLOB_CP => {
@@ -369,7 +370,7 @@ impl BytecodeReader {
             op::BLOB_REF | op::CLOB_REF => {
                 let length = instruction.data();
                 let position = self.bytecode[self.i];
-                let bytes = self.generator()?.read_bytes_ref(position, length)?;
+                let bytes: &[u8] = self.generator()?.read_bytes_ref(position, length)?;
                 Ok(Rc::from(bytes))
             }
             _ => IonResult::decoding_error("not positioned on a lob"),
@@ -377,26 +378,26 @@ impl BytecodeReader {
     }
 
     /// Returns a reference to the constant pool.
-    pub(crate) fn constant_pool(&self) -> &ConstantPool {
+    pub fn constant_pool(&self) -> &ConstantPool {
         &self.constant_pool
     }
 
     /// Returns a mutable reference to the constant pool.
-    pub(crate) fn constant_pool_mut(&mut self) -> &mut ConstantPool {
+    pub fn constant_pool_mut(&mut self) -> &mut ConstantPool {
         &mut self.constant_pool
     }
 
     /// Returns the first_local_constant index.
-    pub(crate) fn first_local_constant(&self) -> usize {
+    pub fn first_local_constant(&self) -> usize {
         self.first_local_constant
     }
 
     /// Sets the first_local_constant index.
-    pub(crate) fn set_first_local_constant(&mut self, index: usize) {
+    pub fn set_first_local_constant(&mut self, index: usize) {
         self.first_local_constant = index;
     }
 
-    pub(crate) fn f64_value(&self) -> IonResult<f64> {
+    pub fn f64_value(&self) -> IonResult<f64> {
         let instruction = self.instruction;
         let i = self.i;
         match instruction.operation() {
@@ -415,7 +416,7 @@ impl BytecodeReader {
 
     /// Steps into the current container (list, sexp, or struct).
     /// After calling this, `next()` will iterate the container's children.
-    pub(crate) fn step_in(&mut self) -> IonResult<()> {
+    pub fn step_in(&mut self) -> IonResult<()> {
         let instruction = self.instruction;
         let o = instruction.operation();
 
@@ -437,7 +438,7 @@ impl BytecodeReader {
 
     /// Steps out of the current container. Remaining children are skipped
     /// in O(1) via the length prefix.
-    pub(crate) fn step_out(&mut self) -> IonResult<()> {
+    pub fn step_out(&mut self) -> IonResult<()> {
         let info = self.container_stack.pop().ok_or_else(|| {
             IonResult::<()>::decoding_error("cannot step out: not inside a container").unwrap_err()
         })?;
@@ -451,24 +452,24 @@ impl BytecodeReader {
 
     /// Returns the current container nesting depth. At the top level,
     /// depth is 0.
-    pub(crate) fn depth(&self) -> usize {
+    pub fn depth(&self) -> usize {
         self.container_stack.len()
     }
 
-    pub(crate) fn instruction(&self) -> Instruction {
+    pub fn instruction(&self) -> Instruction {
         self.instruction
     }
 
-    pub(crate) fn annotations_index(&self) -> i32 {
+    pub fn annotations_index(&self) -> i32 {
         self.annotations_index
     }
 
-    pub(crate) fn annotation_count(&self) -> u8 {
+    pub fn annotation_count(&self) -> u8 {
         self.annotation_count
     }
 
     /// Returns true if the current value has any annotations.
-    pub(crate) fn has_annotations(&self) -> bool {
+    pub fn has_annotations(&self) -> bool {
         self.annotation_count > 0
     }
 
@@ -477,7 +478,7 @@ impl BytecodeReader {
     /// Each annotation is yielded as a `SymbolToken` — either a SID or
     /// text from the constant pool. REF variants are not yet supported
     /// and will produce an error.
-    pub(crate) fn annotations(&self) -> AnnotationIterator<'_> {
+    pub fn annotations(&self) -> AnnotationIterator<'_> {
         AnnotationIterator {
             bytecode: &self.bytecode,
             constant_pool: &self.constant_pool,
@@ -495,7 +496,7 @@ impl BytecodeReader {
     /// value).
     ///
     /// REF variants are not yet supported and will produce an error.
-    pub(crate) fn field_name(&self) -> IonResult<Option<SymbolToken>> {
+    pub fn field_name(&self) -> IonResult<Option<SymbolToken>> {
         let idx = self.field_name_index;
         if idx < 0 {
             return Ok(None);
@@ -513,7 +514,7 @@ impl BytecodeReader {
             op::FIELD_NAME_REF => {
                 let length = data;
                 let position = self.bytecode[idx as usize + 1];
-                let text = self.generator()?.read_text_ref(position, length)?;
+                let text: &str = self.generator()?.read_text_ref(position, length)?;
                 Ok(Some(SymbolToken::Text(Rc::from(text))))
             }
             _ => IonResult::decoding_error(
@@ -522,7 +523,7 @@ impl BytecodeReader {
         }
     }
 
-    pub(crate) fn field_name_index(&self) -> i32 {
+    pub fn field_name_index(&self) -> i32 {
         self.field_name_index
     }
 
@@ -552,12 +553,12 @@ impl BytecodeReader {
     }
 
     /// Returns a reference to the reader's symbol table.
-    pub(crate) fn symbol_table(&self) -> &[Option<String>] {
+    pub fn symbol_table(&self) -> &[Option<Arc<str>>] {
         &self.symbol_table
     }
 
     /// Returns a mutable reference to the reader's symbol table.
-    pub(crate) fn symbol_table_mut(&mut self) -> &mut Vec<Option<String>> {
+    pub fn symbol_table_mut(&mut self) -> &mut Vec<Option<Arc<str>>> {
         &mut self.symbol_table
     }
 
@@ -565,7 +566,7 @@ impl BytecodeReader {
     /// symbols only.
     fn handle_ivm(&mut self, _instruction: Instruction) {
         // Reset symbol table to system symbols (Ion 1.0)
-        self.symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+        self.symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
     }
 
     /// Handles a directive instruction. Reads the directive content
@@ -578,7 +579,7 @@ impl BytecodeReader {
                 if is_set {
                     // Reset to system symbols only
                     self.symbol_table =
-                        SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+                        SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
                 }
 
                 // Read directive content until END_CONTAINER
@@ -597,7 +598,9 @@ impl BytecodeReader {
                             // Resolve text from the generator
                             if let Some(gen) = &self.generator {
                                 match gen.read_text_ref(position, length) {
-                                    Ok(text) => self.symbol_table.push(Some(text)),
+                                    Ok(text) => {
+                                        self.symbol_table.push(Some(Arc::from(text)));
+                                    }
                                     Err(_) => self.symbol_table.push(None),
                                 }
                             } else {
@@ -608,7 +611,7 @@ impl BytecodeReader {
                             let index = instr.data();
                             match self.constant_pool.get(index) {
                                 Constant::String(rc) => {
-                                    self.symbol_table.push(Some(rc.as_ref().to_string()));
+                                    self.symbol_table.push(Some(Arc::from(rc.as_ref())));
                                 }
                                 _ => self.symbol_table.push(None),
                             }
@@ -1730,11 +1733,11 @@ mod tests {
             IonResult::decoding_error("MockGenerator does not support read_timestamp_ref")
         }
 
-        fn read_text_ref(&self, _position: u32, _length: u32) -> IonResult<String> {
+        fn read_text_ref(&self, _position: u32, _length: u32) -> IonResult<&str> {
             IonResult::decoding_error("MockGenerator does not support read_text_ref")
         }
 
-        fn read_bytes_ref(&self, _position: u32, _length: u32) -> IonResult<Vec<u8>> {
+        fn read_bytes_ref(&self, _position: u32, _length: u32) -> IonResult<&[u8]> {
             IonResult::decoding_error("MockGenerator does not support read_bytes_ref")
         }
     }
@@ -1825,11 +1828,11 @@ mod tests {
                 IonResult::decoding_error("not supported")
             }
 
-            fn read_text_ref(&self, _position: u32, _length: u32) -> IonResult<String> {
+            fn read_text_ref(&self, _position: u32, _length: u32) -> IonResult<&str> {
                 IonResult::decoding_error("not supported")
             }
 
-            fn read_bytes_ref(&self, _position: u32, _length: u32) -> IonResult<Vec<u8>> {
+            fn read_bytes_ref(&self, _position: u32, _length: u32) -> IonResult<&[u8]> {
                 IonResult::decoding_error("not supported")
             }
         }
