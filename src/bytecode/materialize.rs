@@ -5,6 +5,8 @@
 //! `read_one_v2`) detect the input format, create the appropriate
 //! generator, and wire up the pipeline.
 
+use std::sync::Arc;
+
 use crate::bytecode::constant_pool::Constant;
 use crate::bytecode::instruction::op;
 use crate::bytecode::ion10::BinaryIon10Generator;
@@ -66,7 +68,7 @@ fn materialize_annotations(reader: &BytecodeReader) -> IonResult<Annotations> {
 }
 
 /// Converts a `SymbolToken` to a `Symbol` using the symbol table.
-fn resolve_symbol_token(token: &SymbolToken, symbol_table: &[Option<String>]) -> Symbol {
+fn resolve_symbol_token(token: &SymbolToken, symbol_table: &[Option<Arc<str>>]) -> Symbol {
     match token {
         SymbolToken::Sid(sid) => {
             // SID 0 is always unknown text
@@ -76,7 +78,7 @@ fn resolve_symbol_token(token: &SymbolToken, symbol_table: &[Option<String>]) ->
             // Look up in symbol table (1-indexed: SID 1 = index 0)
             let index = *sid - 1;
             match symbol_table.get(index) {
-                Some(Some(text)) => Symbol::from(text.as_str()),
+                Some(Some(arc)) => Symbol::shared(Arc::clone(arc)),
                 Some(None) | None => Symbol::unknown_text(),
             }
         }
@@ -146,7 +148,7 @@ fn materialize_symbol_value(reader: &BytecodeReader) -> IonResult<Symbol> {
             } else {
                 let index = sid - 1;
                 match reader.symbol_table().get(index) {
-                    Some(Some(text)) => Ok(Symbol::from(text.as_str())),
+                    Some(Some(arc)) => Ok(Symbol::shared(Arc::clone(arc))),
                     Some(None) | None => Ok(Symbol::unknown_text()),
                 }
             }

@@ -12,7 +12,7 @@ use crate::{Decimal, Int, IonResult, Timestamp};
 /// The `read_*_ref` methods allow lazy resolution of scalars that were
 /// encoded as source-position references (REF instructions) rather than
 /// being eagerly materialized into the constant pool.
-pub(crate) trait BytecodeGenerator {
+pub trait BytecodeGenerator {
     /// Fills the bytecode buffer with instructions for one or more
     /// top-level values. Appends `END_OF_INPUT` if the source is exhausted.
     ///
@@ -29,9 +29,9 @@ pub(crate) trait BytecodeGenerator {
     /// Reads a timestamp from the source.
     fn read_timestamp_ref(&self, position: u32, length: u32) -> IonResult<Timestamp>;
 
-    /// Reads UTF-8 text from the source.
-    fn read_text_ref(&self, position: u32, length: u32) -> IonResult<String>;
+    /// Reads UTF-8 text from the source, borrowing from the underlying data.
+    fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str>;
 
-    /// Reads raw bytes from the source.
-    fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<Vec<u8>>;
+    /// Reads raw bytes from the source, borrowing from the underlying data.
+    fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]>;
 }

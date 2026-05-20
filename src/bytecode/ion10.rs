@@ -64,7 +64,7 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
 /// Translates Ion 1.0 binary bytes into bytecode instructions. Each call
 /// to `refill` processes one or more top-level values (stopping at IVM
 /// boundaries or end of input).
-pub(crate) struct BinaryIon10Generator {
+pub struct BinaryIon10Generator {
     source: Vec<u8>,
     position: usize,
     /// The current local symbol table. Initialized with system symbols
@@ -712,21 +712,21 @@ impl BytecodeGenerator for BinaryIon10Generator {
         todo!("Timestamp REF reading is deferred")
     }
 
-    fn read_text_ref(&self, position: u32, length: u32) -> IonResult<String> {
+    fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str> {
         let start = position as usize;
         let end = start + length as usize;
         let bytes = &self.source[start..end];
-        String::from_utf8(bytes.to_vec()).map_err(|e| {
+        std::str::from_utf8(bytes).map_err(|e| {
             crate::IonError::decoding_error(format!(
                 "invalid UTF-8 in string at offset {position}: {e}"
             ))
         })
     }
 
-    fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<Vec<u8>> {
+    fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]> {
         let start = position as usize;
         let end = start + length as usize;
-        Ok(self.source[start..end].to_vec())
+        Ok(&self.source[start..end])
     }
 }
 
