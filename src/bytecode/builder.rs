@@ -1,4 +1,4 @@
-use super::instruction::{instr, op, Instruction};
+use super::instruction::{instr, Instruction};
 
 pub(crate) struct BytecodeBuilder {
     buffer: Vec<Instruction>,
@@ -106,6 +106,53 @@ impl BytecodeBuilder {
         self
     }
 
+    /// Emits an INT_CP instruction referencing the given constant pool index.
+    pub fn int_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::INT_CP, cp_index));
+        self
+    }
+
+    /// Emits a DECIMAL_CP instruction referencing the given constant pool
+    /// index.
+    pub fn decimal_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::DECIMAL_CP, cp_index));
+        self
+    }
+
+    /// Emits a TIMESTAMP_CP instruction referencing the given constant pool
+    /// index.
+    pub fn timestamp_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::TIMESTAMP_CP, cp_index));
+        self
+    }
+
+    /// Emits a STRING_CP instruction referencing the given constant pool
+    /// index.
+    pub fn string_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::STRING_CP, cp_index));
+        self
+    }
+
+    /// Emits a BLOB_CP instruction referencing the given constant pool
+    /// index.
+    pub fn blob_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::BLOB_CP, cp_index));
+        self
+    }
+
+    /// Emits a CLOB_CP instruction referencing the given constant pool
+    /// index.
+    pub fn clob_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::CLOB_CP, cp_index));
+        self
+    }
+
     pub fn float_f32(mut self, value: f32) -> Self {
         self.buffer.push(Instruction::from_raw(instr::FLOAT_F32));
         self.buffer.push(Instruction::from_raw(value.to_bits()));
@@ -117,6 +164,42 @@ impl BytecodeBuilder {
         let bits = value.to_bits();
         self.buffer.push(Instruction::from_raw((bits >> 32) as u32));
         self.buffer.push(Instruction::from_raw(bits as u32));
+        self
+    }
+
+    pub fn int_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::INT_CP, cp_index));
+        self
+    }
+
+    pub fn decimal_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::DECIMAL_CP, cp_index));
+        self
+    }
+
+    pub fn timestamp_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::TIMESTAMP_CP, cp_index));
+        self
+    }
+
+    pub fn string_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::STRING_CP, cp_index));
+        self
+    }
+
+    pub fn blob_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::BLOB_CP, cp_index));
+        self
+    }
+
+    pub fn clob_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::CLOB_CP, cp_index));
         self
     }
 
@@ -138,9 +221,25 @@ impl BytecodeBuilder {
         self
     }
 
+    /// Emits an ANNOTATION_CP instruction referencing the given constant
+    /// pool index.
+    pub fn annotation_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::ANNOTATION_CP, cp_index));
+        self
+    }
+
     pub fn field_name_sid(mut self, sid: u32) -> Self {
         self.buffer
             .push(Instruction::with_data_from(instr::FIELD_NAME_SID, sid));
+        self
+    }
+
+    /// Emits a FIELD_NAME_CP instruction referencing the given constant
+    /// pool index.
+    pub fn field_name_cp(mut self, cp_index: u32) -> Self {
+        self.buffer
+            .push(Instruction::with_data_from(instr::FIELD_NAME_CP, cp_index));
         self
     }
 
@@ -185,7 +284,7 @@ impl BytecodeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::instruction::{op, operation_kind, render_bytecode};
+    use crate::bytecode::instruction::{op, render_bytecode};
 
     #[test]
     fn builder_scalars() {
@@ -276,4 +375,53 @@ mod tests {
         assert!(rendered.contains("BOOL true"));
         assert!(rendered.contains("END_CONTAINER"));
     }
+
+    // --- pt004: Constant pool builder tests ---
+
+    #[test]
+    fn builder_cp_instructions() {
+        let bytecode = BytecodeBuilder::new()
+            .int_cp(5)
+            .decimal_cp(0)
+            .timestamp_cp(1)
+            .string_cp(2)
+            .blob_cp(3)
+            .clob_cp(4)
+            .end_of_input()
+            .build();
+
+        assert_eq!(bytecode.len(), 7);
+
+        assert_eq!(bytecode[0].operation(), op::INT_CP);
+        assert_eq!(bytecode[0].data(), 5);
+
+        assert_eq!(bytecode[1].operation(), op::DECIMAL_CP);
+        assert_eq!(bytecode[1].data(), 0);
+
+        assert_eq!(bytecode[2].operation(), op::TIMESTAMP_CP);
+        assert_eq!(bytecode[2].data(), 1);
+
+        assert_eq!(bytecode[3].operation(), op::STRING_CP);
+        assert_eq!(bytecode[3].data(), 2);
+
+        assert_eq!(bytecode[4].operation(), op::BLOB_CP);
+        assert_eq!(bytecode[4].data(), 3);
+
+        assert_eq!(bytecode[5].operation(), op::CLOB_CP);
+        assert_eq!(bytecode[5].data(), 4);
+    }
+
+    #[test]
+    fn builder_cp_data_is_masked_to_22_bits() {
+        // Verify the CP index is masked to the 22-bit data field.
+        let bytecode = BytecodeBuilder::new()
+            .int_cp(0x003F_FFFF) // max 22-bit value
+            .end_of_input()
+            .build();
+
+        assert_eq!(bytecode[0].operation(), op::INT_CP);
+        assert_eq!(bytecode[0].data(), 0x003F_FFFF);
+    }
+
+    // --- End pt004 builder tests ---
 }
