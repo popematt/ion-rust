@@ -1460,10 +1460,125 @@ mod tests {
 
     // --- End pt005 tests ---
 
+    #[test]
+    fn three_annotations() -> IonResult<()> {
+        let mut reader = reader_from(
+            BytecodeBuilder::new()
+                .annotation_sid(1)
+                .annotation_sid(2)
+                .annotation_sid(3)
+                .int_i16(99)
+                .end_of_input(),
+        );
+
+        assert_eq!(reader.next()?, Some(IonType::Int));
+        assert!(reader.has_annotations());
+        assert_eq!(reader.annotation_count(), 3);
+
+        let annotations: Vec<SymbolToken> = reader.annotations().collect::<IonResult<Vec<_>>>()?;
+        assert_eq!(
+            annotations,
+            vec![
+                SymbolToken::Sid(1),
+                SymbolToken::Sid(2),
+                SymbolToken::Sid(3)
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_iterator_exact_size() -> IonResult<()> {
+        let mut reader = reader_from(
+            BytecodeBuilder::new()
+                .annotation_sid(1)
+                .annotation_sid(2)
+                .int_i16(42)
+                .end_of_input(),
+        );
+
+        assert_eq!(reader.next()?, Some(IonType::Int));
+
+        let mut iter = reader.annotations();
+        assert_eq!(iter.len(), 2);
+        iter.next();
+        assert_eq!(iter.len(), 1);
+        iter.next();
+        assert_eq!(iter.len(), 0);
+        assert!(iter.next().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_cp_wrong_type_returns_error() -> IonResult<()> {
+        let mut reader = reader_from(
+            BytecodeBuilder::new()
+                .annotation_cp(0)
+                .int_i16(42)
+                .end_of_input(),
+        );
+        // Put a non-String constant in the pool.
+        reader
+            .constant_pool_mut()
+            .add(Constant::BigInt(Rc::new(Int::from(99))));
+
+        assert_eq!(reader.next()?, Some(IonType::Int));
+
+        let mut iter = reader.annotations();
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn field_name_cp_wrong_type_returns_error() -> IonResult<()> {
+        let mut reader = reader_from(
+            BytecodeBuilder::new()
+                .r#struct(|b| b.field_name_cp(0).int_i16(42))
+                .end_of_input(),
+        );
+        // Put a non-String constant in the pool.
+        reader
+            .constant_pool_mut()
+            .add(Constant::BigInt(Rc::new(Int::from(99))));
+
+        assert_eq!(reader.next()?, Some(IonType::Struct));
+        reader.step_in()?;
+        assert_eq!(reader.next()?, Some(IonType::Int));
+
+        let result = reader.field_name();
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn ref_without_generator_returns_error() -> IonResult<()> {
+        // Construct a reader without a generator that has a STRING_REF
+        // instruction. Attempting to read the value should return an error
+        // (not panic).
+        let bytecode: Vec<u32> = vec![
+            instr::STRING_REF | 10, // length=10
+            0x0000_1000,            // position operand
+            instr::END_OF_INPUT,
+        ];
+        let mut reader = BytecodeReader::new(bytecode);
+
+        assert_eq!(reader.next()?, Some(IonType::String));
+        let result = reader.string_value();
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    // --- End pt005 tests ---
+
     // --- pt006: Generator integration tests ---
 
     use crate::bytecode::generator::BytecodeGenerator;
-    use std::cell::Cell;
 
     /// A mock generator that emits a pre-determined sequence of bytecode
     /// batches, one per refill call.
@@ -1471,22 +1586,22 @@ mod tests {
         /// Each entry is a batch of raw u32 instructions to emit on refill.
         batches: Vec<Vec<u32>>,
         /// Tracks how many times refill has been called.
-        call_count: Cell<usize>,
+        call_count: usize,
     }
 
     impl MockGenerator {
         fn new(batches: Vec<Vec<u32>>) -> Self {
             Self {
                 batches,
-                call_count: Cell::new(0),
+                call_count: 0,
             }
         }
     }
 
     impl BytecodeGenerator for MockGenerator {
         fn refill(&mut self, destination: &mut Vec<u32>, _constant_pool: &mut ConstantPool) {
-            let idx = self.call_count.get();
-            self.call_count.set(idx + 1);
+            let idx = self.call_count;
+            self.call_count += 1;
             if idx < self.batches.len() {
                 destination.extend_from_slice(&self.batches[idx]);
             } else {
