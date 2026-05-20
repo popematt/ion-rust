@@ -6,6 +6,19 @@ use crate::bytecode::instruction::{instr, op, operation_kind, Instruction};
 use crate::result::IonFailure;
 use crate::{Decimal, Int, IonResult, IonType, Timestamp};
 
+/// Ion 1.0 system symbol table (SIDs 1-9).
+const SYSTEM_SYMBOLS: [&str; 9] = [
+    "$ion",
+    "$ion_1_0",
+    "$ion_symbol_table",
+    "name",
+    "version",
+    "imports",
+    "symbols",
+    "max_id",
+    "$ion_shared_symbol_table",
+];
+
 /// Represents a resolved or unresolved symbol token from the bytecode.
 ///
 /// Annotations and field names in the bytecode may be stored as either
@@ -43,6 +56,10 @@ pub(crate) struct BytecodeReader {
     /// buffer (e.g., in tests). When present, `refill_bytecode()` calls
     /// the generator to fill the buffer with more instructions.
     generator: Option<Box<dyn BytecodeGenerator>>,
+    /// The current local symbol table. Initialized with system symbols
+    /// (SIDs 1-9). Updated when DIRECTIVE_SET_SYMBOLS or
+    /// DIRECTIVE_ADD_SYMBOLS instructions are encountered.
+    symbol_table: Vec<Option<String>>,
 }
 
 impl BytecodeReader {
@@ -51,6 +68,7 @@ impl BytecodeReader {
     /// Encountering a REFILL instruction will panic. This constructor is
     /// intended for tests that supply complete bytecode sequences.
     pub(crate) fn new(bytecode: Vec<u32>) -> Self {
+        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
         Self {
             bytecode,
             i: 0,
@@ -63,6 +81,7 @@ impl BytecodeReader {
             constant_pool: ConstantPool::new(),
             first_local_constant: 0,
             generator: None,
+            symbol_table,
         }
     }
 
@@ -70,6 +89,7 @@ impl BytecodeReader {
     /// demand. The initial bytecode buffer contains only a REFILL
     /// instruction, so the first call to `next()` will trigger a refill.
     pub(crate) fn with_generator(generator: Box<dyn BytecodeGenerator>) -> Self {
+        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
         Self {
             bytecode: vec![instr::REFILL],
             i: 0,
@@ -82,6 +102,7 @@ impl BytecodeReader {
             constant_pool: ConstantPool::new(),
             first_local_constant: 0,
             generator: Some(generator),
+            symbol_table,
         }
     }
 
@@ -530,16 +551,104 @@ impl BytecodeReader {
         generator.refill(&mut self.bytecode, &mut self.constant_pool);
     }
 
-    /// Handles an IVM instruction. Must update `self.i` to the position
-    /// after any consumed instructions.
-    fn handle_ivm(&mut self, _instruction: Instruction) {
-        todo!("Requires encoding context management (pt007)")
+    /// Returns a reference to the reader's symbol table.
+    pub(crate) fn symbol_table(&self) -> &[Option<String>] {
+        &self.symbol_table
     }
 
-    /// Handles a directive instruction. Must update `self.i` to the
-    /// position after the directive's content (including END_CONTAINER).
-    fn handle_directive(&mut self, _instruction: Instruction) {
-        todo!("Requires encoding context management (pt007)")
+    /// Returns a mutable reference to the reader's symbol table.
+    pub(crate) fn symbol_table_mut(&mut self) -> &mut Vec<Option<String>> {
+        &mut self.symbol_table
+    }
+
+    /// Handles an IVM instruction. Resets the symbol table to system
+    /// symbols only.
+    fn handle_ivm(&mut self, _instruction: Instruction) {
+        // Reset symbol table to system symbols (Ion 1.0)
+        self.symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+    }
+
+    /// Handles a directive instruction. Reads the directive content
+    /// (symbol entries until END_CONTAINER) and updates the symbol table.
+    fn handle_directive(&mut self, instruction: Instruction) {
+        let op = instruction.operation();
+        match op {
+            op::DIRECTIVE_SET_SYMBOLS | op::DIRECTIVE_ADD_SYMBOLS => {
+                let is_set = op == op::DIRECTIVE_SET_SYMBOLS;
+                if is_set {
+                    // Reset to system symbols only
+                    self.symbol_table =
+                        SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+                }
+
+                // Read directive content until END_CONTAINER
+                let mut i = self.i;
+                loop {
+                    let raw = self.bytecode[i];
+                    let instr = Instruction::from_raw(raw);
+                    i += 1;
+
+                    match instr.operation() {
+                        op::END_CONTAINER => break,
+                        op::STRING_REF => {
+                            let length = instr.data();
+                            let position = self.bytecode[i];
+                            i += 1;
+                            // Resolve text from the generator
+                            if let Some(gen) = &self.generator {
+                                match gen.read_text_ref(position, length) {
+                                    Ok(text) => self.symbol_table.push(Some(text)),
+                                    Err(_) => self.symbol_table.push(None),
+                                }
+                            } else {
+                                self.symbol_table.push(None);
+                            }
+                        }
+                        op::STRING_CP => {
+                            let index = instr.data();
+                            match self.constant_pool.get(index) {
+                                Constant::String(rc) => {
+                                    self.symbol_table.push(Some(rc.as_ref().to_string()));
+                                }
+                                _ => self.symbol_table.push(None),
+                            }
+                        }
+                        op::SYMBOL_SID => {
+                            // SID 0 = unknown/null text
+                            self.symbol_table.push(None);
+                        }
+                        _ => {
+                            // Skip unknown instructions within the directive.
+                            // Advance past operands based on operand count.
+                            let oc = instr.operand_count_bits();
+                            if oc < 3 {
+                                i += oc as usize;
+                            }
+                        }
+                    }
+                }
+                self.i = i;
+            }
+            _ => {
+                // For DIRECTIVE_SET_MACROS, DIRECTIVE_ADD_MACROS,
+                // DIRECTIVE_USE: skip until END_CONTAINER (not yet
+                // implemented).
+                let mut i = self.i;
+                loop {
+                    let raw = self.bytecode[i];
+                    let instr = Instruction::from_raw(raw);
+                    i += 1;
+                    if instr.operation() == op::END_CONTAINER {
+                        break;
+                    }
+                    let oc = instr.operand_count_bits();
+                    if oc < 3 {
+                        i += oc as usize;
+                    }
+                }
+                self.i = i;
+            }
+        }
     }
 }
 

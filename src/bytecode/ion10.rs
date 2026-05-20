@@ -35,6 +35,11 @@ mod type_code {
     pub const ANNOTATION: u8 = 14;
 }
 
+/// Sentinel value returned by `read_type_descriptor` to indicate a typed
+/// null. This must be distinct from any valid representation length. Using
+/// `usize::MAX` ensures no collision with VarUInt-decoded lengths.
+const NULL_SENTINEL: usize = usize::MAX;
+
 /// Ion 1.0 system symbol SIDs.
 mod system_symbol {
     pub const ION_SYMBOL_TABLE: u32 = 3;
@@ -138,7 +143,7 @@ impl BinaryIon10Generator {
             type_code::NOP => {
                 if low == 0x0F {
                     // null.null — return sentinel to indicate null
-                    (tc, 0x0F)
+                    (tc, NULL_SENTINEL)
                 } else if low == 0x0E {
                     // VarUInt padding length follows
                     let length = self.read_var_uint();
@@ -162,7 +167,7 @@ impl BinaryIon10Generator {
                 // Types 1-13
                 if low == 0x0F {
                     // Typed null
-                    (tc, 0x0F)
+                    (tc, NULL_SENTINEL)
                 } else if low == 0x0E {
                     // VarUInt representation length
                     let length = self.read_var_uint();
@@ -198,8 +203,9 @@ impl BinaryIon10Generator {
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
-        // Check for null (length == 0x0F for types 0-13)
-        if length == 0x0F && tc <= type_code::STRUCT {
+        // Check for null (NULL_SENTINEL returned by read_type_descriptor
+        // when the type descriptor's low nibble is 0x0F)
+        if length == NULL_SENTINEL && tc <= type_code::STRUCT {
             self.emit_null(tc, destination);
             return false;
         }
@@ -554,11 +560,11 @@ impl BinaryIon10Generator {
                 let list_end = self.position + value_length;
                 while self.position < list_end {
                     let (elem_tc, elem_length) = self.read_type_descriptor();
-                    if elem_tc == type_code::STRING && elem_length != 0x0F {
+                    if elem_tc == type_code::STRING && elem_length != NULL_SENTINEL {
                         // String value — record its position in the source
                         new_symbols.push(Some((self.position, elem_length)));
                         self.position += elem_length;
-                    } else if elem_length == 0x0F {
+                    } else if elem_length == NULL_SENTINEL {
                         // Null value — unknown symbol text
                         new_symbols.push(None);
                     } else {
@@ -569,10 +575,10 @@ impl BinaryIon10Generator {
                 }
             } else {
                 // Skip fields we don't care about
-                if value_length != 0x0F {
+                if value_length != NULL_SENTINEL {
                     self.skip_value_body(value_tc, value_length);
                 }
-                // If value_length == 0x0F, it's a typed null — no body bytes
+                // If value_length == NULL_SENTINEL, it's a typed null — no body bytes
             }
         }
 
