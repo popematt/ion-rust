@@ -15,7 +15,7 @@ use crate::{Bytes, Element, IonResult, IonType, Sequence, Str, Struct, Symbol, V
 
 /// Reads all top-level values from binary Ion data using the bytecode
 /// reader pipeline. Returns a `Sequence` of materialized `Element`s.
-pub(crate) fn read_all_v2(data: &[u8]) -> IonResult<Sequence> {
+pub fn read_all_v2(data: &[u8]) -> IonResult<Sequence> {
     let generator = BinaryIon10Generator::new(data.to_vec());
     let mut reader = BytecodeReader::with_generator(Box::new(generator));
     let mut elements = Vec::new();

@@ -1,9 +1,9 @@
-pub(crate) mod constant_pool;
-pub(crate) mod generator;
-pub(crate) mod instruction;
-pub(crate) mod ion10;
-pub(crate) mod materialize;
-pub(crate) mod reader;
+pub mod constant_pool;
+pub mod generator;
+pub mod instruction;
+pub mod ion10;
+pub mod materialize;
+pub mod reader;
 
 #[cfg(test)]
 pub(crate) mod builder;
