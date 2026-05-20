@@ -106,6 +106,10 @@ name = "encoding_primitives"
 harness = false
 
 [[bench]]
+name = "bytecode_reader"
+harness = false
+
+[[bench]]
 name = "byod"
 harness = false
 bench = false

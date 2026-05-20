@@ -193,7 +193,8 @@ mod read_config;
 pub mod serde;
 pub(crate) mod unsafe_helpers;
 
-pub(crate) mod bytecode;
+#[doc(hidden)]
+pub mod bytecode;
 #[cfg(feature = "experimental-ion-hash")]
 pub mod ion_hash;
 pub(crate) mod lazy;
