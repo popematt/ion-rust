@@ -167,42 +167,6 @@ impl BytecodeBuilder {
         self
     }
 
-    pub fn int_cp(mut self, cp_index: u32) -> Self {
-        self.buffer
-            .push(Instruction::with_data_from(instr::INT_CP, cp_index));
-        self
-    }
-
-    pub fn decimal_cp(mut self, cp_index: u32) -> Self {
-        self.buffer
-            .push(Instruction::with_data_from(instr::DECIMAL_CP, cp_index));
-        self
-    }
-
-    pub fn timestamp_cp(mut self, cp_index: u32) -> Self {
-        self.buffer
-            .push(Instruction::with_data_from(instr::TIMESTAMP_CP, cp_index));
-        self
-    }
-
-    pub fn string_cp(mut self, cp_index: u32) -> Self {
-        self.buffer
-            .push(Instruction::with_data_from(instr::STRING_CP, cp_index));
-        self
-    }
-
-    pub fn blob_cp(mut self, cp_index: u32) -> Self {
-        self.buffer
-            .push(Instruction::with_data_from(instr::BLOB_CP, cp_index));
-        self
-    }
-
-    pub fn clob_cp(mut self, cp_index: u32) -> Self {
-        self.buffer
-            .push(Instruction::with_data_from(instr::CLOB_CP, cp_index));
-        self
-    }
-
     pub fn symbol_sid(mut self, sid: u32) -> Self {
         self.buffer
             .push(Instruction::with_data_from(instr::SYMBOL_SID, sid));
