@@ -64,34 +64,32 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
 /// Translates Ion 1.0 binary bytes into bytecode instructions. Each call
 /// to `refill` processes one or more top-level values (stopping at IVM
 /// boundaries or end of input).
-pub struct BinaryIon10Generator {
-    source: Vec<u8>,
+///
+/// Generic over the source data type — accepts `Vec<u8>`, `&[u8]`,
+/// `Arc<[u8]>`, or any type implementing `AsRef<[u8]>`.
+pub struct BinaryIon10Generator<S: AsRef<[u8]>> {
+    source: S,
     position: usize,
-    /// The current local symbol table. Initialized with system symbols
-    /// (SIDs 1-9). Extended when an LST is encountered.
-    symbol_table: Vec<Option<String>>,
 }
 
-impl BinaryIon10Generator {
+impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
     /// Creates a new generator from the given Ion 1.0 binary data.
-    pub fn new(source: Vec<u8>) -> Self {
-        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+    pub fn new(source: S) -> Self {
         Self {
             source,
             position: 0,
-            symbol_table,
         }
     }
 
-    /// Returns a reference to the current symbol table.
-    #[cfg(test)]
-    pub fn symbol_table(&self) -> &[Option<String>] {
-        &self.symbol_table
+    /// Returns the source bytes.
+    #[inline(always)]
+    fn source(&self) -> &[u8] {
+        self.source.as_ref()
     }
 
     /// Returns true if the source is exhausted.
     fn is_exhausted(&self) -> bool {
-        self.position >= self.source.len()
+        self.position >= self.source().len()
     }
 
     /// Reads a VarUInt (variable-length unsigned integer) from the source.
@@ -101,7 +99,7 @@ impl BinaryIon10Generator {
     fn read_var_uint(&mut self) -> usize {
         let mut result: usize = 0;
         loop {
-            let byte = self.source[self.position];
+            let byte = self.source()[self.position];
             self.position += 1;
             result = (result << 7) | (byte & 0x7F) as usize;
             if byte & 0x80 != 0 {
@@ -115,7 +113,7 @@ impl BinaryIon10Generator {
     fn read_uint(&mut self, length: usize) -> u64 {
         let mut result: u64 = 0;
         for i in 0..length {
-            result = (result << 8) | self.source[self.position + i] as u64;
+            result = (result << 8) | self.source()[self.position + i] as u64;
         }
         self.position += length;
         result
@@ -134,7 +132,7 @@ impl BinaryIon10Generator {
     /// 1=true) when not null; this is handled by the caller since the
     /// "length" returned for bool IS the low nibble value.
     fn read_type_descriptor(&mut self) -> (u8, usize) {
-        let td = self.source[self.position];
+        let td = self.source()[self.position];
         self.position += 1;
         let tc = td >> 4;
         let low = td & 0x0F;
@@ -182,8 +180,8 @@ impl BinaryIon10Generator {
 
     /// Checks if the current position starts an IVM sequence.
     fn is_at_ivm(&self) -> bool {
-        self.position + 4 <= self.source.len()
-            && self.source[self.position..self.position + 4] == IVM_BYTES
+        self.position + 4 <= self.source().len()
+            && self.source()[self.position..self.position + 4] == IVM_BYTES
     }
 
     /// Emits bytecode for a single value at the current position.
@@ -383,7 +381,7 @@ impl BinaryIon10Generator {
         // Note: for truly large integers (> 16 bytes), this would overflow
         // u128. For now, we handle up to 16 bytes. Larger values would need
         // a proper BigInt library integration.
-        let bytes = &self.source[self.position..self.position + length];
+        let bytes = &self.source()[self.position..self.position + length];
         let magnitude_u128 = bytes.iter().fold(0u128, |acc, &b| (acc << 8) | b as u128);
         let value = if is_negative {
             // Build the positive magnitude as Int, then negate. This
@@ -502,7 +500,7 @@ impl BinaryIon10Generator {
             && annotation_sids[0] == system_symbol::ION_SYMBOL_TABLE
             && self.position < wrapper_end
         {
-            let peek_td = self.source[self.position];
+            let peek_td = self.source()[self.position];
             let peek_tc = peek_td >> 4;
             if peek_tc == type_code::STRUCT {
                 self.parse_local_symbol_table(wrapper_end, destination);
@@ -582,21 +580,6 @@ impl BinaryIon10Generator {
             }
         }
 
-        // Update the generator's symbol table: system symbols + new symbols
-        self.symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
-        for entry in &new_symbols {
-            match entry {
-                Some((offset, length)) => {
-                    let text_bytes = &self.source[*offset..*offset + *length];
-                    let text = String::from_utf8_lossy(text_bytes).into_owned();
-                    self.symbol_table.push(Some(text));
-                }
-                None => {
-                    self.symbol_table.push(None);
-                }
-            }
-        }
-
         // Emit the DIRECTIVE_SET_SYMBOLS bytecode
         destination.push(instr::DIRECTIVE_SET_SYMBOLS);
         for entry in &new_symbols {
@@ -640,7 +623,7 @@ impl BinaryIon10Generator {
     }
 }
 
-impl BytecodeGenerator for BinaryIon10Generator {
+impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
     fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
         if self.is_exhausted() {
             destination.push(instr::END_OF_INPUT);
@@ -668,7 +651,7 @@ impl BytecodeGenerator for BinaryIon10Generator {
             }
 
             // Peek at the type descriptor to check for NOP
-            let td = self.source[self.position];
+            let td = self.source()[self.position];
             let tc = td >> 4;
             let low = td & 0x0F;
 
@@ -699,7 +682,7 @@ impl BytecodeGenerator for BinaryIon10Generator {
     fn read_int_ref(&self, position: u32, length: u32) -> IonResult<Int> {
         let start = position as usize;
         let end = start + length as usize;
-        let bytes = &self.source[start..end];
+        let bytes = &self.source()[start..end];
         let value = bytes.iter().fold(0i128, |acc, &b| (acc << 8) | b as i128);
         Ok(Int::from(value))
     }
@@ -715,7 +698,7 @@ impl BytecodeGenerator for BinaryIon10Generator {
     fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str> {
         let start = position as usize;
         let end = start + length as usize;
-        let bytes = &self.source[start..end];
+        let bytes = &self.source()[start..end];
         std::str::from_utf8(bytes).map_err(|e| {
             crate::IonError::decoding_error(format!(
                 "invalid UTF-8 in string at offset {position}: {e}"
@@ -726,7 +709,7 @@ impl BytecodeGenerator for BinaryIon10Generator {
     fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]> {
         let start = position as usize;
         let end = start + length as usize;
-        Ok(&self.source[start..end])
+        Ok(&self.source()[start..end])
     }
 }
 
@@ -1422,7 +1405,9 @@ mod tests {
 
     /// Helper: generate bytecode, consuming all refills, returning the
     /// generator for inspection of symbol table state.
-    fn generate_all_with_gen(source: Vec<u8>) -> (Vec<u32>, ConstantPool, BinaryIon10Generator) {
+    fn generate_all_with_gen(
+        source: Vec<u8>,
+    ) -> (Vec<u32>, ConstantPool, BinaryIon10Generator<Vec<u8>>) {
         let mut gen = BinaryIon10Generator::new(source);
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -1503,17 +1488,9 @@ mod tests {
     }
 
     #[test]
-    fn lst_updates_symbol_table() {
+    fn lst_emits_directive_with_symbols() {
         let lst_bytes = build_lst_bytes(&["foo", "bar", "baz"]);
-        let (dest, _cp, gen) = generate_all_with_gen(lst_bytes);
-
-        // Verify symbol table was updated
-        let sym_table = gen.symbol_table();
-        // System symbols (9) + 3 new symbols = 12
-        assert_eq!(sym_table.len(), 12);
-        assert_eq!(sym_table[9], Some("foo".to_string()));
-        assert_eq!(sym_table[10], Some("bar".to_string()));
-        assert_eq!(sym_table[11], Some("baz".to_string()));
+        let (dest, _cp, _gen) = generate_all_with_gen(lst_bytes);
 
         // Verify DIRECTIVE_SET_SYMBOLS was emitted
         let dir_idx = dest
@@ -1589,11 +1566,7 @@ mod tests {
         source.push(0x71); // symbol type, length 1
         source.push(0x0B); // SID 11
 
-        let (dest, _cp, gen) = generate_all_with_gen(source);
-
-        // Verify the symbol table has the expected entries
-        assert_eq!(gen.symbol_table()[9], Some("foo".to_string()));
-        assert_eq!(gen.symbol_table()[10], Some("bar".to_string()));
+        let (dest, _cp, _gen) = generate_all_with_gen(source);
 
         // Find SYMBOL_SID instructions after the directive
         let symbol_sids: Vec<u32> = dest
@@ -1673,13 +1646,25 @@ mod tests {
         source.push(0x83); // SID 3
         source.extend_from_slice(&struct_td);
 
-        let (_dest, _cp, gen) = generate_all_with_gen(source);
+        let (dest, _cp, _gen) = generate_all_with_gen(source);
 
-        // Verify: system symbols (9) + 3 new (foo, None, bar) = 12
-        let sym_table = gen.symbol_table();
-        assert_eq!(sym_table.len(), 12);
-        assert_eq!(sym_table[9], Some("foo".to_string()));
-        assert_eq!(sym_table[10], None); // null symbol text
-        assert_eq!(sym_table[11], Some("bar".to_string()));
+        // Verify directive emits: STRING_REF("foo"), SYMBOL_SID(0), STRING_REF("bar")
+        let dir_idx = dest
+            .iter()
+            .position(|&w| Instruction::from_raw(w).operation() == op::DIRECTIVE_SET_SYMBOLS)
+            .expect("should have DIRECTIVE_SET_SYMBOLS");
+        let end_idx = dest[dir_idx..]
+            .iter()
+            .position(|&w| Instruction::from_raw(w).operation() == op::END_CONTAINER)
+            .unwrap();
+        let body = &dest[dir_idx + 1..dir_idx + end_idx];
+
+        // First: STRING_REF for "foo" (2 words)
+        assert_eq!(Instruction::from_raw(body[0]).operation(), op::STRING_REF);
+        // Second: SYMBOL_SID 0 for null text (1 word)
+        assert_eq!(Instruction::from_raw(body[2]).operation(), op::SYMBOL_SID);
+        assert_eq!(Instruction::from_raw(body[2]).data(), 0);
+        // Third: STRING_REF for "bar" (2 words)
+        assert_eq!(Instruction::from_raw(body[3]).operation(), op::STRING_REF);
     }
 }
