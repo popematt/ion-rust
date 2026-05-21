@@ -794,10 +794,14 @@ fn read_var_int_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<i64> {
 }
 
 impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
-    fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
+    fn refill(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
         if self.is_exhausted() {
             destination.push(instr::END_OF_INPUT);
-            return;
+            return Ok(());
         }
 
         // Process top-level values until we hit an IVM or exhaust input.
@@ -805,7 +809,7 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
         loop {
             if self.is_exhausted() {
                 destination.push(instr::END_OF_INPUT);
-                return;
+                return Ok(());
             }
 
             // Check for IVM
@@ -817,7 +821,7 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
                 destination.push(instr::IVM | version_data);
                 // Stop after IVM — system value boundary
                 destination.push(instr::REFILL);
-                return;
+                return Ok(());
             }
 
             // Peek at the type descriptor to check for NOP
@@ -844,7 +848,7 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
                 // the reader processes the directive before seeing
                 // more values.
                 destination.push(instr::REFILL);
-                return;
+                return Ok(());
             }
         }
     }

@@ -12,21 +12,21 @@ fn generate_test_data(name: &str) -> Vec<u8> {
     let text = match name {
         "integers" => {
             let mut s = String::new();
-            for i in 0..1000 {
-                s.push_str(&format!("{} ", i * 7 - 500));
+            for i in 0..4000 {
+                s.push_str(&format!("{} ", i * 7 - 2000));
             }
             s
         }
         "floats" => {
             let mut s = String::new();
-            for i in 0..1000 {
-                s.push_str(&format!("{}e0 ", (i as f64) * 1.7 - 500.0));
+            for i in 0..4000 {
+                s.push_str(&format!("{}e0 ", (i as f64) * 1.7 - 3400.0));
             }
             s
         }
         "bools" => {
             let mut s = String::new();
-            for i in 0..1000 {
+            for i in 0..4000 {
                 s.push_str(if i % 2 == 0 { "true " } else { "false " });
             }
             s
@@ -48,7 +48,7 @@ fn generate_test_data(name: &str) -> Vec<u8> {
                 "null.sexp",
                 "null.struct",
             ];
-            for i in 0..1000 {
+            for i in 0..4000 {
                 s.push_str(null_types[i % null_types.len()]);
                 s.push(' ');
             }
@@ -56,14 +56,14 @@ fn generate_test_data(name: &str) -> Vec<u8> {
         }
         "symbols" => {
             let mut s = String::new();
-            for i in 0..1000 {
+            for i in 0..1500 {
                 s.push_str(&format!("sym_{} ", i));
             }
             s
         }
         "strings" => {
             let mut s = String::new();
-            for i in 0..1000 {
+            for i in 0..3000 {
                 s.push_str(&format!("\"string_value_{}\" ", i));
             }
             s
@@ -71,21 +71,21 @@ fn generate_test_data(name: &str) -> Vec<u8> {
         "blobs" => {
             let mut s = String::new();
             // Each blob is 16 bytes of base64-encoded data
-            for _i in 0..500 {
+            for _i in 0..3500 {
                 s.push_str("{{YWJjZGVmZ2hpamtsbW5vcA==}} ");
             }
             s
         }
         "decimals" => {
             let mut s = String::new();
-            for i in 0..1000 {
+            for i in 0..2500 {
                 s.push_str(&format!("{}.{}d{} ", i, i % 100, (i % 5) as i32 - 2));
             }
             s
         }
         "timestamps" => {
             let mut s = String::new();
-            for i in 0..500 {
+            for i in 0..2500 {
                 let year = 2000 + (i % 25);
                 let month = (i % 12) + 1;
                 let day = (i % 28) + 1;
@@ -101,7 +101,7 @@ fn generate_test_data(name: &str) -> Vec<u8> {
         "lists" => {
             // Heavily nested lists of small integers
             let mut s = String::new();
-            for i in 0..200 {
+            for i in 0..250 {
                 s.push_str(&format!(
                     "[[{}, {}], [{}, {}], [{}, {}], [{}, {}]] ",
                     i * 8,
@@ -118,7 +118,7 @@ fn generate_test_data(name: &str) -> Vec<u8> {
         }
         "nested_structs" => {
             let mut s = String::new();
-            for i in 0..200 {
+            for i in 0..330 {
                 s.push_str(&format!(
                     "{{name: \"item_{i}\", value: {i}, tags: [\"a\", \"b\", \"c\"]}} "
                 ));
@@ -127,7 +127,7 @@ fn generate_test_data(name: &str) -> Vec<u8> {
         }
         "mixed" => {
             let mut s = String::new();
-            for i in 0..200 {
+            for i in 0..280 {
                 s.push_str(&format!(
                     "{{id: {i}, name: \"user_{i}\", active: true, scores: [{}, {}, {}]}} ",
                     i * 10,
@@ -141,15 +141,16 @@ fn generate_test_data(name: &str) -> Vec<u8> {
             // Alternates between a new local symbol table and a single
             // symbol value using that table, stressing LST handling.
             let mut s = String::new();
-            for i in 0..200 {
+            for i in 0..1500 {
                 // Each value uses a unique symbol that forces a new LST
                 s.push_str(&format!("unique_symbol_{i} "));
             }
             s
         }
         "realistic_log" => {
+            // ~10MB target: each entry is ~87 bytes in binary
             let mut s = String::new();
-            for i in 0..100 {
+            for i in 0..115_000 {
                 s.push_str(&format!(
                     concat!(
                         "{{",
@@ -197,6 +198,9 @@ fn bench_read_all(c: &mut Criterion) {
     ];
 
     let mut group = c.benchmark_group("read_all");
+    // Increase measurement time for large workloads
+    group.measurement_time(std::time::Duration::from_secs(10));
+
     for name in &test_cases {
         let data = generate_test_data(name);
         let data_size = data.len();
@@ -277,7 +281,7 @@ fn bench_traverse(c: &mut Criterion) {
         &data,
         |b, data| {
             b.iter(|| {
-                let generator = BinaryIon10Generator::new(data.to_vec());
+                let generator = BinaryIon10Generator::new(data.as_slice());
                 let mut reader = BytecodeReader::with_generator(generator);
                 while reader.next().unwrap().is_some() {}
             });
@@ -289,7 +293,7 @@ fn bench_traverse(c: &mut Criterion) {
         &data,
         |b, data| {
             b.iter(|| {
-                let generator = BinaryIon10Generator::new(data.to_vec());
+                let generator = BinaryIon10Generator::new(data.as_slice());
                 let mut reader = BytecodeReader::with_generator(generator);
                 fn walk<G: ion_rs::bytecode::generator::BytecodeGenerator>(
                     reader: &mut BytecodeReader<G>,
