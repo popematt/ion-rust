@@ -547,7 +547,18 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
 
         // Clear the bytecode buffer and ask the generator to fill it.
         self.bytecode.clear();
-        generator.refill(&mut self.bytecode, &mut self.constant_pool);
+        // The reader currently cannot propagate errors from refill through
+        // the next() call chain without a larger refactor. For now, if the
+        // generator returns an error, we emit END_OF_INPUT so the reader
+        // stops cleanly.
+        if generator
+            .refill(&mut self.bytecode, &mut self.constant_pool)
+            .is_err()
+        {
+            self.bytecode.clear();
+            self.bytecode
+                .push(crate::bytecode::instruction::instr::END_OF_INPUT);
+        }
     }
 
     /// Returns a reference to the reader's symbol table.
@@ -1712,7 +1723,11 @@ mod tests {
     }
 
     impl BytecodeGenerator for MockGenerator {
-        fn refill(&mut self, destination: &mut Vec<u32>, _constant_pool: &mut ConstantPool) {
+        fn refill(
+            &mut self,
+            destination: &mut Vec<u32>,
+            _constant_pool: &mut ConstantPool,
+        ) -> IonResult<()> {
             let idx = self.call_count;
             self.call_count += 1;
             if idx < self.batches.len() {
@@ -1720,6 +1735,7 @@ mod tests {
             } else {
                 destination.push(instr::END_OF_INPUT);
             }
+            Ok(())
         }
 
         fn read_int_ref(&self, _position: u32, _length: u32) -> IonResult<Int> {
@@ -1795,7 +1811,11 @@ mod tests {
         }
 
         impl BytecodeGenerator for ConstantAddingGenerator {
-            fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
+            fn refill(
+                &mut self,
+                destination: &mut Vec<u32>,
+                constant_pool: &mut ConstantPool,
+            ) -> IonResult<()> {
                 self.call_count += 1;
                 match self.call_count {
                     1 => {
@@ -1815,6 +1835,7 @@ mod tests {
                         destination.push(instr::END_OF_INPUT);
                     }
                 }
+                Ok(())
             }
 
             fn read_int_ref(&self, _position: u32, _length: u32) -> IonResult<Int> {

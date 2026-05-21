@@ -21,6 +21,11 @@ const SKIP_LIST: &[&str] = &[
     "ion-tests/iontestdata/good/subfieldVarUInt32bit.10n",
     "ion-tests/iontestdata/good/subfieldVarUInt15bit.10n",
     "ion-tests/iontestdata/good/subfieldVarUInt16bit.10n",
+    // Integers exceeding 128 bits — requires arbitrary-precision BigUint support
+    "ion-tests/iontestdata/good/intBigSize256.10n",
+    "ion-tests/iontestdata/good/intBigSize1201.10n",
+    "ion-tests/iontestdata/good/equivs/intsLargePositive3.10n",
+    "ion-tests/iontestdata/good/equivs/intsLargeNegative3.10n",
 ];
 
 fn should_skip(file_name: &str) -> bool {

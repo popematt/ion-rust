@@ -18,7 +18,14 @@ pub trait BytecodeGenerator {
     ///
     /// The implementation should clear the destination before writing, or
     /// append to it -- the reader handles clearing before calling this method.
-    fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool);
+    ///
+    /// Returns `Ok(())` on success, or an `IonError` if the source could
+    /// not be read (I/O error) or contains malformed data (decoding error).
+    fn refill(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()>;
 
     /// Reads a big integer from the source at the given position/length.
     fn read_int_ref(&self, position: u32, length: u32) -> IonResult<Int>;
@@ -37,7 +44,11 @@ pub trait BytecodeGenerator {
 }
 
 impl BytecodeGenerator for Box<dyn BytecodeGenerator> {
-    fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
+    fn refill(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
         (**self).refill(destination, constant_pool)
     }
 

@@ -63,7 +63,7 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
 /// This is optimized for the "always materialize everything" use case.
 pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
     let generator = BinaryIon10Generator::new(data);
-    let mut iter = BytecodeElementIterator::new(generator);
+    let mut iter = BytecodeElementIterator::new(generator)?;
     let mut elements = Vec::new();
     for result in &mut iter {
         elements.push(result?);
@@ -84,7 +84,7 @@ struct BytecodeElementIterator<G: BytecodeGenerator> {
 }
 
 impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
-    fn new(generator: G) -> Self {
+    fn new(generator: G) -> IonResult<Self> {
         let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         let mut iter = Self {
             generator,
@@ -95,8 +95,8 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             first_local_constant: 0,
         };
         // Perform initial refill to populate bytecode.
-        iter.refill();
-        iter
+        iter.refill()?;
+        Ok(iter)
     }
 
     /// Reads the instruction at the current position and advances pos.
@@ -128,12 +128,13 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
 
     /// Clears the bytecode buffer, truncates the constant pool, and asks
     /// the generator to refill.
-    fn refill(&mut self) {
+    fn refill(&mut self) -> IonResult<()> {
         self.constant_pool.truncate(self.first_local_constant);
         self.bytecode.clear();
         self.generator
-            .refill(&mut self.bytecode, &mut self.constant_pool);
+            .refill(&mut self.bytecode, &mut self.constant_pool)?;
         self.pos = 0;
+        Ok(())
     }
 
     /// Handles an IVM instruction — resets the symbol table to system
@@ -470,7 +471,9 @@ impl<G: BytecodeGenerator> Iterator for BytecodeElementIterator<G> {
                     return None;
                 }
                 operation_kind::REFILL => {
-                    self.refill();
+                    if let Err(e) = self.refill() {
+                        return Some(Err(e));
+                    }
                     continue;
                 }
                 operation_kind::IVM => {
