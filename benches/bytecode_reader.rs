@@ -213,11 +213,22 @@ fn bench_read_all(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("bytecode", format!("{name} ({data_size}B)")),
+            BenchmarkId::new("bytecode_v2", format!("{name} ({data_size}B)")),
             &data,
             |b, data| {
                 b.iter(|| {
                     let result = ion_rs::bytecode::materialize::read_all_v2(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("bytecode_v3", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result = ion_rs::bytecode::materialize::read_all_v3(data).unwrap();
                     criterion::black_box(result);
                 });
             },
@@ -242,7 +253,7 @@ fn bench_next_only(c: &mut Criterion) {
             &data,
             |b, data| {
                 b.iter(|| {
-                    let generator = BinaryIon10Generator::new(data.to_vec());
+                    let generator = BinaryIon10Generator::new(data.as_slice());
                     let mut reader = BytecodeReader::with_generator(generator);
                     while reader.next().unwrap().is_some() {}
                 });

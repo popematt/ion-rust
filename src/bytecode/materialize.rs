@@ -4,17 +4,21 @@
 //! bytecode reader's state. The entry points (`read_all_v2` and
 //! `read_one_v2`) detect the input format, create the appropriate
 //! generator, and wire up the pipeline.
+//!
+//! `read_all_v3` bypasses the `BytecodeReader` entirely, walking bytecode
+//! linearly to produce `Element` values directly for the "always
+//! materialize everything" use case.
 
 use std::sync::Arc;
 
-use crate::bytecode::constant_pool::Constant;
+use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::op;
+use crate::bytecode::instruction::{op, operation_kind, Instruction};
 use crate::bytecode::ion10::BinaryIon10Generator;
 use crate::bytecode::reader::{BytecodeReader, SymbolToken};
 use crate::element::Annotations;
 use crate::result::IonFailure;
-use crate::{Bytes, Element, IonResult, IonType, Sequence, Str, Struct, Symbol, Value};
+use crate::{Bytes, Element, Int, IonResult, IonType, Sequence, Str, Struct, Symbol, Value};
 
 /// Reads all top-level values from binary Ion data using the bytecode
 /// reader pipeline. Returns a `Sequence` of materialized `Element`s.
@@ -38,6 +42,467 @@ pub(crate) fn read_one_v2(data: &[u8]) -> IonResult<Element> {
         None => IonResult::decoding_error("empty input"),
     }
 }
+
+// ─── read_all_v3: linear bytecode walker ────────────────────────────
+
+/// Ion 1.0 system symbol table (SIDs 1-9).
+const SYSTEM_SYMBOLS: [&str; 9] = [
+    "$ion",
+    "$ion_1_0",
+    "$ion_symbol_table",
+    "name",
+    "version",
+    "imports",
+    "symbols",
+    "max_id",
+    "$ion_shared_symbol_table",
+];
+
+/// Reads all top-level values from binary Ion data by walking the
+/// bytecode linearly, bypassing the `BytecodeReader` state machine.
+/// This is optimized for the "always materialize everything" use case.
+pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
+    let generator = BinaryIon10Generator::new(data);
+    let mut iter = BytecodeElementIterator::new(generator);
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// An iterator that walks bytecode linearly, producing materialized
+/// `Element` values without the overhead of the `BytecodeReader` state
+/// machine.
+struct BytecodeElementIterator<G: BytecodeGenerator> {
+    generator: G,
+    bytecode: Vec<u32>,
+    pos: usize,
+    symbol_table: Vec<Option<Arc<str>>>,
+    constant_pool: ConstantPool,
+    first_local_constant: usize,
+}
+
+impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
+    fn new(generator: G) -> Self {
+        let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
+        let mut iter = Self {
+            generator,
+            bytecode: Vec::new(),
+            pos: 0,
+            symbol_table,
+            constant_pool: ConstantPool::new(),
+            first_local_constant: 0,
+        };
+        // Perform initial refill to populate bytecode.
+        iter.refill();
+        iter
+    }
+
+    /// Reads the instruction at the current position and advances pos.
+    #[inline(always)]
+    fn consume(&mut self) -> Instruction {
+        let raw = self.bytecode[self.pos];
+        self.pos += 1;
+        Instruction::from_raw(raw)
+    }
+
+    /// Reads the raw u32 at the current position and advances pos.
+    #[inline(always)]
+    fn consume_raw(&mut self) -> u32 {
+        let raw = self.bytecode[self.pos];
+        self.pos += 1;
+        raw
+    }
+
+    /// Resolves a symbol ID to a `Symbol`.
+    fn resolve_sid(&self, sid: usize) -> Symbol {
+        if sid == 0 {
+            return Symbol::unknown_text();
+        }
+        match self.symbol_table.get(sid - 1) {
+            Some(Some(arc)) => Symbol::shared(Arc::clone(arc)),
+            _ => Symbol::unknown_text(),
+        }
+    }
+
+    /// Clears the bytecode buffer, truncates the constant pool, and asks
+    /// the generator to refill.
+    fn refill(&mut self) {
+        self.constant_pool.truncate(self.first_local_constant);
+        self.bytecode.clear();
+        self.generator
+            .refill(&mut self.bytecode, &mut self.constant_pool);
+        self.pos = 0;
+    }
+
+    /// Handles an IVM instruction — resets the symbol table to system
+    /// symbols only.
+    fn handle_ivm(&mut self, _instruction: Instruction) {
+        self.symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
+    }
+
+    /// Handles a directive instruction. Reads the directive content
+    /// (symbol entries until END_CONTAINER) and updates the symbol table.
+    fn handle_directive(&mut self, instruction: Instruction) -> IonResult<()> {
+        let operation = instruction.operation();
+        match operation {
+            op::DIRECTIVE_SET_SYMBOLS | op::DIRECTIVE_ADD_SYMBOLS => {
+                if operation == op::DIRECTIVE_SET_SYMBOLS {
+                    self.symbol_table =
+                        SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
+                }
+
+                // Read directive content until END_CONTAINER
+                loop {
+                    let instr = self.consume();
+                    match instr.operation() {
+                        op::END_CONTAINER => break,
+                        op::STRING_REF => {
+                            let length = instr.data();
+                            let position = self.consume_raw();
+                            match self.generator.read_text_ref(position, length) {
+                                Ok(text) => {
+                                    self.symbol_table.push(Some(Arc::from(text)));
+                                }
+                                Err(_) => self.symbol_table.push(None),
+                            }
+                        }
+                        op::STRING_CP => {
+                            let index = instr.data();
+                            match self.constant_pool.get(index) {
+                                Constant::String(rc) => {
+                                    self.symbol_table.push(Some(Arc::from(rc.as_ref())));
+                                }
+                                _ => self.symbol_table.push(None),
+                            }
+                        }
+                        op::SYMBOL_SID => {
+                            // SID 0 = unknown/null text
+                            self.symbol_table.push(None);
+                        }
+                        _ => {
+                            // Skip unknown instructions within the directive.
+                            let oc = instr.operand_count_bits();
+                            if oc == 3 {
+                                self.pos += instr.data() as usize;
+                            } else {
+                                self.pos += oc as usize;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // For other directives: skip until END_CONTAINER.
+                loop {
+                    let instr = self.consume();
+                    if instr.operation() == op::END_CONTAINER {
+                        break;
+                    }
+                    let oc = instr.operand_count_bits();
+                    if oc == 3 {
+                        self.pos += instr.data() as usize;
+                    } else {
+                        self.pos += oc as usize;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads annotations (if any) before the next value.
+    fn read_annotations(&mut self) -> IonResult<Annotations> {
+        // Peek at upcoming instructions — collect ANNOTATION_* until we
+        // hit a non-annotation.
+        let start = self.pos;
+        let mut count: usize = 0;
+        loop {
+            let peek = Instruction::from_raw(self.bytecode[self.pos]);
+            if peek.operation_kind() != operation_kind::ANNOTATIONS {
+                break;
+            }
+            count += 1;
+            self.pos += 1;
+            // Skip operand for ANNOTATION_REF
+            let oc = peek.operand_count_bits();
+            if oc > 0 && oc < 3 {
+                self.pos += oc as usize;
+            }
+        }
+        if count == 0 {
+            return Ok(Annotations::empty());
+        }
+        // Go back and resolve them
+        let mut symbols = Vec::with_capacity(count);
+        let mut p = start;
+        for _ in 0..count {
+            let instr = Instruction::from_raw(self.bytecode[p]);
+            p += 1;
+            let data = instr.data();
+            let symbol = match instr.operation() {
+                op::ANNOTATION_SID => self.resolve_sid(data as usize),
+                op::ANNOTATION_CP => match self.constant_pool.get(data) {
+                    Constant::String(arc) => Symbol::shared(Arc::clone(arc)),
+                    _ => return IonResult::decoding_error("annotation CP entry is not a string"),
+                },
+                op::ANNOTATION_REF => {
+                    let position = self.bytecode[p];
+                    p += 1;
+                    let text = self.generator.read_text_ref(position, data)?;
+                    Symbol::from(text)
+                }
+                _ => return IonResult::decoding_error("expected annotation instruction"),
+            };
+            symbols.push(symbol);
+        }
+        Ok(Annotations::from(symbols))
+    }
+
+    /// Reads a complete element (annotations + value) at the current
+    /// position.
+    fn read_element(&mut self) -> IonResult<Element> {
+        let annotations = self.read_annotations()?;
+        let instr = self.consume();
+        let value = self.read_value(instr)?;
+        Ok(Element::new(annotations, value))
+    }
+
+    /// Reads a value given its instruction.
+    fn read_value(&mut self, instr: Instruction) -> IonResult<Value> {
+        match instr.operation() {
+            op::BOOL => Ok(Value::Bool(instr.data() & 1 == 1)),
+            op::NULL_BOOL => Ok(Value::Null(IonType::Bool)),
+
+            op::INT_I16 => Ok(Value::Int(Int::from(instr.data_as_i16() as i64))),
+            op::INT_I32 => {
+                let v = self.consume_raw() as i32;
+                Ok(Value::Int(Int::from(v as i64)))
+            }
+            op::INT_I64 => {
+                let hi = self.consume_raw() as u64;
+                let lo = self.consume_raw() as u64;
+                Ok(Value::Int(Int::from(((hi << 32) | lo) as i64)))
+            }
+            op::INT_CP => match self.constant_pool.get(instr.data()) {
+                Constant::BigInt(arc) => Ok(Value::Int(arc.as_ref().clone())),
+                _ => IonResult::decoding_error("CP entry is not BigInt"),
+            },
+            op::INT_REF => {
+                let position = self.consume_raw();
+                Ok(Value::Int(
+                    self.generator.read_int_ref(position, instr.data())?,
+                ))
+            }
+            op::NULL_INT => Ok(Value::Null(IonType::Int)),
+
+            op::FLOAT_F32 => {
+                let bits = self.consume_raw();
+                Ok(Value::Float(f32::from_bits(bits) as f64))
+            }
+            op::FLOAT_F64 => {
+                let hi = self.consume_raw() as u64;
+                let lo = self.consume_raw() as u64;
+                Ok(Value::Float(f64::from_bits((hi << 32) | lo)))
+            }
+            op::NULL_FLOAT => Ok(Value::Null(IonType::Float)),
+
+            op::DECIMAL_CP => match self.constant_pool.get(instr.data()) {
+                Constant::Decimal(arc) => Ok(Value::Decimal(arc.as_ref().clone())),
+                _ => IonResult::decoding_error("CP entry is not Decimal"),
+            },
+            op::DECIMAL_REF => {
+                let position = self.consume_raw();
+                Ok(Value::Decimal(
+                    self.generator.read_decimal_ref(position, instr.data())?,
+                ))
+            }
+            op::NULL_DECIMAL => Ok(Value::Null(IonType::Decimal)),
+
+            op::TIMESTAMP_CP => match self.constant_pool.get(instr.data()) {
+                Constant::Timestamp(arc) => Ok(Value::Timestamp(arc.as_ref().clone())),
+                _ => IonResult::decoding_error("CP entry is not Timestamp"),
+            },
+            op::SHORT_TIMESTAMP_REF | op::TIMESTAMP_REF => {
+                let position = self.consume_raw();
+                Ok(Value::Timestamp(
+                    self.generator.read_timestamp_ref(position, instr.data())?,
+                ))
+            }
+            op::NULL_TIMESTAMP => Ok(Value::Null(IonType::Timestamp)),
+
+            op::STRING_CP => match self.constant_pool.get(instr.data()) {
+                Constant::String(arc) => Ok(Value::String(Str::from(arc.as_ref()))),
+                _ => IonResult::decoding_error("CP entry is not String"),
+            },
+            op::STRING_REF => {
+                let position = self.consume_raw();
+                let text = self.generator.read_text_ref(position, instr.data())?;
+                Ok(Value::String(Str::from(text)))
+            }
+            op::NULL_STRING => Ok(Value::Null(IonType::String)),
+
+            op::SYMBOL_SID => {
+                let sid = instr.data() as usize;
+                Ok(Value::Symbol(self.resolve_sid(sid)))
+            }
+            op::SYMBOL_CP => match self.constant_pool.get(instr.data()) {
+                Constant::String(arc) => Ok(Value::Symbol(Symbol::shared(Arc::clone(arc)))),
+                _ => IonResult::decoding_error("CP entry is not String"),
+            },
+            op::SYMBOL_CHAR => {
+                let ch = char::from_u32(instr.data()).ok_or_else(|| {
+                    IonResult::<()>::decoding_error("invalid char code").unwrap_err()
+                })?;
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                Ok(Value::Symbol(Symbol::from(&*s)))
+            }
+            op::SYMBOL_REF => {
+                let position = self.consume_raw();
+                let text = self.generator.read_text_ref(position, instr.data())?;
+                Ok(Value::Symbol(Symbol::from(text)))
+            }
+            op::NULL_SYMBOL => Ok(Value::Null(IonType::Symbol)),
+
+            op::BLOB_CP => match self.constant_pool.get(instr.data()) {
+                Constant::Bytes(arc) => Ok(Value::Blob(Bytes::from(arc.as_ref()))),
+                _ => IonResult::decoding_error("CP entry is not Bytes"),
+            },
+            op::BLOB_REF => {
+                let position = self.consume_raw();
+                let bytes = self.generator.read_bytes_ref(position, instr.data())?;
+                Ok(Value::Blob(Bytes::from(bytes)))
+            }
+            op::NULL_BLOB => Ok(Value::Null(IonType::Blob)),
+
+            op::CLOB_CP => match self.constant_pool.get(instr.data()) {
+                Constant::Bytes(arc) => Ok(Value::Clob(Bytes::from(arc.as_ref()))),
+                _ => IonResult::decoding_error("CP entry is not Bytes"),
+            },
+            op::CLOB_REF => {
+                let position = self.consume_raw();
+                let bytes = self.generator.read_bytes_ref(position, instr.data())?;
+                Ok(Value::Clob(Bytes::from(bytes)))
+            }
+            op::NULL_CLOB => Ok(Value::Null(IonType::Clob)),
+
+            op::LIST_START => Ok(Value::List(self.read_sequence()?)),
+            op::NULL_LIST => Ok(Value::Null(IonType::List)),
+
+            op::SEXP_START => Ok(Value::SExp(self.read_sequence()?)),
+            op::NULL_SEXP => Ok(Value::Null(IonType::SExp)),
+
+            op::STRUCT_START => Ok(Value::Struct(self.read_struct()?)),
+            op::NULL_STRUCT => Ok(Value::Null(IonType::Struct)),
+
+            op::NULL_NULL => Ok(Value::Null(IonType::Null)),
+
+            _ => IonResult::decoding_error(format!(
+                "unexpected operation {:#04X}",
+                instr.operation()
+            )),
+        }
+    }
+
+    /// Reads a sequence (list or sexp children) until END_CONTAINER.
+    fn read_sequence(&mut self) -> IonResult<Sequence> {
+        let mut elements = Vec::new();
+        loop {
+            let peek = Instruction::from_raw(self.bytecode[self.pos]);
+            if peek.operation() == op::END_CONTAINER {
+                self.pos += 1;
+                break;
+            }
+            elements.push(self.read_element()?);
+        }
+        Ok(Sequence::from(elements))
+    }
+
+    /// Reads a struct (field name/value pairs) until END_CONTAINER.
+    fn read_struct(&mut self) -> IonResult<Struct> {
+        let mut fields: Vec<(Symbol, Element)> = Vec::new();
+        loop {
+            let peek = Instruction::from_raw(self.bytecode[self.pos]);
+            if peek.operation() == op::END_CONTAINER {
+                self.pos += 1;
+                break;
+            }
+            let field_name = self.read_field_name()?;
+            let element = self.read_element()?;
+            fields.push((field_name, element));
+        }
+        Ok(Struct::from_iter(fields))
+    }
+
+    /// Reads a field name instruction and resolves it to a `Symbol`.
+    fn read_field_name(&mut self) -> IonResult<Symbol> {
+        let instr = self.consume();
+        let data = instr.data();
+        match instr.operation() {
+            op::FIELD_NAME_SID => Ok(self.resolve_sid(data as usize)),
+            op::FIELD_NAME_CP => match self.constant_pool.get(data) {
+                Constant::String(arc) => Ok(Symbol::shared(Arc::clone(arc))),
+                _ => IonResult::decoding_error("field name CP entry is not a string"),
+            },
+            op::FIELD_NAME_REF => {
+                let position = self.consume_raw();
+                let text = self.generator.read_text_ref(position, data)?;
+                Ok(Symbol::from(text))
+            }
+            _ => IonResult::decoding_error("expected field name instruction"),
+        }
+    }
+}
+
+impl<G: BytecodeGenerator> Iterator for BytecodeElementIterator<G> {
+    type Item = IonResult<Element>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.pos >= self.bytecode.len() {
+                return None;
+            }
+            let peek = Instruction::from_raw(self.bytecode[self.pos]);
+            match peek.operation_kind() {
+                operation_kind::END => {
+                    return None;
+                }
+                operation_kind::REFILL => {
+                    self.refill();
+                    continue;
+                }
+                operation_kind::IVM => {
+                    self.pos += 1;
+                    self.handle_ivm(peek);
+                    continue;
+                }
+                operation_kind::DIRECTIVE => {
+                    self.pos += 1;
+                    if let Err(e) = self.handle_directive(peek) {
+                        return Some(Err(e));
+                    }
+                    continue;
+                }
+                operation_kind::METADATA => {
+                    // Skip metadata instructions (offset, rowcol, comment)
+                    self.pos += 1;
+                    let oc = peek.operand_count_bits();
+                    if oc > 0 && oc < 3 {
+                        self.pos += oc as usize;
+                    }
+                    continue;
+                }
+                _ => {
+                    return Some(self.read_element());
+                }
+            }
+        }
+    }
+}
+
+// ─── read_all_v2 / read_one_v2: reader-based materialization ────────
 
 /// Materializes the current value from the reader into an `Element`.
 ///
@@ -216,6 +681,7 @@ mod tests {
     use super::*;
     use crate::lazy::encoding::Encoding;
     use crate::v1_0;
+    use rstest::rstest;
 
     /// Helper: encodes Ion text as binary Ion 1.0.
     fn encode_as_binary(text: &str) -> Vec<u8> {
@@ -586,6 +1052,87 @@ mod tests {
         let actual = read_one_v2(&binary)?;
         assert_eq!(expected, actual);
         assert_eq!(actual.value(), &Value::Null(IonType::Clob));
+        Ok(())
+    }
+
+    // --- read_all_v3 tests ---
+
+    #[rstest]
+    #[case::integers("1 2 3")]
+    #[case::booleans_and_null("true false null")]
+    #[case::list("[1, 2, 3]")]
+    #[case::struct_with_string("{foo: 1, bar: \"hello\"}")]
+    #[case::annotated_int("ann::42")]
+    #[case::decimals("1.23 -4.56d2")]
+    #[case::timestamp("2024-01-15T10:30:00Z")]
+    #[case::blob("{{aGVsbG8=}}")]
+    #[case::positive_int("5")]
+    #[case::negative_int("-100")]
+    #[case::bool_true("true")]
+    #[case::bool_false("false")]
+    #[case::null_untyped("null")]
+    #[case::null_bool("null.bool")]
+    #[case::null_int("null.int")]
+    #[case::null_string("null.string")]
+    #[case::null_float("null.float")]
+    #[case::null_decimal("null.decimal")]
+    #[case::null_timestamp("null.timestamp")]
+    #[case::null_symbol("null.symbol")]
+    #[case::null_blob("null.blob")]
+    #[case::null_clob("null.clob")]
+    #[case::null_list("null.list")]
+    #[case::null_sexp("null.sexp")]
+    #[case::null_struct("null.struct")]
+    #[case::string("\"hello world\"")]
+    #[case::struct_multi_field("{foo: 1, bar: 2}")]
+    #[case::multi_annotation("foo::bar::5")]
+    #[case::nested_lists("[[[]]]")]
+    #[case::nested_sexp("(1 2 (3 4))")]
+    #[case::decimal_frac("1.23")]
+    #[case::negative_zero_decimal("-0.")]
+    #[case::decimal_exp("123d2")]
+    #[case::timestamp_year("2024T")]
+    #[case::timestamp_month("2024-01T")]
+    #[case::timestamp_day("2024-01-15")]
+    #[case::timestamp_minute("2024-01-15T10:30Z")]
+    #[case::timestamp_second("2024-01-15T10:30:00Z")]
+    #[case::timestamp_millis("2024-01-15T10:30:00.123Z")]
+    #[case::timestamp_neg_offset("2024-01-15T10:30:00-00:00")]
+    #[case::timestamp_pos_offset("2024-01-15T10:30:00+05:30")]
+    #[case::clob("{{\"hello\"}}")]
+    #[case::system_symbol("name")]
+    #[case::empty_list("[]")]
+    #[case::empty_sexp("()")]
+    #[case::empty_struct("{}")]
+    #[case::float_pi("3.14e0")]
+    #[case::float_zero("0e0")]
+    #[case::annotated_list("ann::[1,2]")]
+    #[case::multiple_values("1 true \"hello\" [1, 2] {a: 1}")]
+    fn v3_matches_element_read_all(#[case] text: &str) -> IonResult<()> {
+        let binary = encode_as_binary(text);
+        let expected = Element::read_all(&binary)?;
+        let v3 = read_all_v3(&binary)?;
+        assert_eq!(
+            expected, v3,
+            "mismatch for input: {text}\nexpected: {expected:?}\nv3: {v3:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn v3_200_strings() -> IonResult<()> {
+        let mut text_values = Vec::new();
+        for i in 0..200 {
+            text_values.push(format!("\"string_value_{i}\""));
+        }
+        let text = text_values.join(" ");
+        let binary = encode_as_binary(&text);
+        let v2 = read_all_v2(&binary)?;
+        let v3 = read_all_v3(&binary)?;
+        assert_eq!(v2.len(), v3.len());
+        for (i, (e2, e3)) in v2.iter().zip(v3.iter()).enumerate() {
+            assert_eq!(e2, e3, "mismatch at index {i}");
+        }
         Ok(())
     }
 }
