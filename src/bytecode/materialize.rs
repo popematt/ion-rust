@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::Constant;
+use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::op;
 use crate::bytecode::ion10::BinaryIon10Generator;
 use crate::bytecode::reader::{BytecodeReader, SymbolToken};
@@ -18,8 +19,8 @@ use crate::{Bytes, Element, IonResult, IonType, Sequence, Str, Struct, Symbol, V
 /// Reads all top-level values from binary Ion data using the bytecode
 /// reader pipeline. Returns a `Sequence` of materialized `Element`s.
 pub fn read_all_v2(data: &[u8]) -> IonResult<Sequence> {
-    let generator = BinaryIon10Generator::new(data.to_vec());
-    let mut reader = BytecodeReader::with_generator(Box::new(generator));
+    let generator = BinaryIon10Generator::new(data);
+    let mut reader = BytecodeReader::with_generator(generator);
     let mut elements = Vec::new();
     while reader.next()?.is_some() {
         elements.push(materialize_element(&mut reader)?);
@@ -30,8 +31,8 @@ pub fn read_all_v2(data: &[u8]) -> IonResult<Sequence> {
 /// Reads a single top-level value from binary Ion data using the
 /// bytecode reader pipeline. Returns the first materialized `Element`.
 pub(crate) fn read_one_v2(data: &[u8]) -> IonResult<Element> {
-    let generator = BinaryIon10Generator::new(data.to_vec());
-    let mut reader = BytecodeReader::with_generator(Box::new(generator));
+    let generator = BinaryIon10Generator::new(data);
+    let mut reader = BytecodeReader::with_generator(generator);
     match reader.next()? {
         Some(_) => materialize_element(&mut reader),
         None => IonResult::decoding_error("empty input"),
@@ -43,7 +44,7 @@ pub(crate) fn read_one_v2(data: &[u8]) -> IonResult<Element> {
 /// The reader must be positioned on a value (i.e., `next()` returned
 /// `Some`). This function reads annotations, resolves the value based
 /// on its Ion type, and recursively processes containers.
-fn materialize_element(reader: &mut BytecodeReader) -> IonResult<Element> {
+fn materialize_element<G: BytecodeGenerator>(reader: &mut BytecodeReader<G>) -> IonResult<Element> {
     // Read annotations
     let annotations = materialize_annotations(reader)?;
 
@@ -54,7 +55,9 @@ fn materialize_element(reader: &mut BytecodeReader) -> IonResult<Element> {
 }
 
 /// Resolves annotations from the reader into an `Annotations` value.
-fn materialize_annotations(reader: &BytecodeReader) -> IonResult<Annotations> {
+fn materialize_annotations<G: BytecodeGenerator>(
+    reader: &BytecodeReader<G>,
+) -> IonResult<Annotations> {
     if !reader.has_annotations() {
         return Ok(Annotations::empty());
     }
@@ -87,7 +90,7 @@ fn resolve_symbol_token(token: &SymbolToken, symbol_table: &[Option<Arc<str>>]) 
 }
 
 /// Reads the current value from the reader based on its Ion type.
-fn materialize_value(reader: &mut BytecodeReader) -> IonResult<Value> {
+fn materialize_value<G: BytecodeGenerator>(reader: &mut BytecodeReader<G>) -> IonResult<Value> {
     let ion_type = reader
         .ion_type()
         .ok_or_else(|| IonResult::<()>::decoding_error("no current value").unwrap_err())?;
@@ -136,7 +139,7 @@ fn materialize_value(reader: &mut BytecodeReader) -> IonResult<Value> {
 }
 
 /// Reads the current symbol value from the reader and resolves it.
-fn materialize_symbol_value(reader: &BytecodeReader) -> IonResult<Symbol> {
+fn materialize_symbol_value<G: BytecodeGenerator>(reader: &BytecodeReader<G>) -> IonResult<Symbol> {
     let instruction = reader.instruction();
     let data = instruction.data();
 
@@ -180,7 +183,9 @@ fn materialize_symbol_value(reader: &BytecodeReader) -> IonResult<Symbol> {
 }
 
 /// Steps into a container and materializes all children as a `Sequence`.
-fn materialize_sequence(reader: &mut BytecodeReader) -> IonResult<Sequence> {
+fn materialize_sequence<G: BytecodeGenerator>(
+    reader: &mut BytecodeReader<G>,
+) -> IonResult<Sequence> {
     reader.step_in()?;
     let mut elements = Vec::new();
     while reader.next()?.is_some() {
@@ -191,7 +196,7 @@ fn materialize_sequence(reader: &mut BytecodeReader) -> IonResult<Sequence> {
 }
 
 /// Steps into a struct and materializes all field name/value pairs.
-fn materialize_struct(reader: &mut BytecodeReader) -> IonResult<Struct> {
+fn materialize_struct<G: BytecodeGenerator>(reader: &mut BytecodeReader<G>) -> IonResult<Struct> {
     reader.step_in()?;
     let mut fields: Vec<(Symbol, Element)> = Vec::new();
     while reader.next()?.is_some() {

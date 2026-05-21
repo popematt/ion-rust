@@ -38,7 +38,7 @@ pub(crate) struct ContainerInfo {
     end_index: usize,
 }
 
-pub struct BytecodeReader {
+pub struct BytecodeReader<G: BytecodeGenerator = Box<dyn BytecodeGenerator>> {
     bytecode: Vec<u32>,
     i: usize,
     instruction: Instruction,
@@ -53,17 +53,14 @@ pub struct BytecodeReader {
     /// ephemeral user constants while retaining macro-owned constants.
     first_local_constant: usize,
     /// The bytecode generator that produces instructions on demand.
-    /// `None` when the reader is constructed with a pre-built bytecode
-    /// buffer (e.g., in tests). When present, `refill_bytecode()` calls
-    /// the generator to fill the buffer with more instructions.
-    generator: Option<Box<dyn BytecodeGenerator>>,
+    generator: Option<G>,
     /// The current local symbol table. Initialized with system symbols
     /// (SIDs 1-9). Updated when DIRECTIVE_SET_SYMBOLS or
     /// DIRECTIVE_ADD_SYMBOLS instructions are encountered.
     symbol_table: Vec<Option<Arc<str>>>,
 }
 
-impl BytecodeReader {
+impl BytecodeReader<Box<dyn BytecodeGenerator>> {
     /// Creates a reader from a pre-built bytecode buffer with no generator.
     ///
     /// Encountering a REFILL instruction will panic. This constructor is
@@ -85,11 +82,13 @@ impl BytecodeReader {
             symbol_table,
         }
     }
+}
 
+impl<G: BytecodeGenerator> BytecodeReader<G> {
     /// Creates a reader backed by a generator that produces bytecode on
     /// demand. The initial bytecode buffer contains only a REFILL
     /// instruction, so the first call to `next()` will trigger a refill.
-    pub fn with_generator(generator: Box<dyn BytecodeGenerator>) -> Self {
+    pub fn with_generator(generator: G) -> Self {
         let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         Self {
             bytecode: vec![instr::REFILL],
@@ -528,8 +527,8 @@ impl BytecodeReader {
     }
 
     /// Returns a reference to the attached generator, or an error if none.
-    fn generator(&self) -> IonResult<&dyn BytecodeGenerator> {
-        self.generator.as_deref().ok_or_else(|| {
+    fn generator(&self) -> IonResult<&G> {
+        self.generator.as_ref().ok_or_else(|| {
             IonResult::<()>::decoding_error(
                 "REF instruction encountered but no BytecodeGenerator is attached",
             )
@@ -1749,7 +1748,7 @@ mod tests {
             instr::INT_I16 | 2,
             instr::END_OF_INPUT,
         ]]);
-        let mut reader = BytecodeReader::with_generator(Box::new(gen));
+        let mut reader = BytecodeReader::with_generator(gen);
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert_eq!(reader.i64_value()?, 1);
@@ -1768,7 +1767,7 @@ mod tests {
             vec![instr::INT_I16 | 20, instr::REFILL],
             vec![instr::INT_I16 | 30, instr::END_OF_INPUT],
         ]);
-        let mut reader = BytecodeReader::with_generator(Box::new(gen));
+        let mut reader = BytecodeReader::with_generator(gen);
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert_eq!(reader.i64_value()?, 10);
@@ -1838,7 +1837,7 @@ mod tests {
         }
 
         let gen = ConstantAddingGenerator { call_count: 0 };
-        let mut reader = BytecodeReader::with_generator(Box::new(gen));
+        let mut reader = BytecodeReader::with_generator(gen);
 
         // Simulate one macro-owned constant at index 0.
         reader
@@ -1872,7 +1871,7 @@ mod tests {
     fn generator_exhausted_returns_end_of_input() -> IonResult<()> {
         // Generator with one batch followed by exhaustion.
         let gen = MockGenerator::new(vec![vec![instr::BOOL | 1, instr::END_OF_INPUT]]);
-        let mut reader = BytecodeReader::with_generator(Box::new(gen));
+        let mut reader = BytecodeReader::with_generator(gen);
 
         assert_eq!(reader.next()?, Some(IonType::Bool));
         assert_eq!(reader.bool_value()?, true);

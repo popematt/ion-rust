@@ -35,3 +35,29 @@ pub trait BytecodeGenerator {
     /// Reads raw bytes from the source, borrowing from the underlying data.
     fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]>;
 }
+
+impl BytecodeGenerator for Box<dyn BytecodeGenerator> {
+    fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
+        (**self).refill(destination, constant_pool)
+    }
+
+    fn read_int_ref(&self, position: u32, length: u32) -> IonResult<Int> {
+        (**self).read_int_ref(position, length)
+    }
+
+    fn read_decimal_ref(&self, position: u32, length: u32) -> IonResult<Decimal> {
+        (**self).read_decimal_ref(position, length)
+    }
+
+    fn read_timestamp_ref(&self, position: u32, length: u32) -> IonResult<Timestamp> {
+        (**self).read_timestamp_ref(position, length)
+    }
+
+    fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str> {
+        (**self).read_text_ref(position, length)
+    }
+
+    fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]> {
+        (**self).read_bytes_ref(position, length)
+    }
+}
