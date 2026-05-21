@@ -85,7 +85,7 @@ fn resolve_symbol_token(token: &SymbolToken, symbol_table: &[Option<Arc<str>>]) 
                 Some(None) | None => Symbol::unknown_text(),
             }
         }
-        SymbolToken::Text(rc) => Symbol::from(rc.as_ref()),
+        SymbolToken::Text(arc) => Symbol::shared(Arc::clone(arc)),
     }
 }
 

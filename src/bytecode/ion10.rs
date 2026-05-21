@@ -5,7 +5,7 @@
 //! encoding, and sign/magnitude integer representation.
 
 use std::ops::Neg;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
@@ -344,7 +344,7 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             } else {
                 // magnitude > i64::MAX, need constant pool
                 let value = Int::from(magnitude as i128);
-                let idx = constant_pool.add(Constant::BigInt(Rc::new(value)));
+                let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
                 destination.push(instr::INT_CP | idx);
             }
         } else {
@@ -363,7 +363,7 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             } else {
                 // Doesn't fit in i64 — use constant pool
                 let value = Int::from(neg_value);
-                let idx = constant_pool.add(Constant::BigInt(Rc::new(value)));
+                let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
                 destination.push(instr::INT_CP | idx);
             }
         }
@@ -391,7 +391,7 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             Int::from(magnitude_u128)
         };
         self.position += length;
-        let idx = constant_pool.add(Constant::BigInt(Rc::new(value)));
+        let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
         destination.push(instr::INT_CP | idx);
     }
 
@@ -429,12 +429,17 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             return;
         }
         let sid = self.read_uint(length) as u32;
+        debug_assert!(sid <= 0x003F_FFFF, "SID exceeds 22-bit data field");
         destination.push(instr::SYMBOL_SID | sid);
     }
 
     /// Emits a string as STRING_REF pointing to the source bytes.
     fn emit_string(&mut self, length: usize, destination: &mut Vec<u32>) {
         let offset = self.position as u32;
+        debug_assert!(
+            length as u32 <= 0x003F_FFFF,
+            "string length exceeds 22-bit data field"
+        );
         destination.push(instr::STRING_REF | length as u32);
         destination.push(offset);
         self.position += length;
@@ -457,6 +462,10 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             if is_struct {
                 // Struct fields are prefixed by a VarUInt SID
                 let field_sid = self.read_var_uint() as u32;
+                debug_assert!(
+                    field_sid <= 0x003F_FFFF,
+                    "field name SID exceeds 22-bit data field"
+                );
                 destination.push(instr::FIELD_NAME_SID | field_sid);
             }
             // LSTs only appear at the top level, not inside containers.
@@ -465,6 +474,10 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
+        debug_assert!(
+            bytecode_length <= 0x003F_FFFF,
+            "container bytecode length exceeds 22-bit data field"
+        );
         destination[start_index] = start_instr | bytecode_length as u32;
     }
 
@@ -511,6 +524,10 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         // Not an LST — emit as normal annotated value.
         // Re-emit the annotation SIDs we already read.
         for sid in annotation_sids {
+            debug_assert!(
+                sid <= 0x003F_FFFF,
+                "annotation SID exceeds 22-bit data field"
+            );
             destination.push(instr::ANNOTATION_SID | sid);
         }
 

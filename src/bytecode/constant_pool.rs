@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{Decimal, Int, Timestamp};
 
@@ -8,19 +8,20 @@ use crate::{Decimal, Int, Timestamp};
 /// integers, decimals, timestamps, strings, byte slices) are stored here and
 /// referenced by index from CP-variant instructions.
 ///
-/// Each variant wraps an `Rc` so that:
-/// - Macro-owned constants persist across refills (Rc refcount > 1 while
+/// Each variant wraps an `Arc` so that:
+/// - Macro-owned constants persist across refills (refcount > 1 while
 ///   referenced by macro bytecode).
 /// - User-value constants are freed when the pool is truncated (refcount
 ///   drops to 0).
-/// - Cloning a constant for the caller is cheap (Rc::clone).
+/// - Cloning a constant for the caller is cheap (Arc::clone).
+/// - Strings can be shared directly with `Symbol::shared(Arc<str>)`.
 #[derive(Clone, Debug)]
 pub(crate) enum Constant {
-    BigInt(Rc<Int>),
-    Decimal(Rc<Decimal>),
-    Timestamp(Rc<Timestamp>),
-    String(Rc<str>),
-    Bytes(Rc<[u8]>),
+    BigInt(Arc<Int>),
+    Decimal(Arc<Decimal>),
+    Timestamp(Arc<Timestamp>),
+    String(Arc<str>),
+    Bytes(Arc<[u8]>),
 }
 
 /// A pool of constants referenced by bytecode CP-variant instructions.
@@ -83,7 +84,7 @@ mod tests {
     fn add_and_get_big_int() {
         let mut pool = ConstantPool::new();
         let value = Int::from(i64::MAX as i128 + 1);
-        let index = pool.add(Constant::BigInt(Rc::new(value.clone())));
+        let index = pool.add(Constant::BigInt(Arc::new(value.clone())));
         assert_eq!(index, 0);
         match pool.get(0) {
             Constant::BigInt(rc) => assert_eq!(**rc, value),
@@ -94,7 +95,7 @@ mod tests {
     #[test]
     fn add_and_get_string() {
         let mut pool = ConstantPool::new();
-        let index = pool.add(Constant::String(Rc::from("hello")));
+        let index = pool.add(Constant::String(Arc::from("hello")));
         assert_eq!(index, 0);
         match pool.get(index) {
             Constant::String(rc) => assert_eq!(&**rc, "hello"),
@@ -106,7 +107,7 @@ mod tests {
     fn add_and_get_bytes() {
         let mut pool = ConstantPool::new();
         let data: &[u8] = &[0xCA, 0xFE, 0xBA, 0xBE];
-        let index = pool.add(Constant::Bytes(Rc::from(data)));
+        let index = pool.add(Constant::Bytes(Arc::from(data)));
         assert_eq!(index, 0);
         match pool.get(index) {
             Constant::Bytes(rc) => assert_eq!(&**rc, data),
@@ -117,9 +118,9 @@ mod tests {
     #[test]
     fn multiple_entries_get_sequential_indices() {
         let mut pool = ConstantPool::new();
-        let i0 = pool.add(Constant::BigInt(Rc::new(Int::from(1))));
-        let i1 = pool.add(Constant::String(Rc::from("two")));
-        let i2 = pool.add(Constant::BigInt(Rc::new(Int::from(3))));
+        let i0 = pool.add(Constant::BigInt(Arc::new(Int::from(1))));
+        let i1 = pool.add(Constant::String(Arc::from("two")));
+        let i2 = pool.add(Constant::BigInt(Arc::new(Int::from(3))));
         assert_eq!(i0, 0);
         assert_eq!(i1, 1);
         assert_eq!(i2, 2);
@@ -129,9 +130,9 @@ mod tests {
     #[test]
     fn truncate_removes_trailing_entries() {
         let mut pool = ConstantPool::new();
-        pool.add(Constant::BigInt(Rc::new(Int::from(1))));
-        pool.add(Constant::BigInt(Rc::new(Int::from(2))));
-        pool.add(Constant::BigInt(Rc::new(Int::from(3))));
+        pool.add(Constant::BigInt(Arc::new(Int::from(1))));
+        pool.add(Constant::BigInt(Arc::new(Int::from(2))));
+        pool.add(Constant::BigInt(Arc::new(Int::from(3))));
         assert_eq!(pool.len(), 3);
 
         pool.truncate(1);
@@ -147,8 +148,8 @@ mod tests {
     #[should_panic]
     fn get_after_truncate_panics() {
         let mut pool = ConstantPool::new();
-        pool.add(Constant::BigInt(Rc::new(Int::from(1))));
-        pool.add(Constant::BigInt(Rc::new(Int::from(2))));
+        pool.add(Constant::BigInt(Arc::new(Int::from(1))));
+        pool.add(Constant::BigInt(Arc::new(Int::from(2))));
         pool.truncate(1);
         // This should panic — index 1 was truncated.
         let _ = pool.get(1);
@@ -157,8 +158,8 @@ mod tests {
     #[test]
     fn clear_removes_all_entries() {
         let mut pool = ConstantPool::new();
-        pool.add(Constant::BigInt(Rc::new(Int::from(1))));
-        pool.add(Constant::String(Rc::from("hello")));
+        pool.add(Constant::BigInt(Arc::new(Int::from(1))));
+        pool.add(Constant::String(Arc::from("hello")));
         assert_eq!(pool.len(), 2);
         pool.clear();
         assert_eq!(pool.len(), 0);
@@ -167,12 +168,12 @@ mod tests {
     #[test]
     fn rc_clone_survives_truncation() {
         let mut pool = ConstantPool::new();
-        let value = Rc::new(Int::from(42));
-        pool.add(Constant::BigInt(Rc::clone(&value)));
-        // We hold a clone of the Rc outside the pool.
+        let value = Arc::new(Int::from(42));
+        pool.add(Constant::BigInt(Arc::clone(&value)));
+        // We hold a clone of the Arc outside the pool.
         pool.truncate(0);
         assert_eq!(pool.len(), 0);
-        // The value is still accessible via our external Rc clone.
+        // The value is still accessible via our external Arc clone.
         assert_eq!(*value, Int::from(42));
     }
 }
