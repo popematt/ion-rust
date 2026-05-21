@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
@@ -30,7 +29,7 @@ pub(crate) enum SymbolToken {
     /// A symbol ID. The text can be resolved via the symbol table.
     Sid(usize),
     /// Text resolved from the constant pool.
-    Text(Rc<str>),
+    Text(Arc<str>),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -335,13 +334,13 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
     }
 
     /// Returns the current value as a string reference.
-    pub fn string_value(&self) -> IonResult<Rc<str>> {
+    pub fn string_value(&self) -> IonResult<Arc<str>> {
         let instruction = self.instruction;
         match instruction.operation() {
             op::STRING_CP => {
                 let index = instruction.data();
                 match self.constant_pool.get(index) {
-                    Constant::String(rc) => Ok(Rc::clone(rc)),
+                    Constant::String(rc) => Ok(Arc::clone(rc)),
                     _ => IonResult::decoding_error("CP entry is not a String"),
                 }
             }
@@ -349,20 +348,20 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
                 let length = instruction.data();
                 let position = self.bytecode[self.i];
                 let text: &str = self.generator()?.read_text_ref(position, length)?;
-                Ok(Rc::from(text))
+                Ok(Arc::from(text))
             }
             _ => IonResult::decoding_error("not positioned on a string"),
         }
     }
 
     /// Returns the current value as a byte slice reference.
-    pub fn lob_value(&self) -> IonResult<Rc<[u8]>> {
+    pub fn lob_value(&self) -> IonResult<Arc<[u8]>> {
         let instruction = self.instruction;
         match instruction.operation() {
             op::BLOB_CP | op::CLOB_CP => {
                 let index = instruction.data();
                 match self.constant_pool.get(index) {
-                    Constant::Bytes(rc) => Ok(Rc::clone(rc)),
+                    Constant::Bytes(rc) => Ok(Arc::clone(rc)),
                     _ => IonResult::decoding_error("CP entry is not Bytes"),
                 }
             }
@@ -370,7 +369,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
                 let length = instruction.data();
                 let position = self.bytecode[self.i];
                 let bytes: &[u8] = self.generator()?.read_bytes_ref(position, length)?;
-                Ok(Rc::from(bytes))
+                Ok(Arc::from(bytes))
             }
             _ => IonResult::decoding_error("not positioned on a lob"),
         }
@@ -507,14 +506,14 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
         match instruction.operation() {
             op::FIELD_NAME_SID => Ok(Some(SymbolToken::Sid(data as usize))),
             op::FIELD_NAME_CP => match self.constant_pool.get(data) {
-                Constant::String(rc) => Ok(Some(SymbolToken::Text(Rc::clone(rc)))),
+                Constant::String(rc) => Ok(Some(SymbolToken::Text(Arc::clone(rc)))),
                 _ => IonResult::decoding_error("field name CP entry is not a string"),
             },
             op::FIELD_NAME_REF => {
                 let length = data;
                 let position = self.bytecode[idx as usize + 1];
                 let text: &str = self.generator()?.read_text_ref(position, length)?;
-                Ok(Some(SymbolToken::Text(Rc::from(text))))
+                Ok(Some(SymbolToken::Text(Arc::from(text))))
             }
             _ => IonResult::decoding_error(
                 "field_name_index does not point to a field name instruction",
@@ -683,7 +682,7 @@ impl<'a> Iterator for AnnotationIterator<'a> {
         let result = match instruction.operation() {
             op::ANNOTATION_SID => Ok(SymbolToken::Sid(data as usize)),
             op::ANNOTATION_CP => match self.constant_pool.get(data) {
-                Constant::String(rc) => Ok(SymbolToken::Text(Rc::clone(rc))),
+                Constant::String(rc) => Ok(SymbolToken::Text(Arc::clone(rc))),
                 _ => IonResult::decoding_error("annotation CP entry is not a string"),
             },
             op::ANNOTATION_REF => {
@@ -1148,10 +1147,10 @@ mod tests {
         // Pre-populate the constant pool.
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(123_456_789))));
+            .add(Constant::BigInt(Arc::new(Int::from(123_456_789))));
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(-99))));
+            .add(Constant::BigInt(Arc::new(Int::from(-99))));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert_eq!(reader.i64_value()?, 123_456_789);
@@ -1168,7 +1167,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().int_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(big.clone())));
+            .add(Constant::BigInt(Arc::new(big.clone())));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert_eq!(reader.int_value()?, big);
@@ -1182,7 +1181,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().int_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(big)));
+            .add(Constant::BigInt(Arc::new(big)));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         // i64_value should fail because the value doesn't fit in i64.
@@ -1197,7 +1196,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().decimal_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::Decimal(Rc::new(decimal.clone())));
+            .add(Constant::Decimal(Arc::new(decimal.clone())));
 
         assert_eq!(reader.next()?, Some(IonType::Decimal));
         assert_eq!(reader.decimal_value()?, decimal);
@@ -1214,7 +1213,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().timestamp_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::Timestamp(Rc::new(timestamp.clone())));
+            .add(Constant::Timestamp(Arc::new(timestamp.clone())));
 
         assert_eq!(reader.next()?, Some(IonType::Timestamp));
         assert_eq!(reader.timestamp_value()?, timestamp);
@@ -1227,7 +1226,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().string_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("hello, world!")));
+            .add(Constant::String(Arc::from("hello, world!")));
 
         assert_eq!(reader.next()?, Some(IonType::String));
         let value = reader.string_value()?;
@@ -1242,7 +1241,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().blob_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::Bytes(Rc::from(data)));
+            .add(Constant::Bytes(Arc::from(data)));
 
         assert_eq!(reader.next()?, Some(IonType::Blob));
         let value = reader.lob_value()?;
@@ -1257,7 +1256,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().clob_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::Bytes(Rc::from(data)));
+            .add(Constant::Bytes(Arc::from(data)));
 
         assert_eq!(reader.next()?, Some(IonType::Clob));
         let value = reader.lob_value()?;
@@ -1272,7 +1271,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().int_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("not an int")));
+            .add(Constant::String(Arc::from("not an int")));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert!(reader.i64_value().is_err());
@@ -1287,7 +1286,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().decimal_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(42))));
+            .add(Constant::BigInt(Arc::new(Int::from(42))));
 
         assert_eq!(reader.next()?, Some(IonType::Decimal));
         assert!(reader.decimal_value().is_err());
@@ -1301,7 +1300,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().timestamp_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("2024-01-01")));
+            .add(Constant::String(Arc::from("2024-01-01")));
 
         assert_eq!(reader.next()?, Some(IonType::Timestamp));
         assert!(reader.timestamp_value().is_err());
@@ -1315,7 +1314,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().string_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::Bytes(Rc::from([0u8; 4].as_slice())));
+            .add(Constant::Bytes(Arc::from([0u8; 4].as_slice())));
 
         assert_eq!(reader.next()?, Some(IonType::String));
         assert!(reader.string_value().is_err());
@@ -1329,7 +1328,7 @@ mod tests {
         let mut reader = reader_from(BytecodeBuilder::new().blob_cp(0).end_of_input());
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("not bytes")));
+            .add(Constant::String(Arc::from("not bytes")));
 
         assert_eq!(reader.next()?, Some(IonType::Blob));
         assert!(reader.lob_value().is_err());
@@ -1357,11 +1356,11 @@ mod tests {
         // Simulate macro constants (index 0) and user constants (index 1).
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(100))));
+            .add(Constant::BigInt(Arc::new(Int::from(100))));
         reader.set_first_local_constant(1);
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(200))));
+            .add(Constant::BigInt(Arc::new(Int::from(200))));
 
         // Both are accessible before truncation.
         assert_eq!(reader.next()?, Some(IonType::Int));
@@ -1427,7 +1426,7 @@ mod tests {
         );
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("my_annotation")));
+            .add(Constant::String(Arc::from("my_annotation")));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert!(reader.has_annotations());
@@ -1437,7 +1436,10 @@ mod tests {
 
         assert_eq!(annotations.len(), 2);
         assert_eq!(annotations[0], SymbolToken::Sid(4));
-        assert_eq!(annotations[1], SymbolToken::Text(Rc::from("my_annotation")));
+        assert_eq!(
+            annotations[1],
+            SymbolToken::Text(Arc::from("my_annotation"))
+        );
 
         Ok(())
     }
@@ -1452,7 +1454,7 @@ mod tests {
         );
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("some_ann")));
+            .add(Constant::String(Arc::from("some_ann")));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
         assert_eq!(reader.annotation_count(), 1);
@@ -1460,7 +1462,7 @@ mod tests {
         let mut iter = reader.annotations();
         assert_eq!(
             iter.next().unwrap()?,
-            SymbolToken::Text(Rc::from("some_ann"))
+            SymbolToken::Text(Arc::from("some_ann"))
         );
         assert!(iter.next().is_none());
 
@@ -1494,14 +1496,14 @@ mod tests {
         );
         reader
             .constant_pool_mut()
-            .add(Constant::String(Rc::from("my_field")));
+            .add(Constant::String(Arc::from("my_field")));
 
         assert_eq!(reader.next()?, Some(IonType::Struct));
         reader.step_in()?;
         assert_eq!(reader.next()?, Some(IonType::Int));
 
         let field = reader.field_name()?;
-        assert_eq!(field, Some(SymbolToken::Text(Rc::from("my_field"))));
+        assert_eq!(field, Some(SymbolToken::Text(Arc::from("my_field"))));
 
         Ok(())
     }
@@ -1633,7 +1635,7 @@ mod tests {
         // Put a non-String constant in the pool.
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(99))));
+            .add(Constant::BigInt(Arc::new(Int::from(99))));
 
         assert_eq!(reader.next()?, Some(IonType::Int));
 
@@ -1654,7 +1656,7 @@ mod tests {
         // Put a non-String constant in the pool.
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(99))));
+            .add(Constant::BigInt(Arc::new(Int::from(99))));
 
         assert_eq!(reader.next()?, Some(IonType::Struct));
         reader.step_in()?;
@@ -1798,14 +1800,14 @@ mod tests {
                 match self.call_count {
                     1 => {
                         // First refill: add a user constant and reference it.
-                        let idx = constant_pool.add(Constant::BigInt(Rc::new(Int::from(999))));
+                        let idx = constant_pool.add(Constant::BigInt(Arc::new(Int::from(999))));
                         destination.push(instr::INT_CP | idx);
                         destination.push(instr::REFILL);
                     }
                     2 => {
                         // Second refill: the previous user constant should
                         // have been truncated. Add a new one.
-                        let idx = constant_pool.add(Constant::BigInt(Rc::new(Int::from(777))));
+                        let idx = constant_pool.add(Constant::BigInt(Arc::new(Int::from(777))));
                         destination.push(instr::INT_CP | idx);
                         destination.push(instr::END_OF_INPUT);
                     }
@@ -1842,7 +1844,7 @@ mod tests {
         // Simulate one macro-owned constant at index 0.
         reader
             .constant_pool_mut()
-            .add(Constant::BigInt(Rc::new(Int::from(42))));
+            .add(Constant::BigInt(Arc::new(Int::from(42))));
         reader.set_first_local_constant(1);
 
         // First value comes from first refill
