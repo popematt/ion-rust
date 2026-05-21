@@ -171,8 +171,22 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
                     (tc, low as usize)
                 }
             }
+            type_code::STRUCT => {
+                if low == 0x0F {
+                    // null.struct
+                    (tc, NULL_SENTINEL)
+                } else if low == 0x0E || low == 0x01 {
+                    // L=14: VarUInt length follows
+                    // L=1: ordered/sorted struct — VarUInt length follows
+                    let length = self.read_var_uint();
+                    (tc, length)
+                } else {
+                    // L=0 (empty struct) or L=2-13: inline content length
+                    (tc, low as usize)
+                }
+            }
             _ => {
-                // Types 1-13
+                // Types 1-12
                 if low == 0x0F {
                     // Typed null
                     (tc, NULL_SENTINEL)
@@ -516,6 +530,22 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             if is_struct {
                 // Struct fields are prefixed by a VarUInt SID
                 let field_sid = self.read_var_uint() as u32;
+
+                // Check if the following value is NOP padding. In Ion 1.0
+                // structs, NOP padding can appear with any field SID
+                // (including non-zero). The NOP is identified by type code 0
+                // in the next type descriptor (with L != 0xF, which would be
+                // null.null).
+                let peek_td = self.source()[self.position];
+                let peek_tc = peek_td >> 4;
+                let peek_low = peek_td & 0x0F;
+                if peek_tc == type_code::NOP && peek_low != 0x0F {
+                    // NOP padding — skip field SID and the NOP value
+                    let (_nop_tc, nop_length) = self.read_type_descriptor();
+                    self.position += nop_length;
+                    continue;
+                }
+
                 debug_assert!(
                     field_sid <= 0x003F_FFFF,
                     "field name SID exceeds 22-bit data field"
@@ -596,11 +626,15 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         // Nested annotation wrappers cannot be LSTs (LSTs are top-level only).
         let _ = self.emit_value(destination, constant_pool);
 
-        // Ensure we consumed the entire wrapper
-        debug_assert_eq!(
-            self.position, wrapper_end,
-            "annotation wrapper length mismatch"
+        // Ensure we consumed the entire wrapper. Advance to wrapper_end
+        // in case NOP padding follows the annotated value within the wrapper.
+        debug_assert!(
+            self.position <= wrapper_end,
+            "annotation wrapper overrun: position {} > end {}",
+            self.position,
+            wrapper_end
         );
+        self.position = wrapper_end;
         false
     }
 
