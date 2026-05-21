@@ -4,53 +4,38 @@ use crate::ion_data::{IonDataHash, IonDataOrd, IonEq};
 use crate::symbol_ref::AsSymbolRef;
 use crate::text::text_formatter::FmtValueFormatter;
 use crate::Symbol;
-use smallvec::SmallVec;
+use hashbrown::HashTable;
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
-// A convenient type alias for a vector capable of storing a single `usize` inline
-// without heap allocation. This type should not be used in public interfaces directly.
-type IndexVec = SmallVec<[usize; 1]>;
+/// Threshold below which linear scan is used instead of building a hash table.
+const LINEAR_SCAN_THRESHOLD: usize = 8;
 
 // This collection is broken out into its own type to allow instances of it to be shared with Arc/Rc.
 #[derive(Debug, Clone)]
 struct Fields {
-    // Key/value pairs in the order they were inserted
-    by_index: Vec<(Symbol, Element)>,
-    // Maps symbols to a list of indexes where values may be found in `by_index` above
-    by_name: HashMap<Symbol, IndexVec>,
+    /// All fields in insertion order. The ONLY place field names and values live.
+    slots: Vec<(Symbol, Element)>,
+    /// Lazily-built hash table mapping field names to slot indices.
+    /// Only constructed on first lookup call for structs with more than
+    /// LINEAR_SCAN_THRESHOLD fields.
+    #[allow(clippy::type_complexity)]
+    table: OnceLock<HashTable<u32>>,
 }
 
 impl Fields {
-    /// Gets all of the indexes that contain a value associated with the given field name.
-    fn get_indexes<A: AsSymbolRef>(&self, field_name: A) -> Option<&IndexVec> {
-        field_name
-            .as_symbol_ref()
-            .text()
-            .map(|text| {
-                // If the symbol has defined text, look it up by &str
-                self.by_name.get(text)
-            })
-            .unwrap_or_else(|| {
-                // Otherwise, construct a (cheap, stack-allocated) Symbol with unknown text...
-                let symbol = Symbol::unknown_text();
-                // ...and use the unknown text symbol to look up matching field values
-                self.by_name.get(&symbol)
-            })
-    }
-
-    /// Iterates over the values found at the specified indexes.
-    fn get_values_at_indexes<'a>(&'a self, indexes: &'a IndexVec) -> FieldValuesIterator<'a> {
-        FieldValuesIterator {
-            current: 0,
-            indexes: Some(indexes),
-            by_index: &self.by_index,
+    /// Creates a new `Fields` from the given slots without building the hash table.
+    fn new(slots: Vec<(Symbol, Element)>) -> Self {
+        Fields {
+            slots,
+            table: OnceLock::new(),
         }
     }
 
-    /// Gets the last value in the Struct that is associated with the specified field name.
+    /// Gets the last value associated with the given field name.
     ///
     /// Note that the Ion data model views a struct as a bag of (name, value) pairs and does not
     /// have a notion of field ordering. In most use cases, field names are distinct and the last
@@ -59,25 +44,162 @@ impl Fields {
     /// the value associated with the last appearance. If your application uses structs that repeat
     /// field names, you are encouraged to use [`get_all`](Self::get_all) instead.
     fn get_last<A: AsSymbolRef>(&self, field_name: A) -> Option<&Element> {
-        self.get_indexes(field_name)
-            .and_then(|indexes| indexes.last())
-            .and_then(|index| self.by_index.get(*index))
-            .map(|(_name, value)| value)
+        let symbol_ref = field_name.as_symbol_ref();
+        match symbol_ref.text() {
+            Some(text) => self.get_last_by_text(text),
+            None => self.get_last_unknown_text(),
+        }
+    }
+
+    /// Gets the last value for a field with the given text name.
+    fn get_last_by_text(&self, text: &str) -> Option<&Element> {
+        if self.slots.len() <= LINEAR_SCAN_THRESHOLD {
+            // Linear scan for small structs — iterate in reverse to find last match
+            self.slots
+                .iter()
+                .rev()
+                .find(|(sym, _)| sym.text() == Some(text))
+                .map(|(_, value)| value)
+        } else {
+            // Use hash table for large structs.
+            // For "get last", we scan all matching entries and take the one with highest index.
+            let table = self.get_or_build_table();
+            let hash = hash_text(text);
+            let mut last_idx: Option<u32> = None;
+            // Iterate all entries with matching hash and equality
+            for &idx in table.iter_hash(hash) {
+                if self.slots[idx as usize].0.text() == Some(text) {
+                    match last_idx {
+                        Some(prev) if idx > prev => last_idx = Some(idx),
+                        None => last_idx = Some(idx),
+                        _ => {}
+                    }
+                }
+            }
+            last_idx.map(|idx| &self.slots[idx as usize].1)
+        }
+    }
+
+    /// Gets the last value for a field with unknown text ($0).
+    fn get_last_unknown_text(&self) -> Option<&Element> {
+        self.slots
+            .iter()
+            .rev()
+            .find(|(sym, _)| sym.text().is_none())
+            .map(|(_, value)| value)
     }
 
     /// Iterates over all of the values associated with the given field name.
     fn get_all<A: AsSymbolRef>(&self, field_name: A) -> FieldValuesIterator<'_> {
-        let indexes = self.get_indexes(field_name);
+        let symbol_ref = field_name.as_symbol_ref();
         FieldValuesIterator {
+            slots: &self.slots,
+            text: symbol_ref
+                .text()
+                .map(|t| FieldNameMatch::Text(t.to_owned())),
             current: 0,
-            indexes,
-            by_index: &self.by_index,
         }
+    }
+
+    /// Returns an iterator that yields all values for fields matching a text name,
+    /// along with the count of matching fields.
+    fn get_all_with_count<A: AsSymbolRef>(
+        &self,
+        field_name: A,
+    ) -> (FieldValuesIterator<'_>, usize) {
+        let symbol_ref = field_name.as_symbol_ref();
+        let text = symbol_ref.text();
+        let count = self
+            .slots
+            .iter()
+            .filter(|(sym, _)| sym.text() == text)
+            .count();
+        let iter = FieldValuesIterator {
+            slots: &self.slots,
+            text: text.map(|t| FieldNameMatch::Text(t.to_owned())),
+            current: 0,
+        };
+        (iter, count)
     }
 
     /// Iterates over all of the (field name, field value) pairs in the struct.
     fn iter(&self) -> impl Iterator<Item = &(Symbol, Element)> {
-        self.by_index.iter()
+        self.slots.iter()
+    }
+
+    /// Gets or builds the hash table for large struct lookups.
+    fn get_or_build_table(&self) -> &HashTable<u32> {
+        self.table.get_or_init(|| build_table(&self.slots))
+    }
+
+    /// Returns an iterator over distinct field names (by text) along with a count.
+    /// Used for equality checks.
+    fn distinct_field_names(&self) -> DistinctFieldNamesIterator<'_> {
+        DistinctFieldNamesIterator {
+            slots: &self.slots,
+            seen_index: 0,
+        }
+    }
+}
+
+/// Builds the hash table mapping field name hashes to slot indices.
+fn build_table(slots: &[(Symbol, Element)]) -> HashTable<u32> {
+    let mut table = HashTable::with_capacity(slots.len());
+    for (i, (symbol, _)) in slots.iter().enumerate() {
+        let hash = hash_symbol(symbol);
+        table.insert_unique(hash, i as u32, |&idx| hash_symbol(&slots[idx as usize].0));
+    }
+    table
+}
+
+/// Hashes a Symbol by its text (or "" for unknown text).
+fn hash_symbol(symbol: &Symbol) -> u64 {
+    hash_text(symbol.text().unwrap_or(""))
+}
+
+/// Hashes a text string using FxHasher for fast lookups.
+fn hash_text(text: &str) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Helper enum for matching field names during iteration.
+#[derive(Clone)]
+enum FieldNameMatch {
+    Text(String),
+}
+
+/// Iterates over distinct field names in a struct, yielding each unique field name text
+/// (or None for unknown text) exactly once.
+struct DistinctFieldNamesIterator<'a> {
+    slots: &'a [(Symbol, Element)],
+    seen_index: usize,
+}
+
+impl<'a> Iterator for DistinctFieldNamesIterator<'a> {
+    // Yields (field_name_text, count_of_fields_with_this_name)
+    type Item = (Option<&'a str>, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.seen_index < self.slots.len() {
+            let current_text = self.slots[self.seen_index].0.text();
+            // Check if we already saw this field name earlier
+            let already_seen = self.slots[..self.seen_index]
+                .iter()
+                .any(|(sym, _)| sym.text() == current_text);
+            self.seen_index += 1;
+            if !already_seen {
+                // Count how many fields have this name
+                let count = self
+                    .slots
+                    .iter()
+                    .filter(|(sym, _)| sym.text() == current_text)
+                    .count();
+                return Some((current_text, count));
+            }
+        }
+        None
     }
 }
 
@@ -133,22 +255,34 @@ impl Iterator for OwnedFieldIterator {
 
 /// Iterates over the values associated with a given field name in a Struct.
 pub(crate) struct FieldValuesIterator<'a> {
+    slots: &'a [(Symbol, Element)],
+    text: Option<FieldNameMatch>,
     current: usize,
-    indexes: Option<&'a IndexVec>,
-    by_index: &'a Vec<(Symbol, Element)>,
 }
 
 impl<'a> Iterator for FieldValuesIterator<'a> {
     type Item = &'a Element;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.indexes
-            .and_then(|i| i.get(self.current))
-            .and_then(|i| {
-                self.current += 1;
-                self.by_index.get(*i)
-            })
-            .map(|(_name, value)| value)
+        while self.current < self.slots.len() {
+            let idx = self.current;
+            self.current += 1;
+            let (sym, value) = &self.slots[idx];
+            match &self.text {
+                Some(FieldNameMatch::Text(t)) => {
+                    if sym.text() == Some(t.as_str()) {
+                        return Some(value);
+                    }
+                }
+                None => {
+                    // Looking for unknown text ($0)
+                    if sym.text().is_none() {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -186,7 +320,7 @@ impl Struct {
     }
 
     pub fn clone_builder(&self) -> StructBuilder {
-        StructBuilder::with_initial_fields(&self.fields.by_index)
+        StructBuilder::with_initial_fields(&self.fields.slots)
     }
 
     /// Returns an iterator over the field name/value pairs in this Struct.
@@ -203,23 +337,31 @@ impl Struct {
     }
 
     fn fields_eq(&self, other: &Self) -> bool {
-        // For each field name in `self`, get the list of indexes that contain a value with that name.
-        for (field_name, field_value_indexes) in &self.fields.by_name {
-            let other_value_indexes = match other.fields.get_indexes(field_name) {
-                Some(indexes) => indexes,
-                // The other struct doesn't have a field with this name so they're not equal.
-                None => return false,
+        // For each distinct field name in `self`, check that `other` has the same
+        // set of values for that field name.
+        for (field_text, self_count) in self.fields.distinct_field_names() {
+            let (other_iter, other_count) = match field_text {
+                Some(text) => other.fields.get_all_with_count(text),
+                None => other.fields.get_all_with_count(Symbol::unknown_text()),
             };
 
-            if field_value_indexes.len() != other_value_indexes.len() {
+            if self_count != other_count {
                 // The other struct has fields with the same name, but a different number of them.
                 return false;
             }
 
-            for field_value in self.fields.get_values_at_indexes(field_value_indexes) {
-                if other
-                    .fields
-                    .get_values_at_indexes(other_value_indexes)
+            // Get all values for this field name in self
+            let self_iter: FieldValuesIterator<'_> = match field_text {
+                Some(text) => self.fields.get_all(text),
+                None => self.fields.get_all(Symbol::unknown_text()),
+            };
+
+            for field_value in self_iter {
+                if other_iter
+                    .slots
+                    .iter()
+                    .filter(|(sym, _)| sym.text() == field_text)
+                    .map(|(_, v)| v)
                     .all(|other_value| !field_value.ion_eq(other_value))
                 {
                     // Couldn't find an equivalent field in the other struct
@@ -234,7 +376,7 @@ impl Struct {
 
     /// Returns the number of fields in this Struct.
     pub fn len(&self) -> usize {
-        self.fields.by_index.len()
+        self.fields.slots.len()
     }
 
     /// Returns `true` if this struct has zero fields.
@@ -243,7 +385,7 @@ impl Struct {
     }
 
     pub fn iter(&self) -> FieldIterator<'_> {
-        FieldIterator::new(&self.fields.by_index)
+        FieldIterator::new(&self.fields.slots)
     }
 
     /// Returns the value associated with the specified field name.
@@ -277,7 +419,7 @@ impl IntoIterator for Struct {
     type IntoIter = OwnedFieldIterator;
 
     fn into_iter(self) -> Self::IntoIter {
-        OwnedFieldIterator::new(self.fields.by_index)
+        OwnedFieldIterator::new(self.fields.slots)
     }
 }
 
@@ -288,20 +430,11 @@ where
 {
     /// Returns an owned struct from the given iterator of field names/values.
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut by_index: Vec<(Symbol, Element)> = Vec::new();
-        let mut by_name: HashMap<Symbol, IndexVec> = HashMap::new();
-        for (field_name, field_value) in iter {
-            let field_name = field_name.into();
-            let field_value = field_value.into();
-
-            by_name
-                .entry(field_name.clone())
-                .or_default()
-                .push(by_index.len());
-            by_index.push((field_name, field_value));
-        }
-
-        let fields = Fields { by_index, by_name };
+        let slots: Vec<(Symbol, Element)> = iter
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        let fields = Fields::new(slots);
         Self { fields }
     }
 }
@@ -328,8 +461,8 @@ impl IonEq for Struct {
 
 impl IonDataOrd for Struct {
     fn ion_cmp(&self, other: &Self) -> Ordering {
-        let mut these_fields = self.fields.by_index.iter().collect::<Vec<_>>();
-        let mut those_fields = other.fields.by_index.iter().collect::<Vec<_>>();
+        let mut these_fields = self.fields.slots.iter().collect::<Vec<_>>();
+        let mut those_fields = other.fields.slots.iter().collect::<Vec<_>>();
         these_fields.sort_by(ion_cmp_field);
         those_fields.sort_by(ion_cmp_field);
 
@@ -361,7 +494,7 @@ fn ion_cmp_field(this: &&(Symbol, Element), that: &&(Symbol, Element)) -> Orderi
 
 impl IonDataHash for Struct {
     fn ion_data_hash<H: Hasher>(&self, state: &mut H) {
-        let mut these_fields = self.fields.by_index.iter().collect::<Vec<_>>();
+        let mut these_fields = self.fields.slots.iter().collect::<Vec<_>>();
         these_fields.sort_by(ion_cmp_field);
         for (name, value) in these_fields {
             name.ion_data_hash(state);
