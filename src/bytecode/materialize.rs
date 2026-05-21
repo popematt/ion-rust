@@ -410,6 +410,9 @@ mod tests {
             "foo::bar::5",
             "[[[]]]",
             "(1 2 (3 4))",
+            "1.23",
+            "-0.",
+            "123d2",
         ];
 
         for text in test_cases {
@@ -528,6 +531,53 @@ mod tests {
         for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
             assert_eq!(e, a, "mismatch at index {i}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn read_one_v2_blob() -> IonResult<()> {
+        // {{aGVsbG8=}} is base64 for "hello"
+        let binary = encode_as_binary("{{aGVsbG8=}}");
+        let expected = Element::read_one(&binary)?;
+        let actual = read_one_v2(&binary)?;
+        assert_eq!(expected, actual);
+        assert_eq!(
+            actual.value(),
+            &Value::Blob(Bytes::from(b"hello".as_slice()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_one_v2_clob() -> IonResult<()> {
+        let binary = encode_as_binary("{{\"hello\"}}");
+        let expected = Element::read_one(&binary)?;
+        let actual = read_one_v2(&binary)?;
+        assert_eq!(expected, actual);
+        assert_eq!(
+            actual.value(),
+            &Value::Clob(Bytes::from(b"hello".as_slice()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_one_v2_null_blob() -> IonResult<()> {
+        let binary = encode_as_binary("null.blob");
+        let expected = Element::read_one(&binary)?;
+        let actual = read_one_v2(&binary)?;
+        assert_eq!(expected, actual);
+        assert_eq!(actual.value(), &Value::Null(IonType::Blob));
+        Ok(())
+    }
+
+    #[test]
+    fn read_one_v2_null_clob() -> IonResult<()> {
+        let binary = encode_as_binary("null.clob");
+        let expected = Element::read_one(&binary)?;
+        let actual = read_one_v2(&binary)?;
+        assert_eq!(expected, actual);
+        assert_eq!(actual.value(), &Value::Null(IonType::Clob));
         Ok(())
     }
 }
