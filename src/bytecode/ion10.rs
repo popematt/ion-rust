@@ -16,6 +16,16 @@ use crate::{Decimal, Int, IonResult, Timestamp};
 /// Ion 1.0 binary IVM bytes.
 const IVM_BYTES: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
 
+/// Bit masks for VarUInt/VarInt encoding.
+/// The stop bit indicates the last byte of a VarUInt or VarInt sequence.
+const VARINT_STOP_BIT: u8 = 0x80;
+/// The sign bit in the first byte of a VarInt (1 = negative).
+const VARINT_SIGN_BIT: u8 = 0x40;
+/// Mask for the data bits in the first byte of a VarInt (6 bits).
+const VARINT_FIRST_BYTE_DATA_MASK: u8 = 0x3F;
+/// Mask for the data bits in continuation bytes (7 bits).
+const VARUINT_DATA_MASK: u8 = 0x7F;
+
 /// Ion 1.0 type codes (high nibble of type descriptor).
 mod type_code {
     pub const NOP: u8 = 0;
@@ -101,8 +111,8 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         loop {
             let byte = self.source()[self.position];
             self.position += 1;
-            result = (result << 7) | (byte & 0x7F) as usize;
-            if byte & 0x80 != 0 {
+            result = (result << 7) | (byte & VARUINT_DATA_MASK) as usize;
+            if byte & VARINT_STOP_BIT != 0 {
                 return result;
             }
         }
@@ -226,7 +236,7 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
                 self.emit_decimal(length, destination);
             }
             type_code::TIMESTAMP => {
-                todo!("Timestamp encoding is deferred")
+                self.emit_timestamp_ref(length, destination);
             }
             type_code::SYMBOL => {
                 self.emit_symbol(length, destination);
@@ -433,6 +443,19 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         );
         // Mask to 22 bits to prevent corrupt opcodes in release builds.
         destination.push(instr::DECIMAL_REF | (length as u32 & 0x003F_FFFF));
+        destination.push(offset);
+        self.position += length;
+    }
+
+    /// Emits a timestamp value as TIMESTAMP_REF pointing to the source bytes.
+    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<u32>) {
+        let offset = self.position as u32;
+        debug_assert!(
+            length as u32 <= 0x003F_FFFF,
+            "timestamp length exceeds 22-bit data field"
+        );
+        // Mask to 22 bits to prevent corrupt opcodes in release builds.
+        destination.push(instr::TIMESTAMP_REF | (length as u32 & 0x003F_FFFF));
         destination.push(offset);
         self.position += length;
     }
@@ -674,6 +697,68 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
     }
 }
 
+/// Reads a VarUInt (variable-length unsigned integer) from a byte slice.
+/// Ion 1.0 VarUInt encoding: each byte contributes 7 bits of data.
+/// The high bit (0x80) is set on the *last* byte (stop bit).
+/// Returns the decoded value as u32. Errors if VarUInt exceeds 5 bytes
+/// (u32 range) or if no stop bit is found within the slice.
+fn read_var_uint_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<u32> {
+    let mut result: u32 = 0;
+    let mut bytes_read: usize = 0;
+    loop {
+        if *pos >= bytes.len() {
+            return IonResult::decoding_error("unterminated VarUInt in timestamp field");
+        }
+        bytes_read += 1;
+        if bytes_read > 5 {
+            return IonResult::decoding_error("VarUInt exceeds u32 range");
+        }
+        let byte = bytes[*pos];
+        *pos += 1;
+        result = (result << 7) | (byte & VARUINT_DATA_MASK) as u32;
+        if byte & VARINT_STOP_BIT != 0 {
+            return Ok(result);
+        }
+    }
+}
+
+/// Reads a signed VarInt from a byte slice. Ion 1.0 VarInt encoding:
+/// first byte has bit 7 = stop, bit 6 = sign, bits 5-0 = first magnitude chunk.
+/// Subsequent bytes: bit 7 = stop, bits 6-0 = magnitude continuation.
+/// Returns the decoded value. Errors if VarInt exceeds 9 bytes (i64 range)
+/// or if no stop bit is found.
+fn read_var_int_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<i64> {
+    if *pos >= bytes.len() {
+        return IonResult::decoding_error("unexpected end of data reading VarInt");
+    }
+    let first = bytes[*pos];
+    *pos += 1;
+    let is_negative = (first & VARINT_SIGN_BIT) != 0;
+    let mut magnitude: i64 = (first & VARINT_FIRST_BYTE_DATA_MASK) as i64;
+
+    if (first & VARINT_STOP_BIT) == 0 {
+        // Multi-byte VarInt
+        let mut bytes_read: usize = 1;
+        loop {
+            if *pos >= bytes.len() {
+                return IonResult::decoding_error("unterminated VarInt");
+            }
+            if bytes_read > 9 {
+                return IonResult::decoding_error("VarInt exceeds i64 range");
+            }
+            let byte = bytes[*pos];
+            *pos += 1;
+            bytes_read += 1;
+            magnitude = (magnitude << 7) | (byte & VARUINT_DATA_MASK) as i64;
+            if (byte & VARINT_STOP_BIT) != 0 {
+                break;
+            }
+        }
+    }
+
+    Ok(if is_negative { -magnitude } else { magnitude })
+}
+
 impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
     fn refill(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
         if self.is_exhausted() {
@@ -756,41 +841,11 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
         let bytes = &self.source()[start..end];
 
         // Read VarInt exponent from the beginning of the decimal body.
-        // Ion 1.0 VarInt: high bit is stop bit, first byte bit 6 is sign.
-        let first_byte = bytes[0];
-        let is_negative_exp = (first_byte & 0x40) != 0;
-        let mut exponent: i64 = (first_byte & 0x3F) as i64;
-        let mut exp_size: usize = 1;
-
-        if first_byte & 0x80 == 0 {
-            // Not the last byte — continue reading.
-            // Track whether we find a stop bit; if the VarInt is
-            // unterminated within the decimal body, that is an error.
-            let mut found_stop = false;
-            for &byte in &bytes[1..] {
-                exp_size += 1;
-                // 9 VarInt bytes = 6 + 8*7 = 62 bits of magnitude, which
-                // fits in i64. 10 bytes would be 69 bits and overflow.
-                if exp_size > 9 {
-                    return IonResult::decoding_error("decimal exponent exceeds i64 range");
-                }
-                exponent = (exponent << 7) | (byte & 0x7F) as i64;
-                if byte & 0x80 != 0 {
-                    found_stop = true;
-                    break;
-                }
-            }
-            if !found_stop {
-                return IonResult::decoding_error("unterminated VarInt in decimal exponent");
-            }
-        }
-
-        if is_negative_exp {
-            exponent = -exponent;
-        }
+        let mut exp_pos: usize = 0;
+        let exponent = read_var_int_from_slice(bytes, &mut exp_pos)?;
 
         // Remaining bytes after the exponent are the coefficient (sign-magnitude).
-        let coeff_bytes = &bytes[exp_size..];
+        let coeff_bytes = &bytes[exp_pos..];
 
         if coeff_bytes.is_empty() {
             // No coefficient bytes means coefficient is 0.
@@ -827,8 +882,144 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
         Ok(Decimal::new(coefficient, exponent))
     }
 
-    fn read_timestamp_ref(&self, _position: u32, _length: u32) -> IonResult<Timestamp> {
-        todo!("Timestamp REF reading is deferred")
+    fn read_timestamp_ref(&self, position: u32, length: u32) -> IonResult<Timestamp> {
+        let start = position as usize;
+        let end = start + length as usize;
+        if end > self.source().len() {
+            return IonResult::decoding_error("timestamp reference out of bounds");
+        }
+        let bytes = &self.source()[start..end];
+
+        // A timestamp must have at least 2 bytes (offset VarInt + year VarUInt).
+        if bytes.len() < 2 {
+            return IonResult::decoding_error("timestamp too short");
+        }
+
+        let mut pos = 0;
+
+        // Read VarInt offset (minutes from UTC).
+        // We need to detect -0 (unknown offset), so we inspect the sign bit
+        // before calling the shared helper, which returns a signed value.
+        let first_byte = bytes[pos];
+        let is_negative_offset = (first_byte & VARINT_SIGN_BIT) != 0;
+        let offset_raw = read_var_int_from_slice(bytes, &mut pos)?;
+        let offset_magnitude = offset_raw.unsigned_abs() as i64;
+
+        // Validate offset range: UTC offsets cannot exceed +/-24:00 = 1440 minutes.
+        if offset_magnitude > 1440 {
+            return IonResult::decoding_error("timestamp UTC offset exceeds valid range");
+        }
+
+        // Determine if offset is known or unknown (-0 means unknown).
+        let is_known_offset = !(is_negative_offset && offset_magnitude == 0);
+        let offset_minutes: i32 = if is_negative_offset {
+            -(offset_magnitude as i32)
+        } else {
+            offset_magnitude as i32
+        };
+
+        // Read VarUInt year.
+        if pos >= bytes.len() {
+            return IonResult::decoding_error("timestamp missing year");
+        }
+        let year = read_var_uint_from_slice(bytes, &mut pos)?;
+
+        // Year precision
+        let builder = Timestamp::with_year(year);
+        if pos >= bytes.len() {
+            let timestamp = builder.build()?;
+            return Ok(timestamp);
+        }
+
+        // Read VarUInt month
+        let month = read_var_uint_from_slice(bytes, &mut pos)?;
+        let builder = builder.with_month(month);
+        if pos >= bytes.len() {
+            let timestamp = builder.build()?;
+            return Ok(timestamp);
+        }
+
+        // Read VarUInt day
+        let day = read_var_uint_from_slice(bytes, &mut pos)?;
+        let builder = builder.with_day(day);
+        if pos >= bytes.len() {
+            let timestamp = builder.build()?;
+            return Ok(timestamp);
+        }
+
+        // Read VarUInt hour
+        let hour = read_var_uint_from_slice(bytes, &mut pos)?;
+        if pos >= bytes.len() {
+            return IonResult::decoding_error("timestamps with an hour must also specify a minute");
+        }
+
+        // Read VarUInt minute
+        let minute = read_var_uint_from_slice(bytes, &mut pos)?;
+        let builder = builder.with_hour_and_minute(hour, minute);
+        if pos >= bytes.len() {
+            let timestamp = if is_known_offset {
+                builder.build_utc_fields_at_offset(offset_minutes)
+            } else {
+                builder.build()
+            }?;
+            return Ok(timestamp);
+        }
+
+        // Read VarUInt second
+        let second = read_var_uint_from_slice(bytes, &mut pos)?;
+        let builder = builder.with_second(second);
+        if pos >= bytes.len() {
+            let timestamp = if is_known_offset {
+                builder.build_utc_fields_at_offset(offset_minutes)
+            } else {
+                builder.build()
+            }?;
+            return Ok(timestamp);
+        }
+
+        // Read fractional seconds (decimal: VarInt exponent + Int coefficient).
+        let frac_exponent = read_var_int_from_slice(bytes, &mut pos)?;
+
+        // Remaining bytes are the coefficient (sign-magnitude integer).
+        let coeff_bytes = &bytes[pos..];
+
+        if coeff_bytes.len() > 16 {
+            return IonResult::decoding_error("timestamp fractional coefficient exceeds 128 bits");
+        }
+
+        let fractional_seconds = if coeff_bytes.is_empty() {
+            // Coefficient is implicitly 0
+            Decimal::new(0i32, frac_exponent)
+        } else {
+            // First bit of the first coefficient byte is the sign bit.
+            let is_negative_coeff = (coeff_bytes[0] & 0x80) != 0;
+            let first_magnitude_byte = (coeff_bytes[0] & 0x7F) as i128;
+            let magnitude = coeff_bytes[1..]
+                .iter()
+                .fold(first_magnitude_byte, |acc, &b| (acc << 8) | b as i128);
+
+            if is_negative_coeff {
+                if magnitude == 0 {
+                    // Negative zero fractional seconds is not valid per the Ion spec;
+                    // treat as positive zero.
+                    Decimal::new(0i32, frac_exponent)
+                } else {
+                    return IonResult::decoding_error(
+                        "timestamp fractional seconds coefficient must not be negative",
+                    );
+                }
+            } else {
+                Decimal::new(magnitude as i128, frac_exponent)
+            }
+        };
+
+        let builder = builder.with_fractional_seconds(fractional_seconds);
+        let timestamp = if is_known_offset {
+            builder.build_utc_fields_at_offset(offset_minutes)
+        } else {
+            builder.build()
+        }?;
+        Ok(timestamp)
     }
 
     fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str> {
@@ -2062,5 +2253,265 @@ mod tests {
         let gen = BinaryIon10Generator::new(source);
         let decimal = gen.read_decimal_ref(position, length).unwrap();
         assert_eq!(decimal, Decimal::new(1i64, 200i64));
+    }
+
+    // --- Timestamp tests ---
+
+    #[test]
+    fn timestamp_emits_ref() {
+        // Timestamp with year only: 2024T
+        // Offset: unknown (-0) = VarInt byte 0xC0 (stop=1, sign=1, magnitude=0)
+        // Year: VarUInt 2024. 2024 = 0b11111101000.
+        //   First byte: 2024 >> 7 = 15, no stop => 0x0F
+        //   Second byte: 2024 & 0x7F = 104, stop => 0x80 | 104 = 0xE8
+        // Body: [0xC0, 0x0F, 0xE8] = 3 bytes
+        // Type descriptor: 0x63 (type 6, length 3)
+        let source = vec![0x63, 0xC0, 0x0F, 0xE8];
+        let (dest, _cp) = generate(source);
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::TIMESTAMP_REF);
+        assert_eq!(instr_word.data(), 3); // length
+        assert_eq!(dest[1], 1); // offset (after type descriptor byte)
+    }
+
+    /// Parameterized test for `read_timestamp_ref`: constructs source bytes,
+    /// generates bytecode, finds TIMESTAMP_REF, reads the timestamp back,
+    /// and asserts it matches the expected value.
+    #[rstest]
+    #[case::year_only(
+        // 2024T: offset=-0 (0xC0), year=2024 (0x0F, 0xE8)
+        vec![0x63, 0xC0, 0x0F, 0xE8],
+        Timestamp::with_year(2024).build().unwrap()
+    )]
+    #[case::year_month(
+        // 2024-03T: offset=-0 (0xC0), year=2024 (0x0F, 0xE8), month=3 (0x83)
+        vec![0x64, 0xC0, 0x0F, 0xE8, 0x83],
+        Timestamp::with_year(2024).with_month(3).build().unwrap()
+    )]
+    #[case::year_month_day(
+        // 2024-01-15: offset=-0 (0xC0), year=2024 (0x0F, 0xE8), month=1 (0x81), day=15 (0x8F)
+        vec![0x65, 0xC0, 0x0F, 0xE8, 0x81, 0x8F],
+        Timestamp::with_ymd(2024, 1, 15).build().unwrap()
+    )]
+    #[case::full_precision_utc(
+        // 2024-01-15T10:30:00Z: offset=+0 (0x80), year=2024 (0x0F, 0xE8),
+        // month=1 (0x81), day=15 (0x8F), hour=10 (0x8A), minute=30 (0x9E), second=0 (0x80)
+        vec![0x68, 0x80, 0x0F, 0xE8, 0x81, 0x8F, 0x8A, 0x9E, 0x80],
+        Timestamp::with_ymd(2024, 1, 15).with_hms(10, 30, 0).build_utc_fields_at_offset(0).unwrap()
+    )]
+    #[case::positive_offset(
+        // 2024-01-15T10:30:00+05:30 (offset=+330 minutes): offset VarInt +330
+        //   330 = 0b101001010. First byte: stop=0, sign=0, 330>>7=2 => 0x02
+        //   Second byte: stop=1, 330&0x7F=74 => 0x80|74 = 0xCA
+        // year=2024 (0x0F, 0xE8), month=1 (0x81), day=15 (0x8F),
+        // hour=10 (0x8A), minute=30 (0x9E), second=0 (0x80)
+        vec![0x69, 0x02, 0xCA, 0x0F, 0xE8, 0x81, 0x8F, 0x8A, 0x9E, 0x80],
+        Timestamp::with_ymd(2024, 1, 15).with_hms(10, 30, 0).build_utc_fields_at_offset(330).unwrap()
+    )]
+    fn timestamp_read_ref(#[case] source: Vec<u8>, #[case] expected: Timestamp) {
+        let (dest, _cp) = generate(source.clone());
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::TIMESTAMP_REF);
+
+        let length = instr_word.data();
+        let position = dest[1];
+        let gen = BinaryIon10Generator::new(source);
+        let decoded = gen.read_timestamp_ref(position, length).unwrap();
+        assert_eq!(decoded, expected);
+    }
+
+    /// Parameterized integration test: encodes Ion text timestamps to binary,
+    /// then verifies that reading through the bytecode generator produces
+    /// an Ion-equivalent value.
+    #[rstest]
+    #[case::year_only("2024T")]
+    #[case::year_month("2024-01T")]
+    #[case::year_month_day("2024-01-15")]
+    #[case::hour_minute_utc("2024-01-15T10:30Z")]
+    #[case::seconds_utc("2024-01-15T10:30:00Z")]
+    #[case::milliseconds_utc("2024-01-15T10:30:00.123Z")]
+    #[case::unknown_offset("2024-01-15T10:30:00-00:00")]
+    #[case::positive_offset("2024-01-15T10:30:00+05:30")]
+    #[case::microseconds_utc("2024-01-15T10:30:00.000001Z")]
+    fn timestamp_integration_via_ion_encoding(#[case] text: &str) {
+        use crate::ion_data::IonEq;
+        use crate::v1_0::Binary;
+        use crate::Element;
+
+        // Parse as text, then encode to binary
+        let element = Element::read_one(text.as_bytes()).unwrap();
+        let binary: Vec<u8> = element.encode_to(Vec::new(), Binary).unwrap();
+
+        // Generate bytecode from the binary
+        let (dest, _cp) = generate_all(binary.clone());
+
+        // Find the TIMESTAMP_REF instruction
+        let ts_idx = dest
+            .iter()
+            .position(|&w| Instruction::from_raw(w).operation() == op::TIMESTAMP_REF)
+            .unwrap_or_else(|| panic!("expected TIMESTAMP_REF for input '{text}', got: {dest:?}"));
+        let ts_instr = Instruction::from_raw(dest[ts_idx]);
+        let length = ts_instr.data();
+        let position = dest[ts_idx + 1];
+
+        // Read and verify
+        let gen = BinaryIon10Generator::new(binary);
+        let decoded = gen.read_timestamp_ref(position, length).unwrap();
+        let expected = element.expect_timestamp().unwrap();
+        assert!(
+            decoded.ion_eq(&expected),
+            "Mismatch for '{text}': decoded={decoded:?}, expected={expected:?}"
+        );
+    }
+
+    // --- Overflow and validation error tests ---
+
+    #[test]
+    fn timestamp_offset_varint_overflow() {
+        // Construct a timestamp whose offset VarInt has >9 continuation bytes,
+        // which should trigger the "VarInt exceeds i64 range" error.
+        // Offset VarInt: 10 non-stop bytes + 1 stop byte = 11 bytes total.
+        // Then a valid year VarUInt (2024).
+        let mut body = Vec::new();
+        // First VarInt byte: stop=0, sign=0, magnitude bits=0 => 0x00
+        body.push(0x00u8);
+        // 9 more continuation bytes (no stop bit) to exceed the 9-byte limit
+        for _ in 0..9 {
+            body.push(0x00u8);
+        }
+        // Stop byte
+        body.push(0x80u8);
+        // Year VarUInt for 2024
+        body.push(0x0F);
+        body.push(0xE8);
+
+        let body_len = body.len();
+        let mut source = vec![0x6E]; // timestamp type, VarUInt length follows
+        source.push(0x80 | body_len as u8); // VarUInt length
+        source.extend_from_slice(&body);
+
+        let (dest, _cp) = generate(source.clone());
+        let ts_instr = Instruction::from_raw(dest[0]);
+        assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
+
+        let gen = BinaryIon10Generator::new(source);
+        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        assert!(
+            result.is_err(),
+            "VarInt offset with >9 bytes should produce an error"
+        );
+    }
+
+    #[test]
+    fn timestamp_year_varuint_overflow() {
+        // Construct a timestamp whose year VarUInt has >5 continuation bytes,
+        // which should trigger the "VarUInt exceeds u32 range" error.
+        // Offset: known, +0 minutes = VarInt byte 0x80 (stop=1, sign=0, mag=0)
+        let mut body = Vec::new();
+        body.push(0x80u8); // offset = +0
+                           // Year VarUInt: 6 non-stop bytes + 1 stop byte
+        for _ in 0..6 {
+            body.push(0x01u8); // no stop bit
+        }
+        body.push(0x81u8); // stop byte
+
+        let body_len = body.len();
+        let mut source = vec![0x6E]; // timestamp type, VarUInt length follows
+        source.push(0x80 | body_len as u8);
+        source.extend_from_slice(&body);
+
+        let (dest, _cp) = generate(source.clone());
+        let ts_instr = Instruction::from_raw(dest[0]);
+        assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
+
+        let gen = BinaryIon10Generator::new(source);
+        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        assert!(
+            result.is_err(),
+            "VarUInt year with >5 bytes should produce an error"
+        );
+    }
+
+    #[test]
+    fn timestamp_offset_out_of_range() {
+        // Construct a timestamp whose offset exceeds 1440 minutes.
+        // Offset VarInt for +1441: need 2 bytes.
+        //   1441 in binary = 0b10110100001
+        //   First byte: stop=0, sign=0, high 6 bits = 1441 >> 7 = 11 => 0x0B
+        //   Second byte: stop=1, low 7 bits = 1441 & 0x7F = 33 => 0x80 | 33 = 0xA1
+        // Year VarUInt for 2024: [0x0F, 0xE8]
+        let mut body = Vec::new();
+        body.push(0x0B); // offset first byte (no stop, positive, high bits)
+        body.push(0xA1); // offset second byte (stop, low bits = 33)
+        body.push(0x0F); // year high
+        body.push(0xE8); // year low (stop)
+
+        let body_len = body.len();
+        let mut source = vec![0x6E]; // timestamp type, VarUInt length follows
+        source.push(0x80 | body_len as u8);
+        source.extend_from_slice(&body);
+
+        let (dest, _cp) = generate(source.clone());
+        let ts_instr = Instruction::from_raw(dest[0]);
+        assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
+
+        let gen = BinaryIon10Generator::new(source);
+        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        assert!(
+            result.is_err(),
+            "offset >1440 minutes should produce an error"
+        );
+    }
+
+    #[test]
+    fn timestamp_fractional_coefficient_too_large() {
+        // Construct a timestamp with a fractional coefficient >16 bytes.
+        // Full timestamp up to seconds, then fractional with 17 coeff bytes.
+        // Use ion-rs to encode a base timestamp, then manually craft the
+        // fractional part.
+        //
+        // Offset: +0 = VarInt 0x80
+        // Year: 2024 = VarUInt [0x0F, 0xE8]
+        // Month: 1 = VarUInt 0x81
+        // Day: 15 = VarUInt 0x8F
+        // Hour: 10 = VarUInt 0x8A
+        // Minute: 30 = VarUInt 0x9E
+        // Second: 0 = VarUInt 0x80
+        // Fractional exponent: -1 = VarInt 0xC1 (stop=1, sign=1, mag=1)
+        // Fractional coefficient: 17 bytes
+        let mut body = Vec::new();
+        body.push(0x80); // offset +0
+        body.push(0x0F); // year high
+        body.push(0xE8); // year low (stop)
+        body.push(0x81); // month 1
+        body.push(0x8F); // day 15
+        body.push(0x8A); // hour 10
+        body.push(0x9E); // minute 30
+        body.push(0x80); // second 0
+        body.push(0xC1); // frac exponent -1
+                         // 17 coefficient bytes (first byte sign=0, rest = 0x01)
+        body.push(0x01);
+        for _ in 0..16 {
+            body.push(0x01);
+        }
+
+        let body_len = body.len();
+        let mut source = vec![0x6E]; // timestamp type, VarUInt length follows
+                                     // body_len will be > 14 but < 128, so single-byte VarUInt
+        source.push(0x80 | body_len as u8);
+        source.extend_from_slice(&body);
+
+        let (dest, _cp) = generate(source.clone());
+        let ts_instr = Instruction::from_raw(dest[0]);
+        assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
+
+        let gen = BinaryIon10Generator::new(source);
+        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        assert!(
+            result.is_err(),
+            "fractional coefficient >16 bytes should produce an error"
+        );
     }
 }
