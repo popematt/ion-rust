@@ -20,16 +20,28 @@ use crate::element::Annotations;
 use crate::result::IonFailure;
 use crate::{Bytes, Element, Int, IonResult, IonType, Sequence, Str, Struct, Symbol, Value};
 
-/// Reads all top-level values from binary Ion data using the bytecode
-/// reader pipeline. Returns a `Sequence` of materialized `Element`s.
+/// Reads all top-level values from Ion data using the bytecode reader
+/// pipeline. Auto-detects binary (starts with 0xE0) vs text format.
 pub fn read_all_v2(data: &[u8]) -> IonResult<Sequence> {
-    let generator = BinaryIon10Generator::new(data);
-    let mut reader = BytecodeReader::with_generator(generator);
-    let mut elements = Vec::new();
-    while reader.next()?.is_some() {
-        elements.push(materialize_element(&mut reader)?);
+    if data.first() == Some(&0xE0) {
+        let generator = BinaryIon10Generator::new(data);
+        let mut reader = BytecodeReader::with_generator(generator);
+        let mut elements = Vec::new();
+        while reader.next()?.is_some() {
+            elements.push(materialize_element(&mut reader)?);
+        }
+        Ok(elements.into())
+    } else {
+        use crate::bytecode::text10::StreamingTextIon10Generator;
+        use std::io::Cursor;
+        let generator = StreamingTextIon10Generator::new(Cursor::new(data));
+        let mut reader = BytecodeReader::with_generator(generator);
+        let mut elements = Vec::new();
+        while reader.next()?.is_some() {
+            elements.push(materialize_element(&mut reader)?);
+        }
+        Ok(elements.into())
     }
-    Ok(elements.into())
 }
 
 /// Reads a single top-level value from binary Ion data using the
@@ -58,17 +70,30 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
     "$ion_shared_symbol_table",
 ];
 
-/// Reads all top-level values from binary Ion data by walking the
-/// bytecode linearly, bypassing the `BytecodeReader` state machine.
-/// This is optimized for the "always materialize everything" use case.
+/// Reads all top-level values from Ion data by walking the bytecode
+/// linearly, bypassing the `BytecodeReader` state machine. This is
+/// optimized for the "always materialize everything" use case.
+/// Auto-detects binary (starts with 0xE0) vs text format.
 pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
-    let generator = BinaryIon10Generator::new(data);
-    let mut iter = BytecodeElementIterator::new(generator)?;
-    let mut elements = Vec::new();
-    for result in &mut iter {
-        elements.push(result?);
+    if data.first() == Some(&0xE0) {
+        let generator = BinaryIon10Generator::new(data);
+        let mut iter = BytecodeElementIterator::new(generator)?;
+        let mut elements = Vec::new();
+        for result in &mut iter {
+            elements.push(result?);
+        }
+        Ok(elements.into())
+    } else {
+        use crate::bytecode::text10::StreamingTextIon10Generator;
+        use std::io::Cursor;
+        let generator = StreamingTextIon10Generator::new(Cursor::new(data));
+        let mut iter = BytecodeElementIterator::new(generator)?;
+        let mut elements = Vec::new();
+        for result in &mut iter {
+            elements.push(result?);
+        }
+        Ok(elements.into())
     }
-    Ok(elements.into())
 }
 
 /// An iterator that walks bytecode linearly, producing materialized
@@ -1137,5 +1162,90 @@ mod tests {
             assert_eq!(e2, e3, "mismatch at index {i}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn all_text_benchmarks_pass() {
+        let cases: Vec<(&str, String)> = vec![
+            (
+                "integers",
+                (0..100).map(|i| format!("{} ", i * 7 - 50)).collect(),
+            ),
+            (
+                "floats",
+                (0..100)
+                    .map(|i| format!("{}e0 ", (i as f64) * 1.7 - 85.0))
+                    .collect(),
+            ),
+            (
+                "bools",
+                (0..100)
+                    .map(|i| if i % 2 == 0 { "true " } else { "false " }.to_string())
+                    .collect(),
+            ),
+            ("nulls", (0..100).map(|_| "null ".to_string()).collect()),
+            ("symbols", (0..100).map(|i| format!("sym_{} ", i)).collect()),
+            (
+                "strings",
+                (0..100).map(|i| format!("\"str_{}\" ", i)).collect(),
+            ),
+            (
+                "decimals",
+                (0..100)
+                    .map(|i| format!("{}.{}d{} ", i, i % 10, (i % 3) as i32 - 1))
+                    .collect(),
+            ),
+            (
+                "timestamps",
+                (0..100)
+                    .map(|i| {
+                        let year = 2000 + (i % 25);
+                        let month = (i % 12) + 1;
+                        let day = (i % 28) + 1;
+                        format!("{year}-{month:02}-{day:02}T10:30:00Z ")
+                    })
+                    .collect(),
+            ),
+            (
+                "lists",
+                (0..50)
+                    .map(|i| {
+                        format!(
+                            "[[{}, {}], [{}, {}]] ",
+                            i * 4,
+                            i * 4 + 1,
+                            i * 4 + 2,
+                            i * 4 + 3
+                        )
+                    })
+                    .collect(),
+            ),
+            (
+                "nested_structs",
+                (0..50)
+                    .map(|i| format!("{{name: \"item_{i}\", value: {i}, tags: [\"a\", \"b\"]}} "))
+                    .collect(),
+            ),
+            (
+                "mixed",
+                (0..50)
+                    .map(|i| {
+                        format!(
+                            "{{id: {i}, name: \"u_{i}\", ok: true, v: [{}, {}]}} ",
+                            i * 2,
+                            i * 2 + 1
+                        )
+                    })
+                    .collect(),
+            ),
+        ];
+
+        for (name, text) in &cases {
+            let expected = Element::read_all(text.as_bytes())
+                .unwrap_or_else(|e| panic!("{name}: Element::read_all failed: {e}"));
+            let actual = read_all_v3(text.as_bytes())
+                .unwrap_or_else(|e| panic!("{name}: read_all_v3 failed: {e}"));
+            assert_eq!(expected.len(), actual.len(), "{name}: length mismatch");
+        }
     }
 }
