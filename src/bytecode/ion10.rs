@@ -223,7 +223,7 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
                 self.emit_float(length, destination);
             }
             type_code::DECIMAL => {
-                todo!("Decimal encoding is deferred")
+                self.emit_decimal(length, destination);
             }
             type_code::TIMESTAMP => {
                 todo!("Timestamp encoding is deferred")
@@ -234,12 +234,8 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             type_code::STRING => {
                 self.emit_string(length, destination);
             }
-            type_code::CLOB => {
-                todo!("Clob encoding is deferred")
-            }
-            type_code::BLOB => {
-                todo!("Blob encoding is deferred")
-            }
+            type_code::CLOB => self.emit_lob_ref(instr::CLOB_REF, length, destination),
+            type_code::BLOB => self.emit_lob_ref(instr::BLOB_REF, length, destination),
             type_code::LIST => {
                 self.emit_container(instr::LIST_START, length, false, destination, constant_pool);
             }
@@ -421,6 +417,26 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         }
     }
 
+    /// Emits a decimal value as DECIMAL_REF pointing to the source bytes.
+    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<u32>) {
+        if length == 0 {
+            // Decimal with length 0 is 0d0 — still emit as REF with length 0.
+            // The read_decimal_ref method handles this case.
+            destination.push(instr::DECIMAL_REF);
+            destination.push(self.position as u32);
+            return;
+        }
+        let offset = self.position as u32;
+        debug_assert!(
+            length as u32 <= 0x003F_FFFF,
+            "decimal length exceeds 22-bit data field"
+        );
+        // Mask to 22 bits to prevent corrupt opcodes in release builds.
+        destination.push(instr::DECIMAL_REF | (length as u32 & 0x003F_FFFF));
+        destination.push(offset);
+        self.position += length;
+    }
+
     /// Emits a symbol value as SYMBOL_SID.
     fn emit_symbol(&mut self, length: usize, destination: &mut Vec<u32>) {
         if length == 0 {
@@ -430,7 +446,8 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         }
         let sid = self.read_uint(length) as u32;
         debug_assert!(sid <= 0x003F_FFFF, "SID exceeds 22-bit data field");
-        destination.push(instr::SYMBOL_SID | sid);
+        // Mask to 22 bits to prevent corrupt opcodes in release builds.
+        destination.push(instr::SYMBOL_SID | (sid & 0x003F_FFFF));
     }
 
     /// Emits a string as STRING_REF pointing to the source bytes.
@@ -440,7 +457,21 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             length as u32 <= 0x003F_FFFF,
             "string length exceeds 22-bit data field"
         );
-        destination.push(instr::STRING_REF | length as u32);
+        // Mask to 22 bits to prevent corrupt opcodes in release builds.
+        destination.push(instr::STRING_REF | (length as u32 & 0x003F_FFFF));
+        destination.push(offset);
+        self.position += length;
+    }
+
+    /// Emits a lob (blob or clob) as a REF instruction pointing to source bytes.
+    fn emit_lob_ref(&mut self, instr_base: u32, length: usize, destination: &mut Vec<u32>) {
+        let offset = self.position as u32;
+        debug_assert!(
+            length as u32 <= 0x003F_FFFF,
+            "lob length exceeds 22-bit data field"
+        );
+        // Mask to 22 bits to prevent corrupt opcodes in release builds.
+        destination.push(instr_base | (length as u32 & 0x003F_FFFF));
         destination.push(offset);
         self.position += length;
     }
@@ -466,7 +497,8 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
                     field_sid <= 0x003F_FFFF,
                     "field name SID exceeds 22-bit data field"
                 );
-                destination.push(instr::FIELD_NAME_SID | field_sid);
+                // Mask to 22 bits to prevent corrupt opcodes in release builds.
+                destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
             }
             // LSTs only appear at the top level, not inside containers.
             let _ = self.emit_value(destination, constant_pool);
@@ -478,7 +510,8 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
             bytecode_length <= 0x003F_FFFF,
             "container bytecode length exceeds 22-bit data field"
         );
-        destination[start_index] = start_instr | bytecode_length as u32;
+        // Mask to 22 bits to prevent corrupt opcodes in release builds.
+        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
     }
 
     /// Emits an annotation wrapper: annotation SIDs followed by the
@@ -528,7 +561,8 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
                 sid <= 0x003F_FFFF,
                 "annotation SID exceeds 22-bit data field"
             );
-            destination.push(instr::ANNOTATION_SID | sid);
+            // Mask to 22 bits to prevent corrupt opcodes in release builds.
+            destination.push(instr::ANNOTATION_SID | (sid & 0x003F_FFFF));
         }
 
         // Emit the annotated value (remaining bytes in wrapper)
@@ -697,6 +731,10 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
     }
 
     fn read_int_ref(&self, position: u32, length: u32) -> IonResult<Int> {
+        debug_assert!(
+            length <= 16,
+            "read_int_ref: length {length} exceeds 16 bytes (i128 overflow)"
+        );
         let start = position as usize;
         let end = start + length as usize;
         let bytes = &self.source()[start..end];
@@ -704,8 +742,89 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
         Ok(Int::from(value))
     }
 
-    fn read_decimal_ref(&self, _position: u32, _length: u32) -> IonResult<Decimal> {
-        todo!("Decimal REF reading is deferred")
+    fn read_decimal_ref(&self, position: u32, length: u32) -> IonResult<Decimal> {
+        if length == 0 {
+            // Length 0 means the decimal value is 0d0
+            return Ok(Decimal::new(0i32, 0i64));
+        }
+
+        let start = position as usize;
+        let end = start + length as usize;
+        if end > self.source().len() {
+            return IonResult::decoding_error("decimal reference out of bounds");
+        }
+        let bytes = &self.source()[start..end];
+
+        // Read VarInt exponent from the beginning of the decimal body.
+        // Ion 1.0 VarInt: high bit is stop bit, first byte bit 6 is sign.
+        let first_byte = bytes[0];
+        let is_negative_exp = (first_byte & 0x40) != 0;
+        let mut exponent: i64 = (first_byte & 0x3F) as i64;
+        let mut exp_size: usize = 1;
+
+        if first_byte & 0x80 == 0 {
+            // Not the last byte — continue reading.
+            // Track whether we find a stop bit; if the VarInt is
+            // unterminated within the decimal body, that is an error.
+            let mut found_stop = false;
+            for &byte in &bytes[1..] {
+                exp_size += 1;
+                // 9 VarInt bytes = 6 + 8*7 = 62 bits of magnitude, which
+                // fits in i64. 10 bytes would be 69 bits and overflow.
+                if exp_size > 9 {
+                    return IonResult::decoding_error("decimal exponent exceeds i64 range");
+                }
+                exponent = (exponent << 7) | (byte & 0x7F) as i64;
+                if byte & 0x80 != 0 {
+                    found_stop = true;
+                    break;
+                }
+            }
+            if !found_stop {
+                return IonResult::decoding_error("unterminated VarInt in decimal exponent");
+            }
+        }
+
+        if is_negative_exp {
+            exponent = -exponent;
+        }
+
+        // Remaining bytes after the exponent are the coefficient (sign-magnitude).
+        let coeff_bytes = &bytes[exp_size..];
+
+        if coeff_bytes.is_empty() {
+            // No coefficient bytes means coefficient is 0.
+            return Ok(Decimal::new(0i32, exponent));
+        }
+
+        // First bit of the first coefficient byte is the sign bit.
+        let is_negative_coeff = (coeff_bytes[0] & 0x80) != 0;
+
+        if coeff_bytes.len() > 16 {
+            return IonResult::decoding_error(
+                "decimal coefficient exceeds 128 bits (not yet supported)",
+            );
+        }
+
+        // Build the magnitude from the remaining bits (big-endian unsigned),
+        // clearing the sign bit from the first byte inline to avoid allocation.
+        let first_magnitude_byte = (coeff_bytes[0] & 0x7F) as u128;
+        let magnitude = coeff_bytes[1..]
+            .iter()
+            .fold(first_magnitude_byte, |acc, &b| (acc << 8) | b as u128);
+
+        if magnitude == 0 && is_negative_coeff {
+            // Negative zero
+            return Ok(Decimal::negative_zero_with_exponent(exponent));
+        }
+
+        let coefficient: i128 = if is_negative_coeff {
+            -(magnitude as i128)
+        } else {
+            magnitude as i128
+        };
+
+        Ok(Decimal::new(coefficient, exponent))
     }
 
     fn read_timestamp_ref(&self, _position: u32, _length: u32) -> IonResult<Timestamp> {
@@ -715,6 +834,9 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
     fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str> {
         let start = position as usize;
         let end = start + length as usize;
+        if end > self.source().len() {
+            return IonResult::decoding_error("text reference out of bounds");
+        }
         let bytes = &self.source()[start..end];
         std::str::from_utf8(bytes).map_err(|e| {
             crate::IonError::decoding_error(format!(
@@ -726,6 +848,9 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
     fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]> {
         let start = position as usize;
         let end = start + length as usize;
+        if end > self.source().len() {
+            return IonResult::decoding_error("bytes reference out of bounds");
+        }
         Ok(&self.source()[start..end])
     }
 }
@@ -1683,5 +1808,259 @@ mod tests {
         assert_eq!(Instruction::from_raw(body[2]).data(), 0);
         // Third: STRING_REF for "bar" (2 words)
         assert_eq!(Instruction::from_raw(body[3]).operation(), op::STRING_REF);
+    }
+
+    #[test]
+    fn blob_empty() {
+        // 0xA0 = blob, length 0
+        let source = vec![0xA0];
+        let (dest, _cp) = generate(source);
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::BLOB_REF);
+        assert_eq!(instr_word.data(), 0); // length
+    }
+
+    #[test]
+    fn blob_small() {
+        // 0xA3 = blob, length 3, followed by 3 bytes
+        let source = vec![0xA3, 0x01, 0x02, 0x03];
+        let (dest, _cp) = generate(source);
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::BLOB_REF);
+        assert_eq!(instr_word.data(), 3); // length
+        assert_eq!(dest[1], 1); // offset (after type descriptor byte)
+    }
+
+    #[test]
+    fn blob_read_bytes_ref() {
+        let source = vec![0xA3, 0x01, 0x02, 0x03];
+        let gen = BinaryIon10Generator::new(source);
+
+        let bytes = gen.read_bytes_ref(1, 3).unwrap();
+        assert_eq!(bytes, &[0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn clob_empty() {
+        // 0x90 = clob, length 0
+        let source = vec![0x90];
+        let (dest, _cp) = generate(source);
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::CLOB_REF);
+        assert_eq!(instr_word.data(), 0); // length
+    }
+
+    #[test]
+    fn clob_small() {
+        // 0x95 = clob, length 5, followed by ASCII "hello"
+        let source = vec![0x95, b'h', b'e', b'l', b'l', b'o'];
+        let (dest, _cp) = generate(source);
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::CLOB_REF);
+        assert_eq!(instr_word.data(), 5); // length
+        assert_eq!(dest[1], 1); // offset (after type descriptor byte)
+    }
+
+    #[test]
+    fn clob_read_bytes_ref() {
+        let source = vec![0x95, b'h', b'e', b'l', b'l', b'o'];
+        let gen = BinaryIon10Generator::new(source);
+
+        let bytes = gen.read_bytes_ref(1, 5).unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    // --- Decimal tests ---
+
+    use rstest::rstest;
+
+    /// Parameterized test for `read_decimal_ref`: constructs source bytes,
+    /// generates bytecode, reads the decimal back, and asserts it matches
+    /// the expected value.
+    #[rstest]
+    #[case::zero_length_zero(
+        vec![0x50],
+        Decimal::new(0i32, 0i64)
+    )]
+    #[case::zero_coefficient_with_exponent(
+        // VarInt exponent=0 (0x80), no coefficient bytes => 0d0
+        vec![0x51, 0x80],
+        Decimal::new(0i32, 0i64)
+    )]
+    #[case::positive_with_positive_exponent(
+        // 123d2: exponent=2 (0x82), coefficient=123 (0x7B)
+        vec![0x52, 0x82, 0x7B],
+        Decimal::new(123i64, 2i64)
+    )]
+    #[case::negative_coefficient(
+        // -5d0: exponent=0 (0x80), coefficient=-5 (sign=1, mag=5 => 0x85)
+        vec![0x52, 0x80, 0x85],
+        Decimal::new(-5i64, 0i64)
+    )]
+    #[case::negative_exponent(
+        // 456d-2: exponent=-2 (0xC2), coefficient=456 (0x01, 0xC8)
+        vec![0x53, 0xC2, 0x01, 0xC8],
+        Decimal::new(456i64, -2i64)
+    )]
+    #[case::large_multi_byte_coefficient(
+        // 100000d0: exponent=0 (0x80), coefficient=100000 (0x01, 0x86, 0xA0)
+        vec![0x54, 0x80, 0x01, 0x86, 0xA0],
+        Decimal::new(100000i64, 0i64)
+    )]
+    #[case::negative_zero(
+        // -0d0: exponent=0 (0x80), coefficient=-0 (sign=1, mag=0 => 0x80)
+        vec![0x52, 0x80, 0x80],
+        Decimal::negative_zero_with_exponent(0)
+    )]
+    fn decimal_read_ref(#[case] source: Vec<u8>, #[case] expected: Decimal) {
+        let (dest, _cp) = generate(source.clone());
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::DECIMAL_REF);
+
+        let length = instr_word.data();
+        let position = dest[1];
+        let gen = BinaryIon10Generator::new(source);
+        let decimal = gen.read_decimal_ref(position, length).unwrap();
+        assert_eq!(decimal, expected);
+    }
+
+    #[test]
+    fn decimal_integration_via_ion_encoding() {
+        // Encode a decimal via ion-rs text -> binary, then verify it can be
+        // read through the bytecode generator.
+        use crate::ion_data::IonEq;
+        use crate::v1_0::Binary;
+        use crate::Element;
+
+        let text_values = &["0.", "1.23", "-4.56", "123d2", "-0.", "1234567890.12345"];
+        for text in text_values {
+            // Parse as text, then encode to binary
+            let element = Element::read_one(text.as_bytes()).unwrap();
+            let binary: Vec<u8> = element.encode_to(Vec::new(), Binary).unwrap();
+
+            // Generate bytecode from the binary
+            let (dest, _cp) = generate_all(binary.clone());
+
+            // Find the DECIMAL_REF instruction
+            let dec_idx = dest
+                .iter()
+                .position(|&w| Instruction::from_raw(w).operation() == op::DECIMAL_REF)
+                .unwrap_or_else(|| {
+                    panic!("expected DECIMAL_REF for input '{text}', got: {dest:?}")
+                });
+            let dec_instr = Instruction::from_raw(dest[dec_idx]);
+            let length = dec_instr.data();
+            let position = dest[dec_idx + 1];
+
+            // Read and verify
+            let gen = BinaryIon10Generator::new(binary);
+            let decoded = gen.read_decimal_ref(position, length).unwrap();
+            let expected = element.expect_decimal().unwrap();
+            assert!(
+                decoded.ion_eq(&expected),
+                "Mismatch for '{text}': decoded={decoded:?}, expected={expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_coefficient_overflow_17_bytes() {
+        // Construct a decimal whose coefficient is 17 bytes (exceeds 16-byte limit).
+        // VarInt exponent = 0: byte 0x80
+        // Coefficient: 17 bytes, sign bit 0 (positive), rest are 0xFF.
+        // Total body length = 1 (exponent) + 17 (coefficient) = 18
+        let mut source = vec![0x5E]; // decimal type, VarUInt length follows
+        source.push(0x92); // VarUInt 18 (0x80 | 18)
+        source.push(0x80); // VarInt exponent = 0
+                           // 17 coefficient bytes: first byte has sign=0, rest are 0xFF
+        source.push(0x7F); // sign bit 0, magnitude bits set
+        for _ in 0..16 {
+            source.push(0xFF);
+        }
+
+        let (dest, _cp) = generate(source.clone());
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::DECIMAL_REF);
+
+        let length = instr_word.data();
+        let position = dest[1];
+        let gen = BinaryIon10Generator::new(source);
+        let result = gen.read_decimal_ref(position, length);
+        assert!(
+            result.is_err(),
+            "17-byte coefficient should produce an error"
+        );
+    }
+
+    #[test]
+    fn decimal_exponent_overflow_10_varint_bytes() {
+        // Construct bytes where the VarInt exponent has no stop bit for 10+
+        // bytes, which exceeds the i64 capacity guard (max 9 VarInt bytes).
+        // Each non-stop VarInt byte: 0x00 (no stop bit, no sign, zero data).
+        // We need 10 non-stop bytes followed by a stop byte.
+        // Total: type descriptor + VarUInt length + 11 exponent bytes + 1 coefficient byte
+        let mut body = Vec::new();
+        // 10 non-stop exponent bytes (exceeds limit)
+        for _ in 0..10 {
+            body.push(0x00u8); // no stop bit, positive sign on first, zero data
+        }
+        // 11th byte with stop bit
+        body.push(0x80u8);
+        // One coefficient byte
+        body.push(0x01u8);
+
+        let body_len = body.len(); // 12
+        let mut source = vec![0x5E]; // decimal type, VarUInt length follows
+        source.push(0x80 | body_len as u8); // VarUInt length
+        source.extend_from_slice(&body);
+
+        let (dest, _cp) = generate(source.clone());
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::DECIMAL_REF);
+
+        let length = instr_word.data();
+        let position = dest[1];
+        let gen = BinaryIon10Generator::new(source);
+        let result = gen.read_decimal_ref(position, length);
+        assert!(
+            result.is_err(),
+            "exponent with 10+ VarInt bytes should produce an error"
+        );
+    }
+
+    #[test]
+    fn decimal_multi_byte_varint_exponent() {
+        // Exponent 200 requires 2 VarInt bytes:
+        //   First byte: stop=0, sign=0, magnitude high bits.
+        //     200 in binary = 11001000. In VarInt, first byte carries 6 bits
+        //     (after stop and sign): 200 >> 7 = 1 with 6 bits => 0b00_000001
+        //     But actually: first byte has 6 data bits (bits 5-0 after stop+sign),
+        //     subsequent bytes have 7 data bits each.
+        //     200 = 0b11001000. Split: high 6 bits would be wrong for this size.
+        //     Actually: first byte provides 6 value bits, second provides 7.
+        //     Total capacity = 13 bits. 200 fits in 8 bits.
+        //     First byte: stop=0, sign=0, top (200>>7)=1 => 6 data bits = 0b000001 => byte 0x01
+        //     Second byte: stop=1, low 7 bits of 200 = 200 & 0x7F = 72 => 0b1_1001000 = 0xC8
+        //   VarInt bytes: [0x01, 0xC8]
+        // Coefficient 1: sign=0, magnitude=1 => byte 0x01
+        // Total body: [0x01, 0xC8, 0x01] = length 3
+        let source = vec![0x53, 0x01, 0xC8, 0x01];
+        let (dest, _cp) = generate(source.clone());
+
+        let instr_word = Instruction::from_raw(dest[0]);
+        assert_eq!(instr_word.operation(), op::DECIMAL_REF);
+
+        let length = instr_word.data();
+        let position = dest[1];
+        let gen = BinaryIon10Generator::new(source);
+        let decimal = gen.read_decimal_ref(position, length).unwrap();
+        assert_eq!(decimal, Decimal::new(1i64, 200i64));
     }
 }
