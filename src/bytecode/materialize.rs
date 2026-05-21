@@ -32,9 +32,10 @@ pub fn read_all_v2(data: &[u8]) -> IonResult<Sequence> {
         }
         Ok(elements.into())
     } else {
-        use crate::bytecode::text10::StreamingTextIon10Generator;
-        use std::io::Cursor;
-        let generator = StreamingTextIon10Generator::new(Cursor::new(data));
+        let source = std::str::from_utf8(data)
+            .map_err(|_| crate::IonError::decoding_error("invalid UTF-8 in text Ion input"))?;
+        use crate::bytecode::str_text10::StrTextIon10Generator;
+        let generator = StrTextIon10Generator::new(source);
         let mut reader = BytecodeReader::with_generator(generator);
         let mut elements = Vec::new();
         while reader.next()?.is_some() {
@@ -84,9 +85,10 @@ pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
         }
         Ok(elements.into())
     } else {
-        use crate::bytecode::text10::StreamingTextIon10Generator;
-        use std::io::Cursor;
-        let generator = StreamingTextIon10Generator::new(Cursor::new(data));
+        let source = std::str::from_utf8(data)
+            .map_err(|_| crate::IonError::decoding_error("invalid UTF-8 in text Ion input"))?;
+        use crate::bytecode::str_text10::StrTextIon10Generator;
+        let generator = StrTextIon10Generator::new(source);
         let mut iter = BytecodeElementIterator::new(generator)?;
         let mut elements = Vec::new();
         for result in &mut iter {
