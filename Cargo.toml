@@ -60,6 +60,7 @@ base64 = "0.12"
 # this makes it explicitly not do this as there is an advisory warning against this:
 # See: https://github.com/chronotope/chrono/issues/602
 compact_str = "0.8.0"
+hashbrown = "0.17"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
 delegate = "0.12.0"
 thiserror = "1.0"
