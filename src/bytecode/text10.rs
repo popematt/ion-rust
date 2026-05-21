@@ -376,7 +376,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         }
     }
 
-    /// Scans a container (list, sexp) matching open/close delimiters.
+    /// Scans a container (list, sexp, struct) matching open/close delimiters.
     fn scan_container(&mut self, start: usize, _open: u8, close: u8) -> IonResult<usize> {
         let mut i = start + 1; // skip opening delimiter
         let mut depth: u32 = 1;
@@ -398,15 +398,12 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                         return Ok(i);
                     }
                 }
-                b'(' | b'[' => {
+                b'(' | b'[' | b'{' => {
                     depth += 1;
                     i += 1;
                 }
-                b'{' => {
-                    depth += 1;
-                    i += 1;
-                }
-                b'}' => {
+                b')' | b']' | b'}' => {
+                    // Closing delimiter that is not our `close` (handled above).
                     depth -= 1;
                     i += 1;
                     if depth == 0 {
@@ -727,6 +724,11 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                             continue;
                         }
                     }
+                } else if self.looks_like_timestamp(start, i) {
+                    // Single ':' inside what looks like a timestamp
+                    // (e.g., `2024-01-15T10:30:00Z`). Continue scanning.
+                    i += 1;
+                    continue;
                 } else {
                     // Single ':' — this is a value terminator (e.g., in struct)
                     return Ok(i);
@@ -1422,6 +1424,28 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             self.emit_parsed_int(&text, destination, constant_pool)?;
         }
         Ok(())
+    }
+
+    /// Returns true if the content in `buffer[start..colon_pos]` looks like
+    /// it could be part of a timestamp. This is used during scanning to
+    /// distinguish the `:` in a time component (e.g., `10:30`) from a struct
+    /// field separator.
+    ///
+    /// A timestamp-like pattern has 4 digits followed by either `-` (date
+    /// separator) or `T` (date-time separator) somewhere in the scanned
+    /// region, and the byte immediately before the colon is a digit
+    /// (indicating `HH:` in a time component).
+    fn looks_like_timestamp(&self, start: usize, colon_pos: usize) -> bool {
+        // The byte before the colon must be a digit (e.g., `...T10:`)
+        if colon_pos == start {
+            return false;
+        }
+        if !self.buffer[colon_pos - 1].is_ascii_digit() {
+            return false;
+        }
+        // Look for a 'T' in the scanned region (marks date-time boundary)
+        let region = &self.buffer[start..colon_pos];
+        region.contains(&b'T')
     }
 
     /// Scans forward from a timestamp start to find where it ends.
@@ -2569,17 +2593,265 @@ trait TimestampParse {
 }
 
 impl TimestampParse for Timestamp {
+    /// Parses an Ion 1.0 text timestamp directly from bytes without allocating
+    /// intermediate buffers or instantiating an `EncodingContext`.
     fn parse(bytes: &[u8]) -> IonResult<Timestamp> {
-        let text = std::str::from_utf8(bytes).map_err(|e| {
-            crate::IonError::decoding_error(format!("invalid UTF-8 in timestamp: {e}"))
-        })?;
-        // Use the existing ion-rs Element parser to parse the timestamp
-        let element = crate::Element::read_one(text.as_bytes()).map_err(|e| {
-            crate::IonError::decoding_error(format!("failed to parse timestamp '{text}': {e}"))
-        })?;
-        element.expect_timestamp().map_err(|e| {
-            crate::IonError::decoding_error(format!("expected timestamp from '{text}', got: {e}"))
-        })
+        parse_timestamp_direct(bytes)
+    }
+}
+
+/// Parses exactly 4 ASCII decimal digits starting at `pos`, advancing `pos` past them.
+#[inline(always)]
+fn parse_4_digits(text: &[u8], pos: &mut usize) -> IonResult<u32> {
+    let p = *pos;
+    if p + 4 > text.len() {
+        return IonResult::decoding_error("unexpected end of timestamp (expected 4 digits)");
+    }
+    let d0 = text[p].wrapping_sub(b'0') as u32;
+    let d1 = text[p + 1].wrapping_sub(b'0') as u32;
+    let d2 = text[p + 2].wrapping_sub(b'0') as u32;
+    let d3 = text[p + 3].wrapping_sub(b'0') as u32;
+    if d0 > 9 || d1 > 9 || d2 > 9 || d3 > 9 {
+        return IonResult::decoding_error("non-digit in timestamp year");
+    }
+    *pos = p + 4;
+    Ok(d0 * 1000 + d1 * 100 + d2 * 10 + d3)
+}
+
+/// Parses exactly 2 ASCII decimal digits starting at `pos`, advancing `pos` past them.
+#[inline(always)]
+fn parse_2_digits(text: &[u8], pos: &mut usize) -> IonResult<u32> {
+    let p = *pos;
+    if p + 2 > text.len() {
+        return IonResult::decoding_error("unexpected end of timestamp (expected 2 digits)");
+    }
+    let d0 = text[p].wrapping_sub(b'0') as u32;
+    let d1 = text[p + 1].wrapping_sub(b'0') as u32;
+    if d0 > 9 || d1 > 9 {
+        return IonResult::decoding_error("non-digit in timestamp field");
+    }
+    *pos = p + 2;
+    Ok(d0 * 10 + d1)
+}
+
+/// Expects a specific byte at `pos` and advances past it.
+#[inline(always)]
+fn expect_byte(text: &[u8], pos: &mut usize, expected: u8) -> IonResult<()> {
+    let p = *pos;
+    if p >= text.len() || text[p] != expected {
+        return IonResult::decoding_error(format!(
+            "expected '{}' in timestamp at position {p}",
+            expected as char
+        ));
+    }
+    *pos = p + 1;
+    Ok(())
+}
+
+/// Parses the timezone offset from the current position.
+/// Returns `Some(minutes)` for a known offset, or `None` for unknown offset (`-00:00`).
+#[inline]
+fn parse_offset(text: &[u8], pos: &mut usize) -> IonResult<Option<i32>> {
+    let p = *pos;
+    if p >= text.len() {
+        // No offset means unknown offset
+        return Ok(None);
+    }
+    match text[p] {
+        b'Z' | b'z' => {
+            *pos = p + 1;
+            Ok(Some(0))
+        }
+        b'+' => {
+            *pos = p + 1;
+            let hours = parse_2_digits(text, pos)? as i32;
+            expect_byte(text, pos, b':')?;
+            let minutes = parse_2_digits(text, pos)? as i32;
+            Ok(Some(hours * 60 + minutes))
+        }
+        b'-' => {
+            *pos = p + 1;
+            let hours = parse_2_digits(text, pos)? as i32;
+            expect_byte(text, pos, b':')?;
+            let minutes = parse_2_digits(text, pos)? as i32;
+            if hours == 0 && minutes == 0 {
+                // -00:00 means unknown offset
+                Ok(None)
+            } else {
+                Ok(Some(-(hours * 60 + minutes)))
+            }
+        }
+        _ => IonResult::decoding_error(format!(
+            "expected offset (Z, +hh:mm, or -hh:mm) at position {p}"
+        )),
+    }
+}
+
+/// Directly parses an Ion 1.0 text timestamp from raw bytes without any intermediate
+/// allocations or use of `TextBuffer`/`EncodingContext`/winnow.
+fn parse_timestamp_direct(text: &[u8]) -> IonResult<Timestamp> {
+    let mut pos = 0;
+
+    // Parse YYYY
+    let year = parse_4_digits(text, &mut pos)?;
+
+    // Check for 'T' (year-only precision) or end of input
+    if pos >= text.len() || text[pos] == b'T' {
+        return Timestamp::with_year(year).build();
+    }
+
+    // Expect '-' before month
+    expect_byte(text, &mut pos, b'-')?;
+    let month = parse_2_digits(text, &mut pos)?;
+
+    // Check for 'T' (year-month precision) or end of input
+    if pos >= text.len() || text[pos] == b'T' {
+        return Timestamp::with_year(year).with_month(month).build();
+    }
+
+    // Expect '-' before day
+    expect_byte(text, &mut pos, b'-')?;
+    let day = parse_2_digits(text, &mut pos)?;
+
+    // Check for 'T' to separate date from time; if absent, day precision
+    if pos >= text.len() {
+        return Timestamp::with_year(year)
+            .with_month(month)
+            .with_day(day)
+            .build();
+    }
+    if text[pos] != b'T' {
+        return Timestamp::with_year(year)
+            .with_month(month)
+            .with_day(day)
+            .build();
+    }
+    pos += 1; // skip 'T'
+
+    // If nothing follows the 'T', this is day precision (e.g., 2024-01-15T)
+    if pos >= text.len() {
+        return Timestamp::with_year(year)
+            .with_month(month)
+            .with_day(day)
+            .build();
+    }
+
+    // Parse hh:mm
+    let hour = parse_2_digits(text, &mut pos)?;
+    expect_byte(text, &mut pos, b':')?;
+    let minute = parse_2_digits(text, &mut pos)?;
+
+    // Check if we have an offset next (minute precision) or ':' (seconds)
+    if pos >= text.len()
+        || text[pos] == b'Z'
+        || text[pos] == b'z'
+        || text[pos] == b'+'
+        || text[pos] == b'-'
+    {
+        let offset = parse_offset(text, &mut pos)?;
+        let ts = Timestamp::with_year(year)
+            .with_month(month)
+            .with_day(day)
+            .with_hour_and_minute(hour, minute);
+        return if let Some(off) = offset {
+            ts.with_offset(off).build()
+        } else {
+            ts.build()
+        };
+    }
+
+    // Parse :ss
+    expect_byte(text, &mut pos, b':')?;
+    let second = parse_2_digits(text, &mut pos)?;
+
+    // Check for fractional seconds
+    if pos < text.len() && text[pos] == b'.' {
+        pos += 1; // skip '.'
+
+        // Count and parse fractional digits
+        let frac_start = pos;
+        while pos < text.len() && text[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        let frac_len = pos - frac_start;
+
+        if frac_len == 0 {
+            return IonResult::decoding_error("expected digits after '.' in timestamp");
+        }
+
+        // Parse offset
+        let offset = parse_offset(text, &mut pos)?;
+
+        let ts_base = Timestamp::with_year(year)
+            .with_month(month)
+            .with_day(day)
+            .with_hour_and_minute(hour, minute)
+            .with_second(second);
+
+        let ts = if frac_len <= 9 {
+            // Fast path: fits in u32, use nanoseconds with precision
+            let frac_digits = &text[frac_start..frac_start + frac_len];
+            let mut frac_value: u32 = 0;
+            for &d in frac_digits {
+                frac_value = frac_value * 10 + (d - b'0') as u32;
+            }
+            let multiplier = 10u32.pow(9 - frac_len as u32);
+            let nanoseconds = frac_value * multiplier;
+            ts_base.with_nanoseconds_and_precision(nanoseconds, frac_len as u32)
+        } else if frac_len <= 38 {
+            // Medium path: fits in u128, avoid BigUint allocation
+            let frac_digits = &text[frac_start..frac_start + frac_len];
+            let mut frac_value: u128 = 0;
+            for &d in frac_digits {
+                frac_value = frac_value * 10 + (d - b'0') as u128;
+            }
+            // Convert u128 to Int via little-endian bytes
+            let le_bytes = frac_value.to_le_bytes();
+            // Find the last non-zero byte to trim
+            let significant_len = le_bytes
+                .iter()
+                .rposition(|&b| b != 0)
+                .map(|i| i + 1)
+                .unwrap_or(1);
+            let mut signed_le = le_bytes[..significant_len].to_vec();
+            // Ensure the sign bit is not set (positive value)
+            if signed_le.last().map_or(false, |&b| b & 0x80 != 0) {
+                signed_le.push(0);
+            }
+            let coefficient = Int::from_le_signed_bytes(&signed_le);
+            let decimal = Decimal::new(coefficient, -(frac_len as i64));
+            ts_base.with_fractional_seconds(decimal)
+        } else {
+            // Cold path: very large precision, use BigUint
+            let frac_digits = &text[frac_start..frac_start + frac_len];
+            let big = num_bigint::BigUint::parse_bytes(frac_digits, 10).ok_or_else(|| {
+                crate::IonError::decoding_error("invalid fractional seconds digits")
+            })?;
+            let mut le = big.to_bytes_le();
+            le.push(0); // Ensure positive sign
+            let coefficient = Int::from_le_signed_bytes(&le);
+            let decimal = Decimal::new(coefficient, -(frac_len as i64));
+            ts_base.with_fractional_seconds(decimal)
+        };
+
+        return if let Some(off) = offset {
+            ts.with_offset(off).build()
+        } else {
+            ts.build()
+        };
+    }
+
+    // No fractional seconds - parse offset
+    let offset = parse_offset(text, &mut pos)?;
+    let ts = Timestamp::with_year(year)
+        .with_month(month)
+        .with_day(day)
+        .with_hour_and_minute(hour, minute)
+        .with_second(second);
+    if let Some(off) = offset {
+        ts.with_offset(off).build()
+    } else {
+        ts.build()
     }
 }
 
@@ -2812,5 +3084,90 @@ mod tests {
         assert_eq!(ops, vec![op::INT_I16]);
         let int_instr = Instruction::from_raw(dest[0]);
         assert_eq!(int_instr.data_as_i16(), 42);
+    }
+
+    // --- Integration tests using read_all_v3 on text data ---
+
+    #[test]
+    fn text_struct_with_field_name() {
+        use crate::bytecode::materialize::read_all_v3;
+        use crate::Element;
+        let text = "{foo: 1}";
+        let expected = Element::read_all(text.as_bytes()).unwrap();
+        let actual = read_all_v3(text.as_bytes()).unwrap();
+        assert_eq!(expected, actual, "failed for: {text}");
+    }
+
+    #[test]
+    fn text_struct_with_string_value() {
+        use crate::bytecode::materialize::read_all_v3;
+        use crate::Element;
+        let text = r#"{foo: "hello"}"#;
+        let expected = Element::read_all(text.as_bytes()).unwrap();
+        let actual = read_all_v3(text.as_bytes()).unwrap();
+        assert_eq!(expected, actual, "failed for: {text}");
+    }
+
+    #[test]
+    fn text_struct_with_bool_value() {
+        use crate::bytecode::materialize::read_all_v3;
+        use crate::Element;
+        let text = "{foo: true}";
+        let expected = Element::read_all(text.as_bytes()).unwrap();
+        let actual = read_all_v3(text.as_bytes()).unwrap();
+        assert_eq!(expected, actual, "failed for: {text}");
+    }
+
+    #[test]
+    fn text_struct_with_list_value() {
+        use crate::bytecode::materialize::read_all_v3;
+        use crate::Element;
+        let text = "{foo: [1, 2, 3]}";
+        let expected = Element::read_all(text.as_bytes()).unwrap();
+        let actual = read_all_v3(text.as_bytes()).unwrap();
+        assert_eq!(expected, actual, "failed for: {text}");
+    }
+
+    #[test]
+    fn text_mixed_struct() {
+        use crate::bytecode::materialize::read_all_v3;
+        use crate::Element;
+        let text = r#"{id: 0, name: "user_0", active: true, scores: [0, 0, 0]}"#;
+        let expected = Element::read_all(text.as_bytes()).unwrap();
+        let actual = read_all_v3(text.as_bytes()).unwrap();
+        assert_eq!(expected, actual, "failed for: {text}");
+    }
+
+    #[test]
+    fn text_benchmark_workloads_complete() {
+        use crate::bytecode::materialize::read_all_v3;
+        use crate::Element;
+        let cases = [
+            (0..4000)
+                .map(|i| format!("{} ", i * 7 - 2000))
+                .collect::<String>(),
+            (0..4000)
+                .map(|i| format!("{}e0 ", (i as f64) * 1.7 - 3400.0))
+                .collect::<String>(),
+            (0..3000)
+                .map(|i| format!("\"string_value_{}\" ", i))
+                .collect::<String>(),
+            (0..1500).map(|i| format!("sym_{} ", i)).collect::<String>(),
+            (0..280)
+                .map(|i| {
+                    format!(
+                        "{{id: {i}, name: \"user_{i}\", active: true, scores: [{}, {}, {}]}} ",
+                        i * 10,
+                        i * 20,
+                        i * 30
+                    )
+                })
+                .collect::<String>(),
+        ];
+        for (idx, text) in cases.iter().enumerate() {
+            let expected = Element::read_all(text.as_bytes()).unwrap();
+            let actual = read_all_v3(text.as_bytes()).unwrap();
+            assert_eq!(expected, actual, "text benchmark case {idx} failed");
+        }
     }
 }
