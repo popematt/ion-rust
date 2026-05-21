@@ -48,6 +48,9 @@ pub struct StreamingTextIon10Generator<R: Read> {
     consumed: usize,
     /// Whether EOF has been reached on the source.
     eof: bool,
+    /// The buffer region `[0..utf8_validated_end]` has been confirmed to be
+    /// valid UTF-8. This allows `read_text_ref` to skip re-validation.
+    utf8_validated_end: usize,
     /// Symbol table for LST detection and text-to-SID resolution.
     symbol_table: Vec<Option<Arc<str>>>,
 }
@@ -79,6 +82,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             position: 0,
             consumed: 0,
             eof: false,
+            utf8_validated_end: 0,
             symbol_table,
         }
     }
@@ -90,6 +94,9 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             self.buffer.copy_within(self.consumed..self.filled, 0);
             self.filled -= self.consumed;
             self.position -= self.consumed;
+            // Adjust the validated boundary; it cannot go below zero because
+            // we only ever validate regions that start at or after `consumed`.
+            self.utf8_validated_end = self.utf8_validated_end.saturating_sub(self.consumed);
             self.consumed = 0;
         }
     }
@@ -2150,6 +2157,19 @@ impl<R: Read> BytecodeGenerator for StreamingTextIon10Generator<R> {
         // Scan for a complete top-level value
         let scan_end = self.scan_complete_value()?;
 
+        // Validate UTF-8 for the scanned region. This allows read_text_ref
+        // to skip re-validation later since the buffer is immutable between
+        // refill calls.
+        if scan_end > self.utf8_validated_end {
+            std::str::from_utf8(&self.buffer[self.utf8_validated_end..scan_end]).map_err(|e| {
+                crate::IonError::decoding_error(format!(
+                    "invalid UTF-8 in Ion text at byte offset {}: {e}",
+                    self.utf8_validated_end + e.valid_up_to()
+                ))
+            })?;
+            self.utf8_validated_end = scan_end;
+        }
+
         // Parse the complete value and emit bytecode
         let is_system_value = self.emit_top_level_value(scan_end, destination, constant_pool)?;
 
@@ -2182,11 +2202,16 @@ impl<R: Read> BytecodeGenerator for StreamingTextIon10Generator<R> {
         if end > self.filled {
             return IonResult::decoding_error("text reference out of bounds");
         }
-        std::str::from_utf8(&self.buffer[start..end]).map_err(|e| {
-            crate::IonError::decoding_error(format!(
-                "invalid UTF-8 in string ref at offset {position}: {e}"
-            ))
-        })
+        debug_assert!(
+            end <= self.utf8_validated_end,
+            "read_text_ref called on unvalidated region: end={end}, validated={v}",
+            v = self.utf8_validated_end
+        );
+        // SAFETY: The buffer region [0..utf8_validated_end] was validated as
+        // UTF-8 during the refill() that produced the REF instruction pointing
+        // here. The buffer is immutable between refill() calls, so the
+        // validation remains valid.
+        Ok(unsafe { std::str::from_utf8_unchecked(&self.buffer[start..end]) })
     }
 
     fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]> {
