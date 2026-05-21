@@ -784,14 +784,9 @@ impl<'a> StrTextIon10Generator<'a> {
         if has_dash_after_4digits || has_t {
             let ts_end = self.scan_timestamp_end(start);
             self.position = ts_end;
-            let ts_text = if is_negative {
-                let mut s = String::from("-");
-                s.push_str(&self.source[start..ts_end]);
-                s
-            } else {
-                self.source[start..ts_end].to_string()
-            };
-            let ts = parse_timestamp_direct(ts_text.as_bytes())?;
+            // Parse directly from source bytes without allocation
+            let ts_bytes = self.source[start..ts_end].as_bytes();
+            let ts = parse_timestamp_direct(ts_bytes)?;
             let idx = constant_pool.add(Constant::Timestamp(Arc::new(ts)));
             destination.push(instr::TIMESTAMP_CP | idx);
             return Ok(());
@@ -801,35 +796,62 @@ impl<'a> StrTextIon10Generator<'a> {
 
         if has_exp {
             // Float
-            let text = self.collect_number_text(start, i, is_negative);
-            let value: f64 = text
-                .parse()
-                .map_err(|e| crate::IonError::decoding_error(format!("invalid float: {e}")))?;
-            let bits = value.to_bits();
-            destination.push(instr::FLOAT_F64);
-            destination.push((bits >> 32) as u32);
-            destination.push(bits as u32);
+            let slice = &self.source[start..i];
+            if !slice.contains('_') {
+                // Fast path: parse directly without allocation
+                let value: f64 = if is_negative {
+                    // Negative floats: the sign was already consumed, so we
+                    // need to negate the parsed positive value.
+                    let positive: f64 = slice.parse().map_err(|e| {
+                        crate::IonError::decoding_error(format!("invalid float: {e}"))
+                    })?;
+                    -positive
+                } else {
+                    slice.parse().map_err(|e| {
+                        crate::IonError::decoding_error(format!("invalid float: {e}"))
+                    })?
+                };
+                let bits = value.to_bits();
+                destination.push(instr::FLOAT_F64);
+                destination.push((bits >> 32) as u32);
+                destination.push(bits as u32);
+            } else {
+                let text = self.collect_number_text(start, i, is_negative);
+                let value: f64 = text
+                    .parse()
+                    .map_err(|e| crate::IonError::decoding_error(format!("invalid float: {e}")))?;
+                let bits = value.to_bits();
+                destination.push(instr::FLOAT_F64);
+                destination.push((bits >> 32) as u32);
+                destination.push(bits as u32);
+            }
         } else if has_dot || has_d_exp {
             // Decimal
-            let text = self.collect_number_text(start, i, is_negative);
-            let dec = parse_text_decimal(&text)?;
-            let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
-            destination.push(instr::DECIMAL_CP | idx);
+            let slice = &self.source[start..i];
+            if !slice.contains('_') {
+                // Fast path: parse directly without allocation
+                let dec = if is_negative {
+                    let mut buf = String::with_capacity(slice.len() + 1);
+                    buf.push('-');
+                    buf.push_str(slice);
+                    parse_text_decimal(&buf)?
+                } else {
+                    parse_text_decimal(slice)?
+                };
+                let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
+                destination.push(instr::DECIMAL_CP | idx);
+            } else {
+                let text = self.collect_number_text(start, i, is_negative);
+                let dec = parse_text_decimal(&text)?;
+                let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
+                destination.push(instr::DECIMAL_CP | idx);
+            }
         } else {
             // Integer — try direct parse fast path
             let slice = &self.source[start..i];
             if !slice.contains('_') {
-                // Fast path: no underscores, parse directly
-                let to_parse = if is_negative {
-                    // Build negative string
-                    let mut s = String::with_capacity(slice.len() + 1);
-                    s.push('-');
-                    s.push_str(slice);
-                    s
-                } else {
-                    slice.to_string()
-                };
-                self.emit_parsed_int(&to_parse, destination, constant_pool)?;
+                // Fast path: no underscores, parse directly without allocation
+                self.emit_int_from_slice(slice, is_negative, destination, constant_pool)?;
             } else {
                 let text = self.collect_number_text(start, i, is_negative);
                 self.emit_parsed_int(&text, destination, constant_pool)?;
@@ -927,6 +949,32 @@ impl<'a> StrTextIon10Generator<'a> {
         };
         emit_i128_int(value, destination, constant_pool);
         Ok(())
+    }
+
+    /// Emits an integer from a `&str` slice (no underscores) and a sign flag,
+    /// avoiding String allocation by parsing directly.
+    fn emit_int_from_slice(
+        &self,
+        slice: &str,
+        is_negative: bool,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        // Try to parse as i64 using manual accumulation to avoid allocation
+        if let Some(v) = parse_i64_no_alloc(slice, is_negative) {
+            emit_i64_int(v, destination);
+            return Ok(());
+        }
+        // Fallback: need to build a string for i128/BigInt parsing
+        let text = if is_negative {
+            let mut s = String::with_capacity(slice.len() + 1);
+            s.push('-');
+            s.push_str(slice);
+            s
+        } else {
+            slice.to_string()
+        };
+        self.emit_parsed_int(&text, destination, constant_pool)
     }
 
     fn emit_parsed_int(
@@ -1041,10 +1089,8 @@ impl<'a> StrTextIon10Generator<'a> {
                 continue;
             }
 
-            // Parse field name
-            let field_name = self.parse_field_name()?;
-            let idx = constant_pool.add(Constant::String(field_name));
-            destination.push(instr::FIELD_NAME_CP | idx);
+            // Parse and emit field name instruction
+            self.emit_field_name(destination, constant_pool)?;
 
             // Skip colon
             if !self.skip_whitespace_and_comments() {
@@ -1065,6 +1111,111 @@ impl<'a> StrTextIon10Generator<'a> {
         Ok(())
     }
 
+    /// Parses a field name and emits a `FIELD_NAME_REF` (for unescaped names)
+    /// or `FIELD_NAME_CP` (for names with escape sequences) instruction.
+    fn emit_field_name(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        let bytes = self.source.as_bytes();
+        if !self.skip_whitespace_and_comments() {
+            return IonResult::decoding_error("expected field name");
+        }
+        let b = bytes[self.position];
+        if b == b'\'' {
+            // Quoted symbol
+            self.position += 1;
+            let start = self.position;
+            let search_slice = &bytes[start..];
+            match memchr2(b'\'', b'\\', search_slice) {
+                Some(offset) => {
+                    if search_slice[offset] == b'\'' {
+                        // No escapes — emit FIELD_NAME_REF
+                        let content_end = start + offset;
+                        self.position = content_end + 1;
+                        let length = (content_end - start) as u32;
+                        debug_assert!(length <= 0x003F_FFFF);
+                        destination.push(instr::FIELD_NAME_REF | length);
+                        destination.push(start as u32);
+                    } else {
+                        // Has escapes — decode and emit FIELD_NAME_CP
+                        let mut i = start;
+                        while i < bytes.len() && bytes[i] != b'\'' {
+                            if bytes[i] == b'\\' {
+                                i += 2;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        let content_end = i;
+                        self.position = i + 1;
+                        let decoded = decode_escape_sequences(&bytes[start..content_end])?;
+                        let arc = Arc::from(decoded.as_str());
+                        let idx = constant_pool.add(Constant::String(arc));
+                        destination.push(instr::FIELD_NAME_CP | idx);
+                    }
+                }
+                None => return IonResult::decoding_error("unterminated quoted field name"),
+            }
+        } else if b == b'"' {
+            // Double-quoted field name
+            self.position += 1;
+            let start = self.position;
+            let search_slice = &bytes[start..];
+            match memchr2(b'"', b'\\', search_slice) {
+                Some(offset) => {
+                    if search_slice[offset] == b'"' {
+                        // No escapes — emit FIELD_NAME_REF
+                        let content_end = start + offset;
+                        self.position = content_end + 1;
+                        let length = (content_end - start) as u32;
+                        debug_assert!(length <= 0x003F_FFFF);
+                        destination.push(instr::FIELD_NAME_REF | length);
+                        destination.push(start as u32);
+                    } else {
+                        // Has escapes — decode and emit FIELD_NAME_CP
+                        let mut i = start;
+                        while i < bytes.len() && bytes[i] != b'"' {
+                            if bytes[i] == b'\\' {
+                                i += 2;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        let content_end = i;
+                        self.position = i + 1;
+                        let decoded = decode_escape_sequences(&bytes[start..content_end])?;
+                        let arc = Arc::from(decoded.as_str());
+                        let idx = constant_pool.add(Constant::String(arc));
+                        destination.push(instr::FIELD_NAME_CP | idx);
+                    }
+                }
+                None => return IonResult::decoding_error("unterminated double-quoted field name"),
+            }
+        } else if is_identifier_start(b) {
+            // Unquoted identifier — always unescaped, emit FIELD_NAME_REF
+            let start = self.position;
+            self.position += 1;
+            while self.position < bytes.len() && is_identifier_continue(bytes[self.position]) {
+                self.position += 1;
+            }
+            let length = (self.position - start) as u32;
+            debug_assert!(length <= 0x003F_FFFF);
+            destination.push(instr::FIELD_NAME_REF | length);
+            destination.push(start as u32);
+        } else {
+            return IonResult::decoding_error(format!(
+                "unexpected character in field name position: '{}'",
+                b as char
+            ));
+        }
+        Ok(())
+    }
+
+    /// Parses a field name and returns it as an `Arc<str>`.
+    /// Used only for system-level processing (e.g., LST parsing) where the
+    /// field name text is needed for comparison.
     fn parse_field_name(&mut self) -> IonResult<Arc<str>> {
         let bytes = self.source.as_bytes();
         if !self.skip_whitespace_and_comments() {
@@ -1577,6 +1728,26 @@ fn emit_i128_int(v: i128, destination: &mut Vec<u32>, constant_pool: &mut Consta
         let idx = constant_pool.add(Constant::BigInt(Arc::new(int_value)));
         destination.push(instr::INT_CP | idx);
     }
+}
+
+/// Parses an integer from a digit-only `&str` slice (no underscores) with an
+/// external sign flag. Returns `None` if the value overflows i64.
+fn parse_i64_no_alloc(slice: &str, is_negative: bool) -> Option<i64> {
+    // Avoid allocation by accumulating digits manually.
+    let mut result: i64 = 0;
+    for &b in slice.as_bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?;
+        let digit = (b - b'0') as i64;
+        if is_negative {
+            result = result.checked_sub(digit)?;
+        } else {
+            result = result.checked_add(digit)?;
+        }
+    }
+    Some(result)
 }
 
 /// Parses an integer string that may have 0x prefix.

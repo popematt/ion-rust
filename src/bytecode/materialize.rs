@@ -98,6 +98,47 @@ pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
     }
 }
 
+/// Reads all top-level values from text Ion data using the streaming
+/// text generator. This simulates reading from an `io::Read` source.
+pub fn read_all_v3_streaming_text(data: &[u8]) -> IonResult<Sequence> {
+    use crate::bytecode::text10::StreamingTextIon10Generator;
+    use std::io::Cursor;
+    let generator = StreamingTextIon10Generator::new(Cursor::new(data));
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// Reads all top-level values from binary Ion data using the v3 direct
+/// materializer. Forces the binary path regardless of content.
+pub fn read_all_v3_binary(data: &[u8]) -> IonResult<Sequence> {
+    let generator = BinaryIon10Generator::new(data);
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// Reads all top-level values from text Ion data using the in-memory
+/// `&str` generator. Forces the str-text path regardless of content.
+pub fn read_all_v3_str_text(data: &[u8]) -> IonResult<Sequence> {
+    let source = std::str::from_utf8(data)
+        .map_err(|_| crate::IonError::decoding_error("invalid UTF-8 in text Ion input"))?;
+    use crate::bytecode::str_text10::StrTextIon10Generator;
+    let generator = StrTextIon10Generator::new(source);
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
 /// An iterator that walks bytecode linearly, producing materialized
 /// `Element` values without the overhead of the `BytecodeReader` state
 /// machine.

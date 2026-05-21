@@ -10,6 +10,8 @@
 use std::io::Read;
 use std::sync::Arc;
 
+use memchr::memchr2;
+
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::instr;
@@ -247,7 +249,8 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         }
     }
 
-    /// Scans a short string ("...") from start.
+    /// Scans a short string ("...") from start, using memchr2 to quickly
+    /// find the closing quote or the next escape sequence.
     fn scan_short_string(&mut self, start: usize) -> IonResult<usize> {
         let mut i = start + 1; // skip opening "
         loop {
@@ -260,10 +263,15 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             if i >= self.filled {
                 return IonResult::decoding_error("unterminated string");
             }
-            match self.buffer[i] {
-                b'"' => return Ok(i + 1),
-                b'\\' => {
-                    i += 1; // skip the backslash
+            // Use memchr2 to skip directly to the next " or \ in the buffer
+            match memchr2(b'"', b'\\', &self.buffer[i..self.filled]) {
+                Some(offset) => {
+                    let found = i + offset;
+                    if self.buffer[found] == b'"' {
+                        return Ok(found + 1);
+                    }
+                    // Escape: skip the backslash and the escaped char
+                    i = found + 1;
                     if i >= self.filled {
                         if self.eof {
                             return IonResult::decoding_error("unterminated string escape");
@@ -275,7 +283,14 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                     }
                     i += 1; // skip escaped char
                 }
-                _ => i += 1,
+                None => {
+                    // Neither " nor \ found in the remaining buffer
+                    i = self.filled;
+                    if self.eof {
+                        return IonResult::decoding_error("unterminated string");
+                    }
+                    self.read_more()?;
+                }
             }
         }
     }
@@ -418,7 +433,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                     }
                 }
                 b'"' => {
-                    // Skip over string contents
+                    // Skip over string contents using memchr2
                     i += 1;
                     loop {
                         if i >= self.filled {
@@ -432,13 +447,26 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                         if i >= self.filled {
                             return IonResult::decoding_error("unterminated string in container");
                         }
-                        match self.buffer[i] {
-                            b'"' => {
-                                i += 1;
-                                break;
+                        match memchr2(b'"', b'\\', &self.buffer[i..self.filled]) {
+                            Some(offset) => {
+                                let found = i + offset;
+                                if self.buffer[found] == b'"' {
+                                    i = found + 1;
+                                    break;
+                                }
+                                // Escape: skip backslash + escaped char
+                                i = found + 2;
                             }
-                            b'\\' => i += 2,
-                            _ => i += 1,
+                            None => {
+                                // Neither found in buffer — need more data
+                                i = self.filled;
+                                if self.eof {
+                                    return IonResult::decoding_error(
+                                        "unterminated string in container",
+                                    );
+                                }
+                                self.read_more()?;
+                            }
                         }
                     }
                 }
@@ -1115,14 +1143,25 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         let start = self.position + 1;
         let mut i = start;
         let mut has_escapes = false;
-        while i < end {
-            match self.buffer[i] {
-                b'"' => break,
-                b'\\' => {
+        // Use memchr2 to quickly find closing " or first escape \
+        loop {
+            let search_end = end.min(self.filled);
+            match memchr2(b'"', b'\\', &self.buffer[i..search_end]) {
+                Some(offset) => {
+                    let found = i + offset;
+                    if self.buffer[found] == b'"' {
+                        i = found;
+                        break;
+                    }
+                    // Escape sequence found
                     has_escapes = true;
-                    i += 2;
+                    i = found + 2; // skip backslash + escaped char
                 }
-                _ => i += 1,
+                None => {
+                    // No delimiter found in remaining region
+                    i = search_end;
+                    break;
+                }
             }
         }
         let content_end = i;
@@ -1390,18 +1429,11 @@ impl<R: Read> StreamingTextIon10Generator<R> {
 
         // Determine if this is a timestamp
         if has_dash_after_4digits || has_t {
-            // Parse as timestamp
+            // Parse as timestamp directly from buffer bytes without allocation
             let ts_end = self.scan_timestamp_end(start, end);
-            let ts_text = &self.buffer[start..ts_end];
-            let text_with_sign = if is_negative {
-                let mut s = String::from("-");
-                s.push_str(std::str::from_utf8(ts_text).unwrap_or(""));
-                s
-            } else {
-                String::from(std::str::from_utf8(ts_text).unwrap_or(""))
-            };
+            let ts_bytes = &self.buffer[start..ts_end];
             self.position = ts_end;
-            let ts = Timestamp::parse(text_with_sign.as_bytes())?;
+            let ts = parse_timestamp_direct(ts_bytes)?;
             let idx = constant_pool.add(Constant::Timestamp(Arc::new(ts)));
             destination.push(instr::TIMESTAMP_CP | idx);
             return Ok(());
@@ -1411,24 +1443,70 @@ impl<R: Read> StreamingTextIon10Generator<R> {
 
         if has_exp {
             // Float
-            let text = self.collect_number_text(start, i, is_negative);
-            let value: f64 = text
-                .parse()
-                .map_err(|e| crate::IonError::decoding_error(format!("invalid float: {e}")))?;
-            let bits = value.to_bits();
-            destination.push(instr::FLOAT_F64);
-            destination.push((bits >> 32) as u32);
-            destination.push(bits as u32);
+            let raw = &self.buffer[start..i];
+            if !raw.contains(&b'_') {
+                // Fast path: parse directly from buffer without allocation
+                let slice = std::str::from_utf8(raw).map_err(|e| {
+                    crate::IonError::decoding_error(format!("invalid UTF-8 in float: {e}"))
+                })?;
+                let value: f64 = if is_negative {
+                    let positive: f64 = slice.parse().map_err(|e| {
+                        crate::IonError::decoding_error(format!("invalid float: {e}"))
+                    })?;
+                    -positive
+                } else {
+                    slice.parse().map_err(|e| {
+                        crate::IonError::decoding_error(format!("invalid float: {e}"))
+                    })?
+                };
+                let bits = value.to_bits();
+                destination.push(instr::FLOAT_F64);
+                destination.push((bits >> 32) as u32);
+                destination.push(bits as u32);
+            } else {
+                let text = self.collect_number_text(start, i, is_negative);
+                let value: f64 = text
+                    .parse()
+                    .map_err(|e| crate::IonError::decoding_error(format!("invalid float: {e}")))?;
+                let bits = value.to_bits();
+                destination.push(instr::FLOAT_F64);
+                destination.push((bits >> 32) as u32);
+                destination.push(bits as u32);
+            }
         } else if has_dot || has_d_exp {
             // Decimal
-            let text = self.collect_number_text(start, i, is_negative);
-            let dec = parse_text_decimal(&text)?;
-            let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
-            destination.push(instr::DECIMAL_CP | idx);
+            let raw = &self.buffer[start..i];
+            if !raw.contains(&b'_') {
+                // Fast path: parse directly without allocation
+                let slice = std::str::from_utf8(raw).map_err(|e| {
+                    crate::IonError::decoding_error(format!("invalid UTF-8 in decimal: {e}"))
+                })?;
+                let dec = if is_negative {
+                    let mut buf = String::with_capacity(slice.len() + 1);
+                    buf.push('-');
+                    buf.push_str(slice);
+                    parse_text_decimal(&buf)?
+                } else {
+                    parse_text_decimal(slice)?
+                };
+                let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
+                destination.push(instr::DECIMAL_CP | idx);
+            } else {
+                let text = self.collect_number_text(start, i, is_negative);
+                let dec = parse_text_decimal(&text)?;
+                let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
+                destination.push(instr::DECIMAL_CP | idx);
+            }
         } else {
             // Integer
-            let text = self.collect_number_text(start, i, is_negative);
-            self.emit_parsed_int(&text, destination, constant_pool)?;
+            let raw = &self.buffer[start..i];
+            if !raw.contains(&b'_') {
+                // Fast path: parse directly without allocation
+                self.emit_int_from_bytes(raw, is_negative, destination, constant_pool)?;
+            } else {
+                let text = self.collect_number_text(start, i, is_negative);
+                self.emit_parsed_int(&text, destination, constant_pool)?;
+            }
         }
         Ok(())
     }
@@ -1550,6 +1628,37 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         };
         emit_i128_int(value, destination, constant_pool);
         Ok(())
+    }
+
+    /// Emits an integer from raw buffer bytes (no underscores) with an external
+    /// sign flag, avoiding String allocation.
+    fn emit_int_from_bytes(
+        &self,
+        raw: &[u8],
+        is_negative: bool,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        // Try to parse as i64 using manual accumulation to avoid allocation
+        if let Some(v) = parse_i64_from_bytes(raw, is_negative) {
+            emit_i64_int(v, destination);
+            return Ok(());
+        }
+        // Fallback: need to build a string for i128/BigInt parsing
+        let text = if is_negative {
+            let mut s = String::with_capacity(raw.len() + 1);
+            s.push('-');
+            for &b in raw {
+                s.push(b as char);
+            }
+            s
+        } else {
+            let s = std::str::from_utf8(raw).map_err(|e| {
+                crate::IonError::decoding_error(format!("invalid UTF-8 in integer: {e}"))
+            })?;
+            s.to_string()
+        };
+        self.emit_parsed_int(&text, destination, constant_pool)
     }
 
     /// Emits an integer from parsed text (decimal, hex with 0x prefix).
@@ -2144,41 +2253,62 @@ impl<R: Read> BytecodeGenerator for StreamingTextIon10Generator<R> {
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
-        // Compact previously consumed data
+        // Compact previously consumed data once at the start of refill.
+        // This avoids redundant memmoves when the loop below processes
+        // multiple values from the already-buffered data.
         self.compact();
 
-        // Skip leading whitespace/comments (may require reads)
-        let has_data = self.skip_whitespace_and_comments()?;
-        if !has_data {
-            destination.push(instr::END_OF_INPUT);
-            return Ok(());
+        // Loop: emit multiple top-level values while we have complete ones
+        // buffered. Stop at a system value boundary (IVM/LST), EOF, or when
+        // the buffer is exhausted and we need more data from the reader.
+        loop {
+            // Skip leading whitespace/comments (may require reads)
+            let has_data = self.skip_whitespace_and_comments()?;
+            if !has_data {
+                destination.push(instr::END_OF_INPUT);
+                return Ok(());
+            }
+
+            // Scan for a complete top-level value
+            let scan_end = self.scan_complete_value()?;
+
+            // Validate UTF-8 for the scanned region. This allows read_text_ref
+            // to skip re-validation later since the buffer is immutable between
+            // refill calls.
+            if scan_end > self.utf8_validated_end {
+                std::str::from_utf8(&self.buffer[self.utf8_validated_end..scan_end]).map_err(
+                    |e| {
+                        crate::IonError::decoding_error(format!(
+                            "invalid UTF-8 in Ion text at byte offset {}: {e}",
+                            self.utf8_validated_end + e.valid_up_to()
+                        ))
+                    },
+                )?;
+                self.utf8_validated_end = scan_end;
+            }
+
+            // Parse the complete value and emit bytecode
+            let is_system_value =
+                self.emit_top_level_value(scan_end, destination, constant_pool)?;
+
+            // Mark consumed so the next refill() call compacts past this data
+            self.consumed = self.position;
+
+            // System value boundary (IVM/LST) — stop so the reader can
+            // process the directive before seeing more values.
+            if is_system_value {
+                destination.push(instr::REFILL);
+                return Ok(());
+            }
+
+            // Check if we have more data immediately available without
+            // blocking on a read. If the buffer is exhausted, stop and
+            // let the caller process what we have so far.
+            if self.position >= self.filled && !self.eof {
+                destination.push(instr::REFILL);
+                return Ok(());
+            }
         }
-
-        // Scan for a complete top-level value
-        let scan_end = self.scan_complete_value()?;
-
-        // Validate UTF-8 for the scanned region. This allows read_text_ref
-        // to skip re-validation later since the buffer is immutable between
-        // refill calls.
-        if scan_end > self.utf8_validated_end {
-            std::str::from_utf8(&self.buffer[self.utf8_validated_end..scan_end]).map_err(|e| {
-                crate::IonError::decoding_error(format!(
-                    "invalid UTF-8 in Ion text at byte offset {}: {e}",
-                    self.utf8_validated_end + e.valid_up_to()
-                ))
-            })?;
-            self.utf8_validated_end = scan_end;
-        }
-
-        // Parse the complete value and emit bytecode
-        let is_system_value = self.emit_top_level_value(scan_end, destination, constant_pool)?;
-
-        // Mark consumed
-        self.consumed = self.position;
-
-        let _ = is_system_value;
-        destination.push(instr::REFILL);
-        Ok(())
     }
 
     fn read_int_ref(&self, _position: u32, _length: u32) -> IonResult<Int> {
@@ -2269,6 +2399,25 @@ fn emit_i128_int(v: i128, destination: &mut Vec<u32>, constant_pool: &mut Consta
         let idx = constant_pool.add(Constant::BigInt(Arc::new(int_value)));
         destination.push(instr::INT_CP | idx);
     }
+}
+
+/// Parses an integer from raw bytes (digit-only, no underscores) with an
+/// external sign flag. Returns `None` if the value overflows i64.
+fn parse_i64_from_bytes(raw: &[u8], is_negative: bool) -> Option<i64> {
+    let mut result: i64 = 0;
+    for &b in raw {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?;
+        let digit = (b - b'0') as i64;
+        if is_negative {
+            result = result.checked_sub(digit)?;
+        } else {
+            result = result.checked_add(digit)?;
+        }
+    }
+    Some(result)
 }
 
 /// Parses an integer string that may have 0x prefix.
