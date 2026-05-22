@@ -10,18 +10,7 @@ use std::fs;
 
 /// Files that are known to fail (e.g., use features not yet supported).
 /// Add entries here as needed with a comment explaining why.
-const SKIP_LIST: &[&str] = &[
-    // LST-append (imports: $ion_symbol_table) not yet supported
-    "ion-tests/iontestdata/good/localSymbolTableAppend.10n",
-    "ion-tests/iontestdata/good/testfile37.10n",
-    // Shared symbol table imports not supported
-    "ion-tests/iontestdata/good/subfieldInt.10n",
-    "ion-tests/iontestdata/good/subfieldVarInt.10n",
-    "ion-tests/iontestdata/good/subfieldVarUInt.10n",
-    "ion-tests/iontestdata/good/subfieldVarUInt32bit.10n",
-    "ion-tests/iontestdata/good/subfieldVarUInt15bit.10n",
-    "ion-tests/iontestdata/good/subfieldVarUInt16bit.10n",
-];
+const SKIP_LIST: &[&str] = &[];
 
 fn should_skip(file_name: &str) -> bool {
     SKIP_LIST
