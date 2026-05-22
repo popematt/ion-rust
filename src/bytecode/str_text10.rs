@@ -20,7 +20,7 @@ use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::instr;
 use crate::result::IonFailure;
-use crate::{Decimal, Int, IonResult, Timestamp};
+use crate::{Decimal, Int, IonResult, Timestamp, UInt};
 
 /// Ion 1.0 system symbol table (SIDs 1-9).
 const SYSTEM_SYMBOLS: [&str; 9] = [
@@ -34,6 +34,15 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
     "max_id",
     "$ion_shared_symbol_table",
 ];
+
+/// Result of parsing a symbol-like token (identifier or quoted symbol)
+/// that may be a SID reference (`$N`) or a text symbol.
+enum SymbolToken {
+    /// A text symbol (regular identifier or quoted symbol).
+    Text(Arc<str>),
+    /// A SID reference (`$N` where N is all digits).
+    Sid(u32),
+}
 
 /// A bytecode generator optimized for in-memory UTF-8 Ion 1.0 text.
 ///
@@ -61,6 +70,20 @@ impl<'a> StrTextIon10Generator<'a> {
         }
     }
 
+    /// Skips only whitespace characters (no comments). Returns true if there
+    /// are remaining bytes, false if EOF. Used inside lob literals where
+    /// `//` is valid base64 rather than a comment delimiter.
+    fn skip_whitespace_only(&mut self) -> bool {
+        let bytes = self.source.as_bytes();
+        while self.position < bytes.len() {
+            match bytes[self.position] {
+                b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C' => self.position += 1,
+                _ => return true,
+            }
+        }
+        false
+    }
+
     /// Skips whitespace and comments. Returns true if there is more
     /// content to parse.
     fn skip_whitespace_and_comments(&mut self) -> bool {
@@ -70,7 +93,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 return false;
             }
             match bytes[self.position] {
-                b' ' | b'\t' | b'\r' | b'\n' => {
+                b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C' => {
                     self.position += 1;
                 }
                 b'/' => {
@@ -79,11 +102,20 @@ impl<'a> StrTextIon10Generator<'a> {
                     }
                     match bytes[self.position + 1] {
                         b'/' => {
-                            // Line comment: use memchr to find end of line
+                            // Line comment: use memchr2 to find \r or \n
                             self.position += 2;
                             let remaining = &bytes[self.position..];
-                            match memchr(b'\n', remaining) {
-                                Some(offset) => self.position += offset + 1,
+                            match memchr2(b'\r', b'\n', remaining) {
+                                Some(offset) => {
+                                    self.position += offset + 1;
+                                    // If we stopped at \r and next is \n, consume it too
+                                    if remaining[offset] == b'\r'
+                                        && self.position < bytes.len()
+                                        && bytes[self.position] == b'\n'
+                                    {
+                                        self.position += 1;
+                                    }
+                                }
                                 None => self.position = bytes.len(),
                             }
                         }
@@ -141,13 +173,13 @@ impl<'a> StrTextIon10Generator<'a> {
         let bytes = self.source.as_bytes();
 
         // Collect annotations
-        let mut annotations: Vec<Arc<str>> = Vec::new();
+        let mut annotations: Vec<SymbolToken> = Vec::new();
         loop {
             if !self.skip_whitespace_and_comments() {
                 return IonResult::decoding_error("expected value after annotations");
             }
-            if let Some((text, after_colons)) = self.try_parse_annotation()? {
-                annotations.push(text);
+            if let Some((token, after_colons)) = self.try_parse_annotation()? {
+                annotations.push(token);
                 self.position = after_colons;
             } else {
                 break;
@@ -173,7 +205,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
         // Check for LST: `$ion_symbol_table::{ ... }`
         if annotations.len() == 1
-            && annotations[0].as_ref() == "$ion_symbol_table"
+            && matches!(&annotations[0], SymbolToken::Text(t) if t.as_ref() == "$ion_symbol_table")
             && self.position < bytes.len()
             && bytes[self.position] == b'{'
         {
@@ -183,8 +215,15 @@ impl<'a> StrTextIon10Generator<'a> {
 
         // Emit annotations
         for ann in &annotations {
-            let idx = constant_pool.add(Constant::String(Arc::clone(ann)));
-            destination.push(instr::ANNOTATION_CP | idx);
+            match ann {
+                SymbolToken::Text(text) => {
+                    let idx = constant_pool.add(Constant::String(Arc::clone(text)));
+                    destination.push(instr::ANNOTATION_CP | idx);
+                }
+                SymbolToken::Sid(sid) => {
+                    destination.push(instr::ANNOTATION_SID | sid);
+                }
+            }
         }
 
         // Parse the value
@@ -192,8 +231,8 @@ impl<'a> StrTextIon10Generator<'a> {
     }
 
     /// Tries to parse an annotation at the current position.
-    /// Returns `Some((text, position_after_colons))` if found.
-    fn try_parse_annotation(&self) -> IonResult<Option<(Arc<str>, usize)>> {
+    /// Returns `Some((token, position_after_colons))` if found.
+    fn try_parse_annotation(&self) -> IonResult<Option<(SymbolToken, usize)>> {
         let bytes = self.source.as_bytes();
         let start = self.position;
         if start >= bytes.len() {
@@ -201,7 +240,7 @@ impl<'a> StrTextIon10Generator<'a> {
         }
         let b = bytes[start];
 
-        let (text, token_end) = if b == b'\'' {
+        let (token, token_end) = if b == b'\'' {
             // Quoted symbol — but NOT long string (''')
             if start + 2 < bytes.len() && bytes[start + 1] == b'\'' && bytes[start + 2] == b'\'' {
                 return Ok(None); // Long string, not annotation
@@ -227,38 +266,57 @@ impl<'a> StrTextIon10Generator<'a> {
             } else {
                 Arc::from(&self.source[start + 1..text_end])
             };
-            (text, i)
+            (SymbolToken::Text(text), i)
         } else if is_identifier_start(b) {
             let mut i = start + 1;
             while i < bytes.len() && is_identifier_continue(bytes[i]) {
                 i += 1;
             }
-            let text = Arc::from(&self.source[start..i]);
-            (text, i)
+            let text = &self.source[start..i];
+            let token = if let Some(sid) = try_parse_sid_from_text(text) {
+                SymbolToken::Sid(sid)
+            } else {
+                SymbolToken::Text(Arc::from(text))
+            };
+            (token, i)
         } else {
             return Ok(None);
         };
 
         // Check for :: after the token (with possible whitespace)
         let mut i = token_end;
-        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
+        while i < bytes.len()
+            && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C')
+        {
             i += 1;
         }
         if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':' {
             let mut after = i + 2;
             // Skip whitespace and comments after ::
-            while after < bytes.len() && matches!(bytes[after], b' ' | b'\t' | b'\r' | b'\n') {
+            while after < bytes.len()
+                && matches!(
+                    bytes[after],
+                    b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C'
+                )
+            {
                 after += 1;
             }
             // Also skip comments after ::
             while after < bytes.len() && bytes[after] == b'/' {
                 if after + 1 < bytes.len() && bytes[after + 1] == b'/' {
                     after += 2;
-                    while after < bytes.len() && bytes[after] != b'\n' {
+                    while after < bytes.len() && bytes[after] != b'\n' && bytes[after] != b'\r' {
                         after += 1;
                     }
                     if after < bytes.len() {
-                        after += 1;
+                        if bytes[after] == b'\r' {
+                            after += 1;
+                            if after < bytes.len() && bytes[after] == b'\n' {
+                                after += 1;
+                            }
+                        } else {
+                            after += 1;
+                        }
                     }
                 } else if after + 1 < bytes.len() && bytes[after + 1] == b'*' {
                     after += 2;
@@ -272,11 +330,16 @@ impl<'a> StrTextIon10Generator<'a> {
                 } else {
                     break;
                 }
-                while after < bytes.len() && matches!(bytes[after], b' ' | b'\t' | b'\r' | b'\n') {
+                while after < bytes.len()
+                    && matches!(
+                        bytes[after],
+                        b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C'
+                    )
+                {
                     after += 1;
                 }
             }
-            Ok(Some((text, after)))
+            Ok(Some((token, after)))
         } else {
             Ok(None)
         }
@@ -323,9 +386,16 @@ impl<'a> StrTextIon10Generator<'a> {
             if !self.skip_whitespace_and_comments() {
                 return IonResult::decoding_error("expected value");
             }
-            if let Some((text, after)) = self.try_parse_annotation()? {
-                let idx = constant_pool.add(Constant::String(text));
-                destination.push(instr::ANNOTATION_CP | idx);
+            if let Some((token, after)) = self.try_parse_annotation()? {
+                match token {
+                    SymbolToken::Text(text) => {
+                        let idx = constant_pool.add(Constant::String(text));
+                        destination.push(instr::ANNOTATION_CP | idx);
+                    }
+                    SymbolToken::Sid(sid) => {
+                        destination.push(instr::ANNOTATION_SID | sid);
+                    }
+                }
                 self.position = after;
             } else {
                 break;
@@ -458,8 +528,12 @@ impl<'a> StrTextIon10Generator<'a> {
         }
         self.position = i;
         let text = &self.source[start..i];
-        let idx = constant_pool.add(Constant::String(Arc::from(text)));
-        destination.push(instr::SYMBOL_CP | idx);
+        if let Some(sid) = try_parse_sid_from_text(text) {
+            destination.push(instr::SYMBOL_SID | sid);
+        } else {
+            let idx = constant_pool.add(Constant::String(Arc::from(text)));
+            destination.push(instr::SYMBOL_CP | idx);
+        }
         Ok(())
     }
 
@@ -477,13 +551,19 @@ impl<'a> StrTextIon10Generator<'a> {
         match memchr2(b'"', b'\\', search_slice) {
             Some(offset) => {
                 if search_slice[offset] == b'"' {
-                    // No escapes — fast path: emit STRING_REF
+                    // No escapes — check for \r that needs normalization
                     let content_end = start + offset;
-                    self.position = content_end + 1; // skip closing "
-                    let length = offset as u32;
-                    destination.push(instr::STRING_REF | (length & 0x003F_FFFF));
-                    destination.push(start as u32);
-                    Ok(())
+                    if memchr(b'\r', &bytes[start..content_end]).is_some() {
+                        // Contains \r — must normalize through CP path
+                        self.parse_string_with_escapes(start, destination, constant_pool)
+                    } else {
+                        // No escapes, no \r — fast path: emit STRING_REF
+                        self.position = content_end + 1; // skip closing "
+                        let length = offset as u32;
+                        destination.push(instr::STRING_REF | (length & 0x003F_FFFF));
+                        destination.push(start as u32);
+                        Ok(())
+                    }
                 } else {
                     // Has escapes — decode to CP
                     self.parse_string_with_escapes(start, destination, constant_pool)
@@ -493,7 +573,8 @@ impl<'a> StrTextIon10Generator<'a> {
         }
     }
 
-    /// Handles a string that contains escape sequences.
+    /// Handles a string that contains escape sequences or CR characters
+    /// that need normalization.
     fn parse_string_with_escapes(
         &mut self,
         start: usize,
@@ -515,7 +596,7 @@ impl<'a> StrTextIon10Generator<'a> {
         let content_end = i;
         self.position = i + 1; // skip closing "
 
-        let decoded = decode_escape_sequences(&bytes[start..content_end])?;
+        let decoded = decode_string_content(&bytes[start..content_end])?;
         let idx = constant_pool.add(Constant::String(Arc::from(decoded.as_str())));
         destination.push(instr::STRING_CP | idx);
         Ok(())
@@ -606,8 +687,8 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position = i + 3; // skip closing '''
 
             let segment = &bytes[seg_start..seg_end];
-            if segment.contains(&b'\\') {
-                result.push_str(&decode_escape_sequences(segment)?);
+            if segment.contains(&b'\\') || segment.contains(&b'\r') {
+                result.push_str(&decode_string_content(segment)?);
             } else {
                 result.push_str(&self.source[seg_start..seg_end]);
             }
@@ -633,6 +714,63 @@ impl<'a> StrTextIon10Generator<'a> {
         let idx = constant_pool.add(Constant::String(Arc::from(result.as_str())));
         destination.push(instr::STRING_CP | idx);
         Ok(())
+    }
+
+    /// Parses a triple-quoted string (`'''...'''`) and returns its content.
+    /// Used for field names in triple-quoted form.
+    fn parse_long_string_content(&mut self) -> IonResult<String> {
+        let bytes = self.source.as_bytes();
+        let mut result = String::new();
+        loop {
+            // Expect ''' at self.position
+            if self.position + 2 >= bytes.len()
+                || bytes[self.position] != b'\''
+                || bytes[self.position + 1] != b'\''
+                || bytes[self.position + 2] != b'\''
+            {
+                break;
+            }
+            self.position += 3; // skip '''
+            let seg_start = self.position;
+            let mut i = seg_start;
+            while i + 2 < bytes.len() {
+                if bytes[i] == b'\'' && bytes[i + 1] == b'\'' && bytes[i + 2] == b'\'' {
+                    break;
+                }
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            let seg_end = i;
+            self.position = i + 3; // skip closing '''
+
+            let segment = &bytes[seg_start..seg_end];
+            if segment.contains(&b'\\') || segment.contains(&b'\r') {
+                result.push_str(&decode_string_content(segment)?);
+            } else {
+                result.push_str(&self.source[seg_start..seg_end]);
+            }
+
+            // Skip whitespace/comments between segments, check for another '''
+            let saved = self.position;
+            if !self.skip_whitespace_and_comments() {
+                break;
+            }
+            if self.position + 2 < bytes.len()
+                && bytes[self.position] == b'\''
+                && bytes[self.position + 1] == b'\''
+                && bytes[self.position + 2] == b'\''
+            {
+                // Another segment follows
+            } else {
+                self.position = saved;
+                self.skip_whitespace_and_comments();
+                break;
+            }
+        }
+        Ok(result)
     }
 
     // ─── Number Parsing ──────────────────────────────────────────────
@@ -991,7 +1129,11 @@ impl<'a> StrTextIon10Generator<'a> {
             emit_i128_int(v, destination, constant_pool);
             return Ok(());
         }
-        IonResult::decoding_error(format!("integer too large: {text}"))
+        // Arbitrary-precision fallback for integers exceeding i128
+        let big_int = parse_big_int(text)?;
+        let idx = constant_pool.add(Constant::BigInt(Arc::new(big_int)));
+        destination.push(instr::INT_CP | idx);
+        Ok(())
     }
 
     // ─── Container Parsing ───────────────────────────────────────────
@@ -1045,12 +1187,107 @@ impl<'a> StrTextIon10Generator<'a> {
                 self.position += 1;
                 break;
             }
-            self.emit_annotated_value(destination, constant_pool)?;
+            self.emit_sexp_annotated_value(destination, constant_pool)?;
         }
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
         destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+        Ok(())
+    }
+
+    /// Emits an annotated value within an s-expression context.
+    /// After handling annotations, tries normal value parsing first;
+    /// if the current byte is an operator character that doesn't start
+    /// a number, parses it as an operator symbol.
+    fn emit_sexp_annotated_value(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        // Handle annotations (same logic as emit_annotated_value)
+        loop {
+            if !self.skip_whitespace_and_comments() {
+                return IonResult::decoding_error("expected value");
+            }
+            if let Some((token, after)) = self.try_parse_annotation()? {
+                match token {
+                    SymbolToken::Text(text) => {
+                        let idx = constant_pool.add(Constant::String(text));
+                        destination.push(instr::ANNOTATION_CP | idx);
+                    }
+                    SymbolToken::Sid(sid) => {
+                        destination.push(instr::ANNOTATION_SID | sid);
+                    }
+                }
+                self.position = after;
+            } else {
+                break;
+            }
+        }
+        self.emit_sexp_value(destination, constant_pool)
+    }
+
+    /// Emits a value in s-expression context. Tries normal value parsing
+    /// first; falls back to operator symbol parsing for operator characters.
+    ///
+    /// Ion rules for sign characters in s-expressions:
+    /// - `-` followed by a digit -> negative number (e.g., `-3` is int -3)
+    /// - `-` followed by `i` -> `-inf` (negative infinity float)
+    /// - `+` followed by `i` -> `+inf` (positive infinity float)
+    /// - `+` followed by a digit -> operator `+` then int (e.g., `+1` is symbol `+`, int 1)
+    /// - Any sign not followed by digit/`i` -> operator symbol
+    fn emit_sexp_value(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        let bytes = self.source.as_bytes();
+        if self.position >= bytes.len() {
+            return IonResult::decoding_error("expected value but found end of input");
+        }
+
+        let b = bytes[self.position];
+
+        if is_operator_char(b) {
+            if b == b'-' {
+                let next_pos = self.position + 1;
+                if next_pos < bytes.len() {
+                    let next = bytes[next_pos];
+                    if next.is_ascii_digit() || next == b'i' {
+                        // `-3` is negative int, `-inf` is negative infinity
+                        return self.emit_value(destination, constant_pool);
+                    }
+                }
+            } else if b == b'+' {
+                let next_pos = self.position + 1;
+                if next_pos < bytes.len() && bytes[next_pos] == b'i' {
+                    // `+inf` is positive infinity
+                    return self.emit_value(destination, constant_pool);
+                }
+            }
+            // All other operator chars, or sign not followed by valid number start
+            return self.parse_operator_symbol(destination, constant_pool);
+        }
+
+        self.emit_value(destination, constant_pool)
+    }
+
+    /// Parses an operator symbol (one or more operator characters) and emits
+    /// a SYMBOL_CP instruction.
+    fn parse_operator_symbol(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        let bytes = self.source.as_bytes();
+        let start = self.position;
+        while self.position < bytes.len() && is_operator_char(bytes[self.position]) {
+            self.position += 1;
+        }
+        let text = &self.source[start..self.position];
+        let idx = constant_pool.add(Constant::String(Arc::from(text)));
+        destination.push(instr::SYMBOL_CP | idx);
         Ok(())
     }
 
@@ -1124,39 +1361,51 @@ impl<'a> StrTextIon10Generator<'a> {
         }
         let b = bytes[self.position];
         if b == b'\'' {
-            // Quoted symbol
-            self.position += 1;
-            let start = self.position;
-            let search_slice = &bytes[start..];
-            match memchr2(b'\'', b'\\', search_slice) {
-                Some(offset) => {
-                    if search_slice[offset] == b'\'' {
-                        // No escapes — emit FIELD_NAME_REF
-                        let content_end = start + offset;
-                        self.position = content_end + 1;
-                        let length = (content_end - start) as u32;
-                        debug_assert!(length <= 0x003F_FFFF);
-                        destination.push(instr::FIELD_NAME_REF | length);
-                        destination.push(start as u32);
-                    } else {
-                        // Has escapes — decode and emit FIELD_NAME_CP
-                        let mut i = start;
-                        while i < bytes.len() && bytes[i] != b'\'' {
-                            if bytes[i] == b'\\' {
-                                i += 2;
-                            } else {
-                                i += 1;
+            // Check for triple-quoted string ('''...''')
+            if self.position + 2 < bytes.len()
+                && bytes[self.position + 1] == b'\''
+                && bytes[self.position + 2] == b'\''
+            {
+                // Triple-quoted field name — parse like long string
+                let text = self.parse_long_string_content()?;
+                let arc = Arc::from(text.as_str());
+                let idx = constant_pool.add(Constant::String(arc));
+                destination.push(instr::FIELD_NAME_CP | idx);
+            } else {
+                // Quoted symbol
+                self.position += 1;
+                let start = self.position;
+                let search_slice = &bytes[start..];
+                match memchr2(b'\'', b'\\', search_slice) {
+                    Some(offset) => {
+                        if search_slice[offset] == b'\'' {
+                            // No escapes — emit FIELD_NAME_REF
+                            let content_end = start + offset;
+                            self.position = content_end + 1;
+                            let length = (content_end - start) as u32;
+                            debug_assert!(length <= 0x003F_FFFF);
+                            destination.push(instr::FIELD_NAME_REF | length);
+                            destination.push(start as u32);
+                        } else {
+                            // Has escapes — decode and emit FIELD_NAME_CP
+                            let mut i = start;
+                            while i < bytes.len() && bytes[i] != b'\'' {
+                                if bytes[i] == b'\\' {
+                                    i += 2;
+                                } else {
+                                    i += 1;
+                                }
                             }
+                            let content_end = i;
+                            self.position = i + 1;
+                            let decoded = decode_escape_sequences(&bytes[start..content_end])?;
+                            let arc = Arc::from(decoded.as_str());
+                            let idx = constant_pool.add(Constant::String(arc));
+                            destination.push(instr::FIELD_NAME_CP | idx);
                         }
-                        let content_end = i;
-                        self.position = i + 1;
-                        let decoded = decode_escape_sequences(&bytes[start..content_end])?;
-                        let arc = Arc::from(decoded.as_str());
-                        let idx = constant_pool.add(Constant::String(arc));
-                        destination.push(instr::FIELD_NAME_CP | idx);
                     }
+                    None => return IonResult::decoding_error("unterminated quoted field name"),
                 }
-                None => return IonResult::decoding_error("unterminated quoted field name"),
             }
         } else if b == b'"' {
             // Double-quoted field name
@@ -1194,16 +1443,21 @@ impl<'a> StrTextIon10Generator<'a> {
                 None => return IonResult::decoding_error("unterminated double-quoted field name"),
             }
         } else if is_identifier_start(b) {
-            // Unquoted identifier — always unescaped, emit FIELD_NAME_REF
+            // Unquoted identifier — check for SID reference
             let start = self.position;
             self.position += 1;
             while self.position < bytes.len() && is_identifier_continue(bytes[self.position]) {
                 self.position += 1;
             }
-            let length = (self.position - start) as u32;
-            debug_assert!(length <= 0x003F_FFFF);
-            destination.push(instr::FIELD_NAME_REF | length);
-            destination.push(start as u32);
+            let text = &self.source[start..self.position];
+            if let Some(sid) = try_parse_sid_from_text(text) {
+                destination.push(instr::FIELD_NAME_SID | sid);
+            } else {
+                let length = (self.position - start) as u32;
+                debug_assert!(length <= 0x003F_FFFF);
+                destination.push(instr::FIELD_NAME_REF | length);
+                destination.push(start as u32);
+            }
         } else {
             return IonResult::decoding_error(format!(
                 "unexpected character in field name position: '{}'",
@@ -1223,6 +1477,14 @@ impl<'a> StrTextIon10Generator<'a> {
         }
         let b = bytes[self.position];
         if b == b'\'' {
+            // Check for triple-quoted string ('''...''')
+            if self.position + 2 < bytes.len()
+                && bytes[self.position + 1] == b'\''
+                && bytes[self.position + 2] == b'\''
+            {
+                let text = self.parse_long_string_content()?;
+                return Ok(Arc::from(text.as_str()));
+            }
             // Quoted symbol
             self.position += 1;
             let start = self.position;
@@ -1302,12 +1564,13 @@ impl<'a> StrTextIon10Generator<'a> {
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
         self.position += 2; // skip {{
-        if !self.skip_whitespace_and_comments() {
+                            // Only skip whitespace inside lobs — `//` is valid base64, not a comment.
+        if !self.skip_whitespace_only() {
             return IonResult::decoding_error("unterminated lob");
         }
 
         if bytes[self.position] == b'"' {
-            // Clob
+            // Short clob (double-quoted)
             self.position += 1;
             let start = self.position;
             let mut has_escapes = false;
@@ -1323,8 +1586,8 @@ impl<'a> StrTextIon10Generator<'a> {
             if self.position < bytes.len() {
                 self.position += 1; // skip "
             }
-            // Skip to }}
-            if !self.skip_whitespace_and_comments() {
+            // Skip whitespace to }}
+            if !self.skip_whitespace_only() {
                 return IonResult::decoding_error("unterminated clob");
             }
             if self.position + 1 < bytes.len()
@@ -1343,6 +1606,69 @@ impl<'a> StrTextIon10Generator<'a> {
                 let idx = constant_pool.add(Constant::Bytes(Arc::from(data)));
                 destination.push(instr::CLOB_CP | idx);
             }
+        } else if bytes[self.position] == b'\''
+            && self.position + 2 < bytes.len()
+            && bytes[self.position + 1] == b'\''
+            && bytes[self.position + 2] == b'\''
+        {
+            // Long clob (triple-quoted)
+            let mut result = Vec::new();
+            loop {
+                // Expect ''' at self.position
+                if self.position + 2 >= bytes.len()
+                    || bytes[self.position] != b'\''
+                    || bytes[self.position + 1] != b'\''
+                    || bytes[self.position + 2] != b'\''
+                {
+                    break;
+                }
+                self.position += 3; // skip opening '''
+                let seg_start = self.position;
+                while self.position + 2 < bytes.len() {
+                    if bytes[self.position] == b'\''
+                        && bytes[self.position + 1] == b'\''
+                        && bytes[self.position + 2] == b'\''
+                    {
+                        break;
+                    }
+                    if bytes[self.position] == b'\\' {
+                        self.position += 2;
+                    } else {
+                        self.position += 1;
+                    }
+                }
+                let seg_end = self.position;
+                self.position += 3; // skip closing '''
+
+                // Always process long-clob content for newline normalization
+                // (bare CR and CR LF are normalized to LF).
+                let decoded = decode_long_clob_content(&bytes[seg_start..seg_end])?;
+                result.extend_from_slice(&decoded);
+
+                // Skip whitespace between segments
+                if !self.skip_whitespace_only() {
+                    break;
+                }
+                // Check for another ''' segment or }}
+                if self.position + 2 < bytes.len()
+                    && bytes[self.position] == b'\''
+                    && bytes[self.position + 1] == b'\''
+                    && bytes[self.position + 2] == b'\''
+                {
+                    // Another segment follows — continue loop
+                } else {
+                    break;
+                }
+            }
+            // Expect }}
+            if self.position + 1 < bytes.len()
+                && bytes[self.position] == b'}'
+                && bytes[self.position + 1] == b'}'
+            {
+                self.position += 2;
+            }
+            let idx = constant_pool.add(Constant::Bytes(Arc::from(result)));
+            destination.push(instr::CLOB_CP | idx);
         } else {
             // Blob (base64)
             let start = self.position;
@@ -1691,7 +2017,7 @@ impl<'a> BytecodeGenerator for StrTextIon10Generator<'a> {
 fn is_value_terminator(b: u8) -> bool {
     matches!(
         b,
-        b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b')' | b'}' | b'/'
+        b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C' | b',' | b']' | b')' | b'}' | b'/'
     )
 }
 
@@ -1703,6 +2029,51 @@ fn is_identifier_start(b: u8) -> bool {
 /// Returns true if the byte can continue an identifier.
 fn is_identifier_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Returns true if the byte is an Ion operator character (valid unquoted
+/// in s-expression context only).
+fn try_parse_sid_from_text(text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'$' {
+        return None;
+    }
+    let digits = &bytes[1..];
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(value)
+}
+
+fn is_operator_char(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'/'
+            | b';'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'^'
+            | b'`'
+            | b'|'
+            | b'~'
+    )
 }
 
 /// Emits an i64 value as the appropriate int instruction.
@@ -1764,6 +2135,222 @@ fn parse_i128(text: &str) -> Result<i128, std::num::ParseIntError> {
     } else {
         text.parse::<i128>()
     }
+}
+
+/// Parses an arbitrary-precision integer string that may have a sign and/or 0x prefix.
+/// Used as a fallback when the value exceeds i128.
+fn parse_big_int(text: &str) -> IonResult<Int> {
+    let (is_negative, magnitude_str, radix) =
+        if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            (false, hex, 16)
+        } else if let Some(hex) = text
+            .strip_prefix("-0x")
+            .or_else(|| text.strip_prefix("-0X"))
+        {
+            (true, hex, 16)
+        } else if let Some(digits) = text.strip_prefix('-') {
+            (true, digits, 10)
+        } else {
+            (false, text, 10)
+        };
+    let uint = UInt::from_str_radix(magnitude_str, radix)?;
+    let int_value = Int::from(&uint);
+    if is_negative {
+        Ok(-int_value)
+    } else {
+        Ok(int_value)
+    }
+}
+
+/// Decodes escape sequences AND normalizes newlines in a string body.
+/// Per the Ion spec, `\r\n` and bare `\r` in string content are normalized to `\n`.
+fn decode_string_content(input: &[u8]) -> IonResult<String> {
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        match input[i] {
+            b'\\' => {
+                i += 1;
+                if i >= input.len() {
+                    return IonResult::decoding_error("trailing backslash");
+                }
+                match input[i] {
+                    b'n' => {
+                        result.push('\n');
+                        i += 1;
+                    }
+                    b'r' => {
+                        result.push('\r');
+                        i += 1;
+                    }
+                    b't' => {
+                        result.push('\t');
+                        i += 1;
+                    }
+                    b'\\' => {
+                        result.push('\\');
+                        i += 1;
+                    }
+                    b'"' => {
+                        result.push('"');
+                        i += 1;
+                    }
+                    b'\'' => {
+                        result.push('\'');
+                        i += 1;
+                    }
+                    b'/' => {
+                        result.push('/');
+                        i += 1;
+                    }
+                    b'?' => {
+                        result.push('?');
+                        i += 1;
+                    }
+                    b'0' => {
+                        result.push('\0');
+                        i += 1;
+                    }
+                    b'a' => {
+                        result.push('\x07');
+                        i += 1;
+                    }
+                    b'b' => {
+                        result.push('\x08');
+                        i += 1;
+                    }
+                    b'f' => {
+                        result.push('\x0C');
+                        i += 1;
+                    }
+                    b'v' => {
+                        result.push('\x0B');
+                        i += 1;
+                    }
+                    b'x' => {
+                        if i + 2 >= input.len() {
+                            return IonResult::decoding_error("incomplete \\x escape");
+                        }
+                        let hex = std::str::from_utf8(&input[i + 1..i + 3]).map_err(|_| {
+                            crate::IonError::decoding_error("invalid hex in \\x escape")
+                        })?;
+                        let code = u8::from_str_radix(hex, 16).map_err(|_| {
+                            crate::IonError::decoding_error("invalid hex in \\x escape")
+                        })?;
+                        result.push(code as char);
+                        i += 3;
+                    }
+                    b'u' => {
+                        if i + 4 >= input.len() {
+                            return IonResult::decoding_error("incomplete \\u escape");
+                        }
+                        let hex = std::str::from_utf8(&input[i + 1..i + 5]).map_err(|_| {
+                            crate::IonError::decoding_error("invalid hex in \\u escape")
+                        })?;
+                        let code = u32::from_str_radix(hex, 16).map_err(|_| {
+                            crate::IonError::decoding_error("invalid hex in \\u escape")
+                        })?;
+                        i += 5;
+                        // Handle surrogate pairs
+                        if (0xD800..=0xDBFF).contains(&code) {
+                            // High surrogate — expect \uXXXX low surrogate
+                            // `i` is currently past the 4 hex digits; we need
+                            // `\u` followed by 4 more hex digits
+                            if i + 5 < input.len() && input[i] == b'\\' && input[i + 1] == b'u' {
+                                let hex2 =
+                                    std::str::from_utf8(&input[i + 2..i + 6]).map_err(|_| {
+                                        crate::IonError::decoding_error(
+                                            "invalid hex in \\u surrogate pair",
+                                        )
+                                    })?;
+                                let low = u32::from_str_radix(hex2, 16).map_err(|_| {
+                                    crate::IonError::decoding_error(
+                                        "invalid hex in \\u surrogate pair",
+                                    )
+                                })?;
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return IonResult::decoding_error(
+                                        "high surrogate not followed by low surrogate in \\u escape",
+                                    );
+                                }
+                                let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                let ch = char::from_u32(combined).ok_or_else(|| {
+                                    crate::IonError::decoding_error(
+                                        "invalid unicode code point from surrogate pair",
+                                    )
+                                })?;
+                                result.push(ch);
+                                i += 6; // skip \uXXXX
+                            } else {
+                                return IonResult::decoding_error(
+                                    "high surrogate not followed by low surrogate in \\u escape",
+                                );
+                            }
+                        } else if (0xDC00..=0xDFFF).contains(&code) {
+                            return IonResult::decoding_error(
+                                "unexpected low surrogate in \\u escape",
+                            );
+                        } else {
+                            let ch = char::from_u32(code).ok_or_else(|| {
+                                crate::IonError::decoding_error(
+                                    "invalid unicode code point in \\u escape",
+                                )
+                            })?;
+                            result.push(ch);
+                        }
+                    }
+                    b'U' => {
+                        if i + 8 >= input.len() {
+                            return IonResult::decoding_error("incomplete \\U escape");
+                        }
+                        let hex = std::str::from_utf8(&input[i + 1..i + 9]).map_err(|_| {
+                            crate::IonError::decoding_error("invalid hex in \\U escape")
+                        })?;
+                        let code = u32::from_str_radix(hex, 16).map_err(|_| {
+                            crate::IonError::decoding_error("invalid hex in \\U escape")
+                        })?;
+                        let ch = char::from_u32(code).ok_or_else(|| {
+                            crate::IonError::decoding_error(
+                                "invalid unicode code point in \\U escape",
+                            )
+                        })?;
+                        result.push(ch);
+                        i += 9;
+                    }
+                    b'\n' => {
+                        // Escaped newline (line continuation) — skip
+                        i += 1;
+                    }
+                    b'\r' => {
+                        // Escaped CR (line continuation) — skip, also consume \n if present
+                        i += 1;
+                        if i < input.len() && input[i] == b'\n' {
+                            i += 1;
+                        }
+                    }
+                    other => {
+                        return IonResult::decoding_error(format!(
+                            "unknown escape sequence: \\{}",
+                            other as char
+                        ));
+                    }
+                }
+            }
+            b'\r' => {
+                // Normalize \r\n or bare \r to \n
+                i += 1;
+                if i < input.len() && input[i] == b'\n' {
+                    i += 1;
+                }
+                result.push('\n');
+            }
+            _ => {
+                result.push(input[i] as char);
+                i += 1;
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Decodes escape sequences in a string/symbol body (between quotes).
@@ -1852,11 +2439,45 @@ fn decode_escape_sequences(input: &[u8]) -> IonResult<String> {
                     let code = u32::from_str_radix(hex, 16).map_err(|_| {
                         crate::IonError::decoding_error("invalid hex in \\u escape")
                     })?;
-                    let ch = char::from_u32(code).ok_or_else(|| {
-                        crate::IonError::decoding_error("invalid unicode code point in \\u escape")
-                    })?;
-                    result.push(ch);
                     i += 5;
+                    // Handle surrogate pairs
+                    if (0xD800..=0xDBFF).contains(&code) {
+                        // High surrogate — expect \uXXXX low surrogate
+                        if i + 5 < input.len() && input[i] == b'\\' && input[i + 1] == b'u' {
+                            let hex2 = std::str::from_utf8(&input[i + 2..i + 6]).map_err(|_| {
+                                crate::IonError::decoding_error("invalid hex in \\u surrogate pair")
+                            })?;
+                            let low = u32::from_str_radix(hex2, 16).map_err(|_| {
+                                crate::IonError::decoding_error("invalid hex in \\u surrogate pair")
+                            })?;
+                            if !(0xDC00..=0xDFFF).contains(&low) {
+                                return IonResult::decoding_error(
+                                    "high surrogate not followed by low surrogate in \\u escape",
+                                );
+                            }
+                            let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                            let ch = char::from_u32(combined).ok_or_else(|| {
+                                crate::IonError::decoding_error(
+                                    "invalid unicode code point from surrogate pair",
+                                )
+                            })?;
+                            result.push(ch);
+                            i += 6; // skip \uXXXX
+                        } else {
+                            return IonResult::decoding_error(
+                                "high surrogate not followed by low surrogate in \\u escape",
+                            );
+                        }
+                    } else if (0xDC00..=0xDFFF).contains(&code) {
+                        return IonResult::decoding_error("unexpected low surrogate in \\u escape");
+                    } else {
+                        let ch = char::from_u32(code).ok_or_else(|| {
+                            crate::IonError::decoding_error(
+                                "invalid unicode code point in \\u escape",
+                            )
+                        })?;
+                        result.push(ch);
+                    }
                 }
                 b'U' => {
                     if i + 8 >= input.len() {
@@ -1937,6 +2558,10 @@ fn decode_clob_escape_sequences(input: &[u8]) -> IonResult<Vec<u8>> {
                     result.push(b'/');
                     i += 1;
                 }
+                b'?' => {
+                    result.push(b'?');
+                    i += 1;
+                }
                 b'0' => {
                     result.push(0);
                     i += 1;
@@ -1983,6 +2608,113 @@ fn decode_clob_escape_sequences(input: &[u8]) -> IonResult<Vec<u8>> {
                         other as char
                     ));
                 }
+            }
+        } else {
+            result.push(input[i]);
+            i += 1;
+        }
+    }
+    Ok(result)
+}
+
+/// Decodes escape sequences for long-clob content (triple-quoted) with
+/// newline normalization: bare CR LF and bare CR are normalized to LF.
+fn decode_long_clob_content(input: &[u8]) -> IonResult<Vec<u8>> {
+    let mut result = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'\\' {
+            i += 1;
+            if i >= input.len() {
+                return IonResult::decoding_error("trailing backslash in clob");
+            }
+            match input[i] {
+                b'n' => {
+                    result.push(b'\n');
+                    i += 1;
+                }
+                b'r' => {
+                    result.push(b'\r');
+                    i += 1;
+                }
+                b't' => {
+                    result.push(b'\t');
+                    i += 1;
+                }
+                b'\\' => {
+                    result.push(b'\\');
+                    i += 1;
+                }
+                b'"' => {
+                    result.push(b'"');
+                    i += 1;
+                }
+                b'\'' => {
+                    result.push(b'\'');
+                    i += 1;
+                }
+                b'/' => {
+                    result.push(b'/');
+                    i += 1;
+                }
+                b'?' => {
+                    result.push(b'?');
+                    i += 1;
+                }
+                b'0' => {
+                    result.push(0);
+                    i += 1;
+                }
+                b'a' => {
+                    result.push(0x07);
+                    i += 1;
+                }
+                b'b' => {
+                    result.push(0x08);
+                    i += 1;
+                }
+                b'f' => {
+                    result.push(0x0C);
+                    i += 1;
+                }
+                b'v' => {
+                    result.push(0x0B);
+                    i += 1;
+                }
+                b'x' => {
+                    if i + 2 >= input.len() {
+                        return IonResult::decoding_error("incomplete \\x escape in clob");
+                    }
+                    let hex = std::str::from_utf8(&input[i + 1..i + 3]).map_err(|_| {
+                        crate::IonError::decoding_error("invalid hex in clob \\x escape")
+                    })?;
+                    let code = u8::from_str_radix(hex, 16).map_err(|_| {
+                        crate::IonError::decoding_error("invalid hex in clob \\x escape")
+                    })?;
+                    result.push(code);
+                    i += 3;
+                }
+                // Escaped newline (line continuation) — produces no bytes
+                b'\n' => i += 1,
+                b'\r' => {
+                    i += 1;
+                    if i < input.len() && input[i] == b'\n' {
+                        i += 1;
+                    }
+                }
+                other => {
+                    return IonResult::decoding_error(format!(
+                        "unknown escape in clob: \\{}",
+                        other as char
+                    ));
+                }
+            }
+        } else if input[i] == b'\r' {
+            // Normalize bare CR LF or bare CR to LF
+            result.push(b'\n');
+            i += 1;
+            if i < input.len() && input[i] == b'\n' {
+                i += 1;
             }
         } else {
             result.push(input[i]);
@@ -2061,13 +2793,11 @@ fn parse_text_decimal(text: &str) -> IonResult<Decimal> {
         }
     }
 
-    let coefficient: i128 = full_coeff_str.parse().map_err(|e| {
-        crate::IonError::decoding_error(format!(
-            "invalid decimal coefficient '{}': {e}",
-            full_coeff_str
-        ))
-    })?;
-
+    // Try i128 first (fast path), fall back to arbitrary-precision Int
+    if let Ok(coefficient) = full_coeff_str.parse::<i128>() {
+        return Ok(Decimal::new(coefficient, total_exp));
+    }
+    let coefficient = parse_big_int(&full_coeff_str)?;
     Ok(Decimal::new(coefficient, total_exp))
 }
 

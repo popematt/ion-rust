@@ -11,7 +11,7 @@ use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::instr;
 use crate::result::IonFailure;
-use crate::{Decimal, Int, IonResult, Timestamp};
+use crate::{Decimal, Int, IonResult, Timestamp, UInt};
 
 /// Ion 1.0 binary IVM bytes.
 const IVM_BYTES: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
@@ -390,6 +390,7 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
     }
 
     /// Emits a big integer (> 8 bytes) using the constant pool.
+    /// Supports arbitrary-precision integers via `UInt::from_be_bytes`.
     fn emit_big_int(
         &mut self,
         length: usize,
@@ -397,18 +398,12 @@ impl<S: AsRef<[u8]>> BinaryIon10Generator<S> {
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) {
-        // Read magnitude bytes as big-endian unsigned.
-        // Note: for truly large integers (> 16 bytes), this would overflow
-        // u128. For now, we handle up to 16 bytes. Larger values would need
-        // a proper BigInt library integration.
         let bytes = &self.source()[self.position..self.position + length];
-        let magnitude_u128 = bytes.iter().fold(0u128, |acc, &b| (acc << 8) | b as u128);
-        let value = if is_negative {
-            // Build the positive magnitude as Int, then negate. This
-            // correctly handles magnitudes > i128::MAX via BigInt.
-            Int::from(magnitude_u128).neg()
+        let magnitude = UInt::from_be_bytes(bytes);
+        let value: Int = if is_negative {
+            Int::from(&magnitude).neg()
         } else {
-            Int::from(magnitude_u128)
+            Int::from(&magnitude)
         };
         self.position += length;
         let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
@@ -854,15 +849,27 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
     }
 
     fn read_int_ref(&self, position: u32, length: u32) -> IonResult<Int> {
-        debug_assert!(
-            length <= 16,
-            "read_int_ref: length {length} exceeds 16 bytes (i128 overflow)"
-        );
         let start = position as usize;
         let end = start + length as usize;
         let bytes = &self.source()[start..end];
-        let value = bytes.iter().fold(0i128, |acc, &b| (acc << 8) | b as i128);
-        Ok(Int::from(value))
+        if length <= 16 {
+            let mut buf = [0u8; 16];
+            // Sign-extend: if MSB is set, the value is negative
+            let pad = if !bytes.is_empty() && (bytes[0] & 0x80) != 0 {
+                0xFF
+            } else {
+                0x00
+            };
+            buf[..16 - bytes.len()].fill(pad);
+            buf[16 - bytes.len()..].copy_from_slice(bytes);
+            let value = i128::from_be_bytes(buf);
+            Ok(Int::from(value))
+        } else {
+            // Arbitrary precision: convert big-endian two's complement to LE for Int
+            let mut le_bytes: Vec<u8> = bytes.to_vec();
+            le_bytes.reverse();
+            Ok(Int::from_le_signed_bytes(&le_bytes))
+        }
     }
 
     fn read_decimal_ref(&self, position: u32, length: u32) -> IonResult<Decimal> {
@@ -893,31 +900,42 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for BinaryIon10Generator<S> {
         // First bit of the first coefficient byte is the sign bit.
         let is_negative_coeff = (coeff_bytes[0] & 0x80) != 0;
 
-        if coeff_bytes.len() > 16 {
-            return IonResult::decoding_error(
-                "decimal coefficient exceeds 128 bits (not yet supported)",
-            );
-        }
+        if coeff_bytes.len() <= 16 {
+            // Fast path: coefficient fits in u128
+            let first_magnitude_byte = (coeff_bytes[0] & 0x7F) as u128;
+            let magnitude = coeff_bytes[1..]
+                .iter()
+                .fold(first_magnitude_byte, |acc, &b| (acc << 8) | b as u128);
 
-        // Build the magnitude from the remaining bits (big-endian unsigned),
-        // clearing the sign bit from the first byte inline to avoid allocation.
-        let first_magnitude_byte = (coeff_bytes[0] & 0x7F) as u128;
-        let magnitude = coeff_bytes[1..]
-            .iter()
-            .fold(first_magnitude_byte, |acc, &b| (acc << 8) | b as u128);
+            if magnitude == 0 && is_negative_coeff {
+                return Ok(Decimal::negative_zero_with_exponent(exponent));
+            }
 
-        if magnitude == 0 && is_negative_coeff {
-            // Negative zero
-            return Ok(Decimal::negative_zero_with_exponent(exponent));
-        }
+            let coefficient: i128 = if is_negative_coeff {
+                -(magnitude as i128)
+            } else {
+                magnitude as i128
+            };
 
-        let coefficient: i128 = if is_negative_coeff {
-            -(magnitude as i128)
+            Ok(Decimal::new(coefficient, exponent))
         } else {
-            magnitude as i128
-        };
+            // Arbitrary precision: clear the sign bit and use UInt::from_be_bytes
+            let mut magnitude_bytes = coeff_bytes.to_vec();
+            magnitude_bytes[0] &= 0x7F;
 
-        Ok(Decimal::new(coefficient, exponent))
+            let magnitude = UInt::from_be_bytes(&magnitude_bytes);
+            if magnitude == UInt::ZERO && is_negative_coeff {
+                return Ok(Decimal::negative_zero_with_exponent(exponent));
+            }
+
+            let coefficient: Int = if is_negative_coeff {
+                Int::from(&magnitude).neg()
+            } else {
+                Int::from(&magnitude)
+            };
+
+            Ok(Decimal::new(coefficient, exponent))
+        }
     }
 
     fn read_timestamp_ref(&self, position: u32, length: u32) -> IonResult<Timestamp> {

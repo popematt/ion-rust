@@ -21,11 +21,6 @@ const SKIP_LIST: &[&str] = &[
     "ion-tests/iontestdata/good/subfieldVarUInt32bit.10n",
     "ion-tests/iontestdata/good/subfieldVarUInt15bit.10n",
     "ion-tests/iontestdata/good/subfieldVarUInt16bit.10n",
-    // Integers exceeding 128 bits — requires arbitrary-precision BigUint support
-    "ion-tests/iontestdata/good/intBigSize256.10n",
-    "ion-tests/iontestdata/good/intBigSize1201.10n",
-    "ion-tests/iontestdata/good/equivs/intsLargePositive3.10n",
-    "ion-tests/iontestdata/good/equivs/intsLargeNegative3.10n",
 ];
 
 fn should_skip(file_name: &str) -> bool {
@@ -98,5 +93,49 @@ mod binary {
     #[test_resources("ion-tests/iontestdata/good/**/*.10n")]
     fn v3(file_name: &str) {
         test_file_v3(file_name);
+    }
+}
+
+/// Text files known to fail in the bytecode reader's text generator.
+const TEXT_SKIP_LIST: &[&str] = &[];
+
+fn should_skip_text(file_name: &str) -> bool {
+    TEXT_SKIP_LIST
+        .iter()
+        .any(|s| file_name.contains(s) || file_name.ends_with(s))
+}
+
+fn test_text_file_v3(file_name: &str) {
+    if should_skip_text(file_name) {
+        return;
+    }
+
+    let data = fs::read(file_name).unwrap();
+
+    let expected = match Element::read_all(&data) {
+        Ok(seq) => seq,
+        Err(_) => return, // skip files the existing reader can't handle
+    };
+
+    match read_all_v3(&data) {
+        Ok(actual) => {
+            assert!(
+                IonData::eq(&expected, &actual),
+                "v3 text output mismatch for {file_name}"
+            );
+        }
+        Err(e) => {
+            panic!("v3 text error for {file_name}: {e}");
+        }
+    }
+}
+
+mod text {
+    use super::*;
+    use test_generator::test_resources;
+
+    #[test_resources("ion-tests/iontestdata/good/**/*.ion")]
+    fn v3(file_name: &str) {
+        test_text_file_v3(file_name);
     }
 }
