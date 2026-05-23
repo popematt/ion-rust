@@ -190,6 +190,21 @@ fn bench_binary(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(
+            BenchmarkId::new(
+                "bytecode_v3_streaming_binary",
+                format!("{name} ({data_size}B)"),
+            ),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -221,6 +236,18 @@ fn bench_service_log(c: &mut Criterion) {
         |b, data| {
             b.iter(|| {
                 let result = ion_rs::bytecode::materialize::read_all_v3(data).unwrap();
+                criterion::black_box(result);
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_streaming_binary", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter(|| {
+                let result =
+                    ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
                 criterion::black_box(result);
             });
         },
