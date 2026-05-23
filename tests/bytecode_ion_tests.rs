@@ -85,6 +85,43 @@ mod binary {
     }
 }
 
+fn test_file_v3_streaming_binary(file_name: &str) {
+    if should_skip(file_name) {
+        return;
+    }
+
+    let data = fs::read(file_name).unwrap();
+
+    // Only test binary files (should start with IVM or be empty)
+    let expected = match Element::read_all(&data) {
+        Ok(seq) => seq,
+        Err(_) => return,
+    };
+
+    use ion_rs::bytecode::materialize::read_all_v3_streaming_binary;
+    match read_all_v3_streaming_binary(&data) {
+        Ok(actual) => {
+            assert!(
+                IonData::eq(&expected, &actual),
+                "v3 streaming binary output mismatch for {file_name}"
+            );
+        }
+        Err(e) => {
+            panic!("v3 streaming binary error for {file_name}: {e}");
+        }
+    }
+}
+
+mod streaming_binary {
+    use super::*;
+    use test_generator::test_resources;
+
+    #[test_resources("ion-tests/iontestdata/good/**/*.10n")]
+    fn v3(file_name: &str) {
+        test_file_v3_streaming_binary(file_name);
+    }
+}
+
 /// Text files known to fail in the bytecode reader's text generator.
 const TEXT_SKIP_LIST: &[&str] = &[];
 

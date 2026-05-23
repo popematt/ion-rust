@@ -98,6 +98,62 @@ pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
     }
 }
 
+/// Reads all top-level values from binary Ion data using the streaming
+/// binary generator. Forces the streaming binary path.
+pub fn read_all_v3_streaming_binary(data: &[u8]) -> IonResult<Sequence> {
+    use crate::bytecode::streaming_ion10::StreamingBinaryIon10Generator;
+    use std::io::Cursor;
+    let generator = StreamingBinaryIon10Generator::new(Cursor::new(data));
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// Reads all top-level values from an `impl Read` source.
+/// Auto-detects binary (IVM prefix) vs. text format.
+pub fn read_all_v3_streaming(mut reader: impl std::io::Read) -> IonResult<Sequence> {
+    use crate::bytecode::streaming_ion10::StreamingBinaryIon10Generator;
+    use crate::bytecode::text10::StreamingTextIon10Generator;
+    use std::io::{Cursor, Read};
+
+    let mut peek = [0u8; 4];
+    let mut peeked = 0;
+    while peeked < 4 {
+        let n = reader.read(&mut peek[peeked..]).map_err(|e| {
+            crate::IonError::decoding_error(format!("I/O error reading source: {e}"))
+        })?;
+        if n == 0 {
+            break;
+        }
+        peeked += n;
+    }
+
+    if peeked >= 4 && peek == [0xE0, 0x01, 0x00, 0xEA] {
+        // Binary Ion 1.0 — pre-seed the generator's buffer with the
+        // peeked bytes to avoid the overhead of io::Chain.
+        let generator = StreamingBinaryIon10Generator::with_peeked(reader, &peek[..peeked]);
+        let mut iter = BytecodeElementIterator::new(generator)?;
+        let mut elements = Vec::new();
+        for result in &mut iter {
+            elements.push(result?);
+        }
+        Ok(elements.into())
+    } else {
+        // Text Ion — chain the peeked bytes with the remaining reader.
+        let chained = Cursor::new(peek[..peeked].to_vec()).chain(reader);
+        let generator = StreamingTextIon10Generator::new(chained);
+        let mut iter = BytecodeElementIterator::new(generator)?;
+        let mut elements = Vec::new();
+        for result in &mut iter {
+            elements.push(result?);
+        }
+        Ok(elements.into())
+    }
+}
+
 /// Reads all top-level values from text Ion data using the streaming
 /// text generator. This simulates reading from an `io::Read` source.
 pub fn read_all_v3_streaming_text(data: &[u8]) -> IonResult<Sequence> {
