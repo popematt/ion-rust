@@ -315,6 +315,12 @@ impl Display for Struct {
 }
 
 impl Struct {
+    pub(crate) fn from_vec(slots: Vec<(Symbol, Element)>) -> Self {
+        Struct {
+            fields: Fields::new(slots),
+        }
+    }
+
     pub fn builder() -> StructBuilder {
         StructBuilder::new()
     }

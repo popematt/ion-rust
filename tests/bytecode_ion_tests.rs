@@ -165,3 +165,72 @@ mod text {
         test_text_file_v3(file_name);
     }
 }
+
+// ─── Arena reader tests ────────────────────────────────────────────────
+
+fn test_file_v3_arena(file_name: &str) {
+    if should_skip(file_name) {
+        return;
+    }
+
+    let data = fs::read(file_name).unwrap();
+
+    let expected = match Element::read_all(&data) {
+        Ok(seq) => seq,
+        Err(_) => return,
+    };
+
+    use ion_rs::bytecode::arena_reader::read_all_v3_arena;
+    match read_all_v3_arena(&data) {
+        Ok(actual) => {
+            assert!(
+                IonData::eq(&expected, &actual),
+                "v3 arena output mismatch for {file_name}"
+            );
+        }
+        Err(e) => {
+            panic!("v3 arena error for {file_name}: {e}");
+        }
+    }
+}
+
+fn test_text_file_v3_arena(file_name: &str) {
+    if should_skip_text(file_name) {
+        return;
+    }
+
+    let data = fs::read(file_name).unwrap();
+
+    let expected = match Element::read_all(&data) {
+        Ok(seq) => seq,
+        Err(_) => return,
+    };
+
+    use ion_rs::bytecode::arena_reader::read_all_v3_arena;
+    match read_all_v3_arena(&data) {
+        Ok(actual) => {
+            assert!(
+                IonData::eq(&expected, &actual),
+                "v3 arena text output mismatch for {file_name}"
+            );
+        }
+        Err(e) => {
+            panic!("v3 arena text error for {file_name}: {e}");
+        }
+    }
+}
+
+mod arena {
+    use super::*;
+    use test_generator::test_resources;
+
+    #[test_resources("ion-tests/iontestdata/good/**/*.10n")]
+    fn v3(file_name: &str) {
+        test_file_v3_arena(file_name);
+    }
+
+    #[test_resources("ion-tests/iontestdata/good/**/*.ion")]
+    fn v3_text(file_name: &str) {
+        test_text_file_v3_arena(file_name);
+    }
+}

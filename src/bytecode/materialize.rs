@@ -59,7 +59,7 @@ pub(crate) fn read_one_v2(data: &[u8]) -> IonResult<Element> {
 // ─── read_all_v3: linear bytecode walker ────────────────────────────
 
 /// Ion 1.0 system symbol table (SIDs 1-9).
-const SYSTEM_SYMBOLS: [&str; 9] = [
+pub(crate) const SYSTEM_SYMBOLS: [&str; 9] = [
     "$ion",
     "$ion_1_0",
     "$ion_symbol_table",
@@ -180,6 +180,22 @@ pub fn read_all_v3_binary(data: &[u8]) -> IonResult<Sequence> {
     Ok(elements.into())
 }
 
+/// Reads all top-level values from binary Ion data using the path filter
+/// generator. Only values matching the given path filters are materialized.
+pub fn read_all_v3_filtered(
+    data: &[u8],
+    filters: &[crate::bytecode::path_filter::PathFilter],
+) -> IonResult<Sequence> {
+    use crate::bytecode::path_filter_generator::PathFilterGenerator;
+    let generator = PathFilterGenerator::new(data, filters);
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
 /// Reads all top-level values from text Ion data using the in-memory
 /// `&str` generator. Forces the str-text path regardless of content.
 pub fn read_all_v3_str_text(data: &[u8]) -> IonResult<Sequence> {
@@ -198,7 +214,7 @@ pub fn read_all_v3_str_text(data: &[u8]) -> IonResult<Sequence> {
 /// An iterator that walks bytecode linearly, producing materialized
 /// `Element` values without the overhead of the `BytecodeReader` state
 /// machine.
-struct BytecodeElementIterator<G: BytecodeGenerator> {
+pub(crate) struct BytecodeElementIterator<G: BytecodeGenerator> {
     generator: G,
     bytecode: Vec<u32>,
     pos: usize,
@@ -208,7 +224,7 @@ struct BytecodeElementIterator<G: BytecodeGenerator> {
 }
 
 impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
-    fn new(generator: G) -> IonResult<Self> {
+    pub(crate) fn new(generator: G) -> IonResult<Self> {
         let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         let mut iter = Self {
             generator,
