@@ -166,6 +166,75 @@ mod text {
     }
 }
 
+// ─── Unified binary generator tests ────────────────────────────────────
+
+fn test_file_v3_unified_binary(file_name: &str) {
+    if should_skip(file_name) {
+        return;
+    }
+
+    let data = fs::read(file_name).unwrap();
+
+    let expected = match Element::read_all(&data) {
+        Ok(seq) => seq,
+        Err(_) => return,
+    };
+
+    use ion_rs::bytecode::materialize::read_all_v3_unified_binary;
+    match read_all_v3_unified_binary(&data) {
+        Ok(actual) => {
+            assert!(
+                IonData::eq(&expected, &actual),
+                "v3 unified binary output mismatch for {file_name}"
+            );
+        }
+        Err(e) => {
+            panic!("v3 unified binary error for {file_name}: {e}");
+        }
+    }
+}
+
+fn test_file_v3_unified_streaming_binary(file_name: &str) {
+    if should_skip(file_name) {
+        return;
+    }
+
+    let data = fs::read(file_name).unwrap();
+
+    let expected = match Element::read_all(&data) {
+        Ok(seq) => seq,
+        Err(_) => return,
+    };
+
+    use ion_rs::bytecode::materialize::read_all_v3_unified_streaming_binary;
+    match read_all_v3_unified_streaming_binary(&data) {
+        Ok(actual) => {
+            assert!(
+                IonData::eq(&expected, &actual),
+                "v3 unified streaming binary output mismatch for {file_name}"
+            );
+        }
+        Err(e) => {
+            panic!("v3 unified streaming binary error for {file_name}: {e}");
+        }
+    }
+}
+
+mod unified_binary {
+    use super::*;
+    use test_generator::test_resources;
+
+    #[test_resources("ion-tests/iontestdata/good/**/*.10n")]
+    fn in_memory(file_name: &str) {
+        test_file_v3_unified_binary(file_name);
+    }
+
+    #[test_resources("ion-tests/iontestdata/good/**/*.10n")]
+    fn streaming(file_name: &str) {
+        test_file_v3_unified_streaming_binary(file_name);
+    }
+}
+
 // ─── Arena reader tests ────────────────────────────────────────────────
 
 fn test_file_v3_arena(file_name: &str) {

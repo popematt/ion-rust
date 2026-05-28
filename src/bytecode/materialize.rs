@@ -98,12 +98,59 @@ pub fn read_all_v3(data: &[u8]) -> IonResult<Sequence> {
     }
 }
 
+/// Reads all top-level values from binary Ion data using the
+/// `BinaryIon10Generator` with an explicit `NoFilter` policy.
+///
+/// This exists for benchmarking: it exercises the same code path as
+/// `read_all_v3` but through the `with_filter(NoFilter)` constructor,
+/// allowing direct comparison to verify zero overhead from the filter
+/// policy trait parameter.
+pub fn read_all_v3_with_no_filter(data: &[u8]) -> IonResult<Sequence> {
+    use crate::bytecode::filter_policy::NoFilter;
+    let generator = BinaryIon10Generator::with_filter(data, NoFilter);
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
 /// Reads all top-level values from binary Ion data using the streaming
 /// binary generator. Forces the streaming binary path.
 pub fn read_all_v3_streaming_binary(data: &[u8]) -> IonResult<Sequence> {
     use crate::bytecode::streaming_ion10::StreamingBinaryIon10Generator;
     use std::io::Cursor;
     let generator = StreamingBinaryIon10Generator::new(Cursor::new(data));
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// Reads all top-level values from binary Ion data using the unified
+/// in-memory generator (proof-of-concept for generator consolidation).
+pub fn read_all_v3_unified_binary(data: &[u8]) -> IonResult<Sequence> {
+    use crate::bytecode::unified_binary_ion10::{InMemorySource, UnifiedBinaryIon10Generator};
+    let source = InMemorySource::new(data);
+    let generator = UnifiedBinaryIon10Generator::new(source);
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// Reads all top-level values from binary Ion data using the unified
+/// streaming generator (proof-of-concept for generator consolidation).
+pub fn read_all_v3_unified_streaming_binary(data: &[u8]) -> IonResult<Sequence> {
+    use crate::bytecode::unified_binary_ion10::{StreamingSource, UnifiedBinaryIon10Generator};
+    use std::io::Cursor;
+    let source = StreamingSource::new(Cursor::new(data));
+    let generator = UnifiedBinaryIon10Generator::new(source);
     let mut iter = BytecodeElementIterator::new(generator)?;
     let mut elements = Vec::new();
     for result in &mut iter {
@@ -188,6 +235,23 @@ pub fn read_all_v3_filtered(
 ) -> IonResult<Sequence> {
     use crate::bytecode::path_filter_generator::PathFilterGenerator;
     let generator = PathFilterGenerator::new(data, filters);
+    let mut iter = BytecodeElementIterator::new(generator)?;
+    let mut elements = Vec::new();
+    for result in &mut iter {
+        elements.push(result?);
+    }
+    Ok(elements.into())
+}
+
+/// Reads all top-level values from binary Ion data using a path filter
+/// with the v2 `PathQuery` API.
+pub fn read_all_v3_query(
+    data: &[u8],
+    queries: &[crate::bytecode::path_filter::PathQuery],
+    flatten: bool,
+) -> IonResult<Sequence> {
+    use crate::bytecode::path_filter_generator::PathFilterGenerator;
+    let generator = PathFilterGenerator::new_v2(data, queries, flatten);
     let mut iter = BytecodeElementIterator::new(generator)?;
     let mut elements = Vec::new();
     for result in &mut iter {
