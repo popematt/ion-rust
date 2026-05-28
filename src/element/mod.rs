@@ -706,6 +706,10 @@ impl Element {
                     Err(ConversionOperationError::new(sym))
                 }
                 SymbolText::Static(static_str) => Ok((*static_str).to_string()),
+                SymbolText::ArenaBorrowed(ptr) => {
+                    // SAFETY: The pointer is valid while we hold this Element.
+                    Ok(unsafe { ptr.text() }.to_string())
+                }
             },
             _ => {
                 let sym = Self {

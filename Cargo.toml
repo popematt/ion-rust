@@ -53,6 +53,10 @@ experimental-serde = ["experimental-reader-writer", "experimental-chrono", "dep:
 
 bigdecimal = ["dep:bigdecimal"]
 
+# Arena-based materializer for the bytecode reader. Eliminates deallocation
+# cost by placing Element trees in a reusable bump arena.
+experimental-arena = []
+
 [dependencies]
 base64 = "0.12"
 

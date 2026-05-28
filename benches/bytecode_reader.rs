@@ -205,6 +205,23 @@ fn bench_binary(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(
+            BenchmarkId::new("bytecode_v3_arena", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    use ion_rs::bytecode::arena_reader::ArenaReader;
+                    use ion_rs::bytecode::ion10::BinaryIon10Generator;
+                    let generator = BinaryIon10Generator::new(data);
+                    let mut reader = ArenaReader::new(generator).unwrap();
+                    while let Some(result) = reader.next() {
+                        let element = result.unwrap();
+                        criterion::black_box(element);
+                    }
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -218,6 +235,7 @@ fn bench_service_log(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("service_log");
     group.measurement_time(std::time::Duration::from_secs(10));
+    group.sample_size(20);
 
     group.bench_with_input(
         BenchmarkId::new("current", format!("{data_size}B")),
@@ -248,6 +266,84 @@ fn bench_service_log(c: &mut Criterion) {
             b.iter(|| {
                 let result =
                     ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
+                criterion::black_box(result);
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_arena", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter(|| {
+                use ion_rs::bytecode::arena_reader::ArenaReader;
+                use ion_rs::bytecode::ion10::BinaryIon10Generator;
+                let generator = BinaryIon10Generator::new(data);
+                let mut reader = ArenaReader::new(generator).unwrap();
+                while let Some(result) = reader.next() {
+                    let element = result.unwrap();
+                    criterion::black_box(element);
+                }
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_service_log_filtered(c: &mut Criterion) {
+    use ion_rs::bytecode::materialize::{read_all_v3, read_all_v3_filtered};
+    use ion_rs::bytecode::path_filter::PathFilter;
+
+    let data = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("service_log_legacy.10n"),
+    )
+    .expect("service_log_legacy.10n not found");
+    let data_size = data.len();
+
+    let mut group = c.benchmark_group("service_log_filtered");
+    group.sample_size(20);
+
+    // Baseline: read everything with no filter (PathFilterGenerator "select all")
+    let select_all = vec![PathFilter::new(vec![
+        ion_rs::bytecode::path_filter::PathStep::Wildcard,
+    ])];
+    group.bench_with_input(
+        BenchmarkId::new("path_filter_select_all", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter(|| {
+                let result = read_all_v3_filtered(data, &select_all).unwrap();
+                criterion::black_box(result);
+            });
+        },
+    );
+
+    // Baseline: standard BinaryIon10Generator (no filtering)
+    group.bench_with_input(
+        BenchmarkId::new("no_filter", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter(|| {
+                let result = read_all_v3(data).unwrap();
+                criterion::black_box(result);
+            });
+        },
+    );
+
+    // Selective: StartTime, Operation, Metrics.Tokens, Metrics.TotalTime.Value
+    let selective_filters = vec![
+        PathFilter::field("StartTime"),
+        PathFilter::field("Operation"),
+        PathFilter::fields(&["Metrics", "Tokens"]),
+        PathFilter::fields(&["Metrics", "TotalTime", "Value"]),
+    ];
+    group.bench_with_input(
+        BenchmarkId::new("select_4_fields", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter(|| {
+                let result = read_all_v3_filtered(data, &selective_filters).unwrap();
                 criterion::black_box(result);
             });
         },
@@ -475,6 +571,35 @@ fn bench_fma_common_filter(c: &mut Criterion) {
         },
     );
 
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_streaming_binary", format!("{binary_size}B")),
+        &binary_data,
+        |b, data| {
+            b.iter(|| {
+                let result =
+                    ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
+                criterion::black_box(result);
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_arena", format!("{binary_size}B")),
+        &binary_data,
+        |b, data| {
+            b.iter(|| {
+                use ion_rs::bytecode::arena_reader::ArenaReader;
+                use ion_rs::bytecode::ion10::BinaryIon10Generator;
+                let generator = BinaryIon10Generator::new(data);
+                let mut reader = ArenaReader::new(generator).unwrap();
+                while let Some(result) = reader.next() {
+                    let element = result.unwrap();
+                    criterion::black_box(element);
+                }
+            });
+        },
+    );
+
     group.finish();
 }
 
@@ -482,6 +607,7 @@ criterion_group!(
     benches,
     bench_binary,
     bench_service_log,
+    bench_service_log_filtered,
     bench_text,
     bench_fma_common_filter
 );
