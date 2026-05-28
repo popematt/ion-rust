@@ -292,8 +292,8 @@ fn bench_service_log(c: &mut Criterion) {
 }
 
 fn bench_service_log_filtered(c: &mut Criterion) {
-    use ion_rs::bytecode::materialize::{read_all_v3, read_all_v3_filtered};
-    use ion_rs::bytecode::path_filter::PathFilter;
+    use ion_rs::bytecode::materialize::{read_all_v3, read_all_v3_query};
+    use ion_rs::bytecode::path_filter::PathQuery;
 
     let data = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("service_log_legacy.10n"),
@@ -304,16 +304,14 @@ fn bench_service_log_filtered(c: &mut Criterion) {
     let mut group = c.benchmark_group("service_log_filtered");
     group.sample_size(20);
 
-    // Baseline: read everything with no filter (PathFilterGenerator "select all")
-    let select_all = vec![PathFilter::new(vec![
-        ion_rs::bytecode::path_filter::PathStep::Wildcard,
-    ])];
+    // Baseline: read everything with "select all" (PathQuery::all())
+    let select_all = vec![PathQuery::all()];
     group.bench_with_input(
         BenchmarkId::new("path_filter_select_all", format!("{data_size}B")),
         &data,
         |b, data| {
             b.iter(|| {
-                let result = read_all_v3_filtered(data, &select_all).unwrap();
+                let result = read_all_v3_query(data, &select_all, false).unwrap();
                 criterion::black_box(result);
             });
         },
@@ -332,23 +330,96 @@ fn bench_service_log_filtered(c: &mut Criterion) {
     );
 
     // Selective: StartTime, Operation, Metrics.Tokens, Metrics.TotalTime.Value
-    let selective_filters = vec![
-        PathFilter::field("StartTime"),
-        PathFilter::field("Operation"),
-        PathFilter::fields(&["Metrics", "Tokens"]),
-        PathFilter::fields(&["Metrics", "TotalTime", "Value"]),
+    let selective_queries = vec![
+        PathQuery::field("StartTime"),
+        PathQuery::field("Operation"),
+        PathQuery::fields(&["Metrics", "Tokens"]),
+        PathQuery::fields(&["Metrics", "TotalTime", "Value"]),
     ];
     group.bench_with_input(
         BenchmarkId::new("select_4_fields", format!("{data_size}B")),
         &data,
         |b, data| {
             b.iter(|| {
-                let result = read_all_v3_filtered(data, &selective_filters).unwrap();
+                let result = read_all_v3_query(data, &selective_queries, false).unwrap();
                 criterion::black_box(result);
             });
         },
     );
 
+    // Selective + arena: path filter generator with arena materializer
+    group.bench_with_input(
+        BenchmarkId::new("select_4_fields_arena", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter(|| {
+                use ion_rs::bytecode::arena_reader::ArenaReader;
+                use ion_rs::bytecode::path_filter_generator::PathFilterGenerator;
+                let generator = PathFilterGenerator::new_v2(data, &selective_queries, false);
+                let mut reader = ArenaReader::new(generator).unwrap();
+                while let Some(result) = reader.next() {
+                    let element = result.unwrap();
+                    criterion::black_box(element);
+                }
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_binary_filtered(c: &mut Criterion) {
+    use ion_rs::bytecode::materialize::{read_all_v3, read_all_v3_query};
+    use ion_rs::bytecode::path_filter::PathQuery;
+
+    let test_cases = [
+        "integers",
+        "floats",
+        "bools",
+        "nulls",
+        "symbols",
+        "strings",
+        "blobs",
+        "decimals",
+        "timestamps",
+        "lists",
+        "nested_structs",
+        "mixed",
+    ];
+
+    let mut group = c.benchmark_group("binary_filtered");
+    group.sample_size(20);
+
+    let select_all = vec![PathQuery::all()];
+
+    for name in &test_cases {
+        let data = generate_binary_data(name);
+        let data_size = data.len();
+
+        // PathFilterGenerator with "select all" — measures FSM overhead
+        group.bench_with_input(
+            BenchmarkId::new("select_all", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result = read_all_v3_query(data, &select_all, false).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        // BinaryIon10Generator (no filter) — baseline
+        group.bench_with_input(
+            BenchmarkId::new("no_filter", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result = read_all_v3(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+    }
     group.finish();
 }
 
@@ -608,6 +679,7 @@ criterion_group!(
     bench_binary,
     bench_service_log,
     bench_service_log_filtered,
+    bench_binary_filtered,
     bench_text,
     bench_fma_common_filter
 );
