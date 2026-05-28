@@ -11,9 +11,10 @@ use std::sync::Arc;
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::instr;
-use crate::bytecode::path_filter::{FilterFsm, PathFilter};
+#[allow(deprecated)]
+use crate::bytecode::path_filter::{FilterFsm, PathFilter, PathQuery, Predicate};
 use crate::result::IonFailure;
-use crate::{Decimal, Int, IonResult, Timestamp, UInt};
+use crate::{Decimal, Int, IonResult, IonType, Timestamp, UInt};
 
 // ─── Ion 1.0 constants (duplicated from ion10.rs) ─────────────────────
 
@@ -69,18 +70,35 @@ pub struct PathFilterGenerator<S: AsRef<[u8]>> {
     source: S,
     position: usize,
     fsm: FilterFsm,
+    /// Whether intermediate structs should be collapsed.
+    flatten: bool,
     /// Resolved symbol table (built from LSTs).
     /// Maps SID-1 -> text (zero-indexed; SID 1 = index 0).
     symbols: Vec<Option<String>>,
 }
 
 impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
+    /// Create a new generator from v2 PathQuery types.
+    pub fn new_v2(source: S, queries: &[PathQuery], flatten: bool) -> Self {
+        let symbols = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
+        Self {
+            source,
+            position: 0,
+            fsm: FilterFsm::compile(queries),
+            flatten,
+            symbols,
+        }
+    }
+
+    /// Create a new generator from v1 PathFilter types (legacy API).
+    #[allow(deprecated)]
     pub fn new(source: S, filters: &[PathFilter]) -> Self {
         let symbols = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();
         Self {
             source,
             position: 0,
-            fsm: FilterFsm::compile(filters),
+            fsm: FilterFsm::compile_legacy(filters),
+            flatten: false,
             symbols,
         }
     }
@@ -178,6 +196,55 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
             return None;
         }
         self.symbols.get(sid - 1).and_then(|opt| opt.as_deref())
+    }
+
+    // ─── Predicate evaluation ─────────────────────────────────────────
+
+    /// Evaluate all predicates on the given FSM node against the current
+    /// value's type code, null status, and annotations. Returns true if
+    /// all predicates pass.
+    fn check_predicates(
+        &self,
+        fsm_node: usize,
+        tc: u8,
+        length: usize,
+        annotation_sids: &[u32],
+    ) -> bool {
+        let predicates = self.fsm.predicates(fsm_node);
+        if predicates.is_empty() {
+            return true;
+        }
+
+        for (predicate, negated) in predicates {
+            let result = self.evaluate_predicate(predicate, tc, length, annotation_sids);
+            if *negated {
+                if result {
+                    return false;
+                }
+            } else if !result {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Evaluate a single predicate against the given value metadata.
+    fn evaluate_predicate(
+        &self,
+        predicate: &Predicate,
+        tc: u8,
+        length: usize,
+        annotation_sids: &[u32],
+    ) -> bool {
+        match predicate {
+            Predicate::Type(ion_type) => tc_matches_ion_type(tc, *ion_type),
+            Predicate::IsNull => length == NULL_SENTINEL,
+            Predicate::IsAnnotated => !annotation_sids.is_empty(),
+            Predicate::HasAnnotation(text) => annotation_sids.iter().any(|&sid| {
+                self.resolve_sid(sid as usize)
+                    .map_or(false, |resolved| resolved == text)
+            }),
+        }
     }
 
     // ─── Value emission (full, unfiltered) ────────────────────────────
@@ -538,7 +605,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         }
 
         // Now process the wrapped value with filtering at root FSM node.
-        let emitted = self.process_value_filtered(0, destination, constant_pool);
+        let emitted = self.process_value_filtered(0, &annotation_sids, destination, constant_pool);
 
         if !emitted {
             // Nothing matched — rewind annotations too.
@@ -554,6 +621,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
     fn process_value_filtered(
         &mut self,
         fsm_node: usize,
+        annotation_sids: &[u32],
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
@@ -561,14 +629,12 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
         // Handle nulls
         if length == NULL_SENTINEL && tc <= type_code::STRUCT {
-            // A null at a non-terminal FSM node means no match.
-            // A null at a terminal would need is_terminal check, but nulls
-            // cannot have children so they only match if the FSM is already
-            // at a terminal. Since this function is called when we've
-            // already transitioned, check the current node.
+            // A null at a terminal node: check predicates, then emit.
             if self.fsm.is_terminal(fsm_node) {
-                self.emit_null(tc, destination);
-                return true;
+                if self.check_predicates(fsm_node, tc, length, annotation_sids) {
+                    self.emit_null(tc, destination);
+                    return true;
+                }
             }
             return false;
         }
@@ -589,10 +655,22 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
             return false;
         }
 
-        // If the current node is terminal, emit the full value.
+        // If the current node is terminal, check predicates and emit.
         if self.fsm.is_terminal(fsm_node) {
-            self.emit_value_body_full(tc, length, destination, constant_pool);
-            return true;
+            if self.check_predicates(fsm_node, tc, length, annotation_sids) {
+                self.emit_value_body_full(tc, length, destination, constant_pool);
+                return true;
+            }
+            // Predicates failed — skip the value.
+            self.position += length;
+            return false;
+        }
+
+        // Non-terminal node: check leading predicates before
+        // transitioning.
+        if !self.check_predicates(fsm_node, tc, length, annotation_sids) {
+            self.position += length;
+            return false;
         }
 
         // If it's a scalar at a non-terminal node, no match.
@@ -638,8 +716,10 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
             destination.push(instr::ANNOTATION_SID | (*sid & 0x003F_FFFF));
         }
 
-        // Process the inner value at the same FSM node
-        let emitted = self.process_value_filtered(fsm_node, destination, constant_pool);
+        // Process the inner value at the same FSM node, passing
+        // annotations for predicate evaluation.
+        let emitted =
+            self.process_value_filtered(fsm_node, &annotation_sids, destination, constant_pool);
 
         if !emitted {
             destination.truncate(rewind_point);
@@ -667,10 +747,18 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
             _ => instr::LIST_START,
         };
 
+        // Determine if this struct is "intermediate" for flatten purposes.
+        // An intermediate struct is one navigated through but not terminal.
+        // The top-level container (fsm_node == 0) is never suppressed.
+        // For flatten=true, suppress intermediate struct containers.
+        let suppress_container = self.flatten && is_struct && fsm_node != 0;
+
         // Record rewind point before container start
         let rewind_point = destination.len();
         let start_index = destination.len();
-        destination.push(0); // placeholder for container start
+        if !suppress_container {
+            destination.push(0); // placeholder for container start
+        }
 
         let end_position = self.position + content_length;
         let mut child_index: usize = 0;
@@ -699,16 +787,32 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
                         self.skip_value();
                     }
                     Some(child) => {
-                        // Emit field name
-                        let field_rewind = destination.len();
-                        destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+                        // When flatten is active and the child is a
+                        // non-terminal node with FIELD transitions, this
+                        // child navigates through a struct (flattenable).
+                        // Don't emit its field name (the child's children
+                        // will emit their own field names directly).
+                        // Only suppress for struct navigation (field
+                        // transitions), not sequence navigation (index).
+                        let child_is_intermediate = self.flatten
+                            && !self.fsm.is_terminal(child)
+                            && self.fsm.has_field_transitions(child);
 
-                        let emitted =
-                            self.process_value_filtered(child, destination, constant_pool);
+                        let field_rewind = destination.len();
+                        if !child_is_intermediate {
+                            destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+                        }
+
+                        let emitted = self.process_value_filtered(
+                            child,
+                            &[], // no annotations known yet
+                            destination,
+                            constant_pool,
+                        );
                         if emitted {
                             any_emitted = true;
                         } else {
-                            // Rewind the field name
+                            // Rewind (field name if emitted, or nothing)
                             destination.truncate(field_rewind);
                         }
                     }
@@ -722,8 +826,12 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
                         self.skip_value();
                     }
                     Some(child) => {
-                        let emitted =
-                            self.process_value_filtered(child, destination, constant_pool);
+                        let emitted = self.process_value_filtered(
+                            child,
+                            &[], // no annotations known yet
+                            destination,
+                            constant_pool,
+                        );
                         if emitted {
                             any_emitted = true;
                         }
@@ -734,9 +842,11 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         }
 
         if any_emitted {
-            destination.push(instr::END_CONTAINER);
-            let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+            if !suppress_container {
+                destination.push(instr::END_CONTAINER);
+                let bytecode_length = destination.len() - start_index - 1;
+                destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+            }
             true
         } else {
             // No children matched — rewind the container.
@@ -839,6 +949,25 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
     }
 }
 
+/// Maps a binary type code to an IonType for predicate evaluation.
+fn tc_matches_ion_type(tc: u8, ion_type: IonType) -> bool {
+    match ion_type {
+        IonType::Null => tc == type_code::NOP, // NOP with 0x0F is null.null
+        IonType::Bool => tc == type_code::BOOL,
+        IonType::Int => tc == type_code::POS_INT || tc == type_code::NEG_INT,
+        IonType::Float => tc == type_code::FLOAT,
+        IonType::Decimal => tc == type_code::DECIMAL,
+        IonType::Timestamp => tc == type_code::TIMESTAMP,
+        IonType::Symbol => tc == type_code::SYMBOL,
+        IonType::String => tc == type_code::STRING,
+        IonType::Clob => tc == type_code::CLOB,
+        IonType::Blob => tc == type_code::BLOB,
+        IonType::List => tc == type_code::LIST,
+        IonType::SExp => tc == type_code::SEXP,
+        IonType::Struct => tc == type_code::STRUCT,
+    }
+}
+
 fn is_container(tc: u8) -> bool {
     matches!(tc, type_code::LIST | type_code::SEXP | type_code::STRUCT)
 }
@@ -911,7 +1040,7 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for PathFilterGenerator<S> {
 
             // Non-annotation top-level value — process with filtering at
             // root FSM node.
-            self.process_value_filtered(0, destination, constant_pool);
+            self.process_value_filtered(0, &[], destination, constant_pool);
             // Continue processing more top-level values in the same refill
             // batch.
         }
@@ -1195,7 +1324,7 @@ fn read_var_int_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<i64> {
 mod tests {
     use super::*;
     use crate::bytecode::materialize::BytecodeElementIterator;
-    use crate::bytecode::path_filter::PathStep;
+    use crate::bytecode::path_filter::{PathQuerySet, Select, Step};
     use crate::lazy::encoding::Encoding;
     use crate::{v1_0, Element, IonResult, Sequence, Value};
 
@@ -1206,7 +1335,20 @@ mod tests {
     }
 
     /// Helper: read all values from binary data through the path filter
-    /// generator.
+    /// generator using v2 queries.
+    fn read_filtered_v2(data: &[u8], queries: &[PathQuery], flatten: bool) -> IonResult<Sequence> {
+        let generator = PathFilterGenerator::new_v2(data, queries, flatten);
+        let mut iter = BytecodeElementIterator::new(generator)?;
+        let mut elements = Vec::new();
+        for result in &mut iter {
+            elements.push(result?);
+        }
+        Ok(elements.into())
+    }
+
+    /// Helper: read all values using v1 API (for backwards compatibility
+    /// tests).
+    #[allow(deprecated)]
     fn read_filtered(data: &[u8], filters: &[PathFilter]) -> IonResult<Sequence> {
         let generator = PathFilterGenerator::new(data, filters);
         let mut iter = BytecodeElementIterator::new(generator)?;
@@ -1217,12 +1359,14 @@ mod tests {
         Ok(elements.into())
     }
 
+    // ─── v1 backwards compatibility tests ─────────────────────────────
+
+    #[allow(deprecated)]
     #[test]
     fn single_field_filter() -> IonResult<()> {
         let binary = encode_as_binary("{foo: 1, bar: 2}");
         let result = read_filtered(&binary, &[PathFilter::field("foo")])?;
 
-        // Should produce one struct with only field "foo"
         assert_eq!(result.len(), 1);
         let s = result.get(0).unwrap();
         if let Value::Struct(st) = s.value() {
@@ -1235,12 +1379,12 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn nested_path_filter() -> IonResult<()> {
         let binary = encode_as_binary("{foo: {bar: 1, baz: 2}}");
         let result = read_filtered(&binary, &[PathFilter::fields(&["foo", "bar"])])?;
 
-        // Should produce a struct containing foo, which contains bar:1
         assert_eq!(result.len(), 1);
         let s = result.get(0).unwrap();
         if let Value::Struct(outer) = s.value() {
@@ -1258,8 +1402,10 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn wildcard_filter() -> IonResult<()> {
+        use crate::bytecode::path_filter::PathStep;
         let binary = encode_as_binary("{a: {name: 1}, b: {name: 2}}");
         let filters = [PathFilter::new(vec![
             PathStep::Wildcard,
@@ -1267,7 +1413,6 @@ mod tests {
         ])];
         let result = read_filtered(&binary, &filters)?;
 
-        // Should produce one struct with both a and b (each containing name)
         assert_eq!(result.len(), 1);
         let s = result.get(0).unwrap();
         if let Value::Struct(outer) = s.value() {
@@ -1289,8 +1434,10 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn index_filter() -> IonResult<()> {
+        use crate::bytecode::path_filter::PathStep;
         let binary = encode_as_binary("{items: [10, 20, 30]}");
         let filters = [PathFilter::new(vec![
             PathStep::Field("items".into()),
@@ -1303,7 +1450,6 @@ mod tests {
         if let Value::Struct(outer) = s.value() {
             let items = outer.get("items").unwrap();
             if let Value::List(seq) = items.value() {
-                // Only the first element should be present
                 assert_eq!(seq.len(), 1);
                 assert_eq!(seq.get(0).unwrap().value(), &Value::Int(10.into()));
             } else {
@@ -1315,6 +1461,7 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn multiple_registered_paths() -> IonResult<()> {
         let binary = encode_as_binary("{foo: 1, bar: 2, baz: 3}");
@@ -1334,21 +1481,18 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn no_match_empty_result() -> IonResult<()> {
         let binary = encode_as_binary("{foo: 1}");
         let result = read_filtered(&binary, &[PathFilter::field("missing")])?;
-
-        // No user values should be emitted (the struct is not in the result)
         assert_eq!(result.len(), 0);
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn symbol_table_interaction() -> IonResult<()> {
-        // The Ion binary encoder creates an LST before the data. This
-        // test verifies that field names are resolved correctly through
-        // the LST.
         let binary = encode_as_binary("{custom_field: 42}");
         let result = read_filtered(&binary, &[PathFilter::field("custom_field")])?;
 
@@ -1365,10 +1509,9 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn deep_nesting_with_skip() -> IonResult<()> {
-        // Filter (a) on {a: 1, b: {deeply: {nested: {large: "blob"}}}}
-        // The deeply nested struct should be skipped without descending.
         let binary = encode_as_binary("{a: 1, b: {deeply: {nested: {large: \"blob\"}}}}");
         let result = read_filtered(&binary, &[PathFilter::field("a")])?;
 
@@ -1384,32 +1527,27 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn empty_container_rewind() -> IonResult<()> {
-        // Filter (foo bar) on {foo: {baz: 1}}
-        // foo is on the path but bar is not found inside — foo struct
-        // should be rewound.
         let binary = encode_as_binary("{foo: {baz: 1}}");
         let result = read_filtered(&binary, &[PathFilter::fields(&["foo", "bar"])])?;
-
-        // No match — empty result
         assert_eq!(result.len(), 0);
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn top_level_scalar() -> IonResult<()> {
-        // Filter (foo) on input 42 — no struct to match against.
         let binary = encode_as_binary("42");
         let result = read_filtered(&binary, &[PathFilter::field("foo")])?;
-
         assert_eq!(result.len(), 0);
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn matched_container_value() -> IonResult<()> {
-        // Filter (foo) on {foo: [1, 2, 3]} — emits the entire list.
         let binary = encode_as_binary("{foo: [1, 2, 3]}");
         let result = read_filtered(&binary, &[PathFilter::field("foo")])?;
 
@@ -1428,9 +1566,9 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn duplicate_fields() -> IonResult<()> {
-        // Filter (foo) on {foo: 1, foo: 2} — both values should be emitted.
         let binary = encode_as_binary("{foo: 1, foo: 2}");
         let result = read_filtered(&binary, &[PathFilter::field("foo")])?;
 
@@ -1445,12 +1583,366 @@ mod tests {
         Ok(())
     }
 
+    #[allow(deprecated)]
     #[test]
     fn empty_input() -> IonResult<()> {
-        // Any filter on empty input produces only END_OF_INPUT.
         let binary: Vec<u8> = vec![0xE0, 0x01, 0x00, 0xEA]; // just IVM
         let result = read_filtered(&binary, &[PathFilter::field("foo")])?;
+        assert_eq!(result.len(), 0);
+        Ok(())
+    }
 
+    // ─── v2 API tests ────────────────────────────────────────────────
+
+    #[test]
+    fn v2_single_field() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: 1, bar: 2}");
+        let result = read_filtered_v2(&binary, &[PathQuery::field("foo")], false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 1);
+            assert_eq!(st.get("foo").unwrap().value(), &Value::Int(1.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_all_matches_everything() -> IonResult<()> {
+        let binary = encode_as_binary("1 \"hello\" true [1,2] {a:1}");
+        let result = read_filtered_v2(&binary, &[PathQuery::all()], false)?;
+        assert_eq!(result.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn v2_all_matches_top_level_scalars() -> IonResult<()> {
+        let binary = encode_as_binary("42");
+        let result = read_filtered_v2(&binary, &[PathQuery::all()], false)?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(0).unwrap().value(), &Value::Int(42.into()));
+        Ok(())
+    }
+
+    #[test]
+    fn v2_type_predicate_int() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: 1, bar: \"hello\"}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::Field("foo".into())),
+            Step::Match(Predicate::Type(IonType::Int)),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.get("foo").unwrap().value(), &Value::Int(1.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_type_predicate_rejects_wrong_type() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: \"hello\"}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::Field("foo".into())),
+            Step::Match(Predicate::Type(IonType::Int)),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+        // No match since "hello" is a string, not an int
+        assert_eq!(result.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn v2_not_match_is_null() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: null.int, bar: 1}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::AnyField),
+            Step::NotMatch(Predicate::IsNull),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 1);
+            assert_eq!(st.get("bar").unwrap().value(), &Value::Int(1.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_match_is_null() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: null.int, bar: 1}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::AnyField),
+            Step::Match(Predicate::IsNull),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 1);
+            assert_eq!(st.get("foo").unwrap().value(), &Value::Null(IonType::Int));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_has_annotation_predicate() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: abc::1, bar: 2}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::AnyField),
+            Step::Match(Predicate::HasAnnotation("abc".into())),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 1);
+            let foo = st.get("foo").unwrap();
+            assert_eq!(foo.value(), &Value::Int(1.into()));
+            let annotations: Vec<_> = foo.annotations().iter().collect();
+            assert_eq!(annotations[0].text(), Some("abc"));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_is_annotated_predicate() -> IonResult<()> {
+        let binary = encode_as_binary("abc::1 2 def::3");
+        let queries = [PathQuery::new(vec![Step::Match(Predicate::IsAnnotated)])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(0).unwrap().value(), &Value::Int(1.into()));
+        assert_eq!(result.get(1).unwrap().value(), &Value::Int(3.into()));
+        Ok(())
+    }
+
+    #[test]
+    fn v2_not_match_is_annotated() -> IonResult<()> {
+        let binary = encode_as_binary("abc::1 2 def::3");
+        let queries = [PathQuery::new(vec![Step::NotMatch(Predicate::IsAnnotated)])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(0).unwrap().value(), &Value::Int(2.into()));
+        Ok(())
+    }
+
+    #[test]
+    fn v2_any_index_selects_all_elements() -> IonResult<()> {
+        let binary = encode_as_binary("{items: [10, 20, 30]}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::Field("items".into())),
+            Step::Select(Select::AnyIndex),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            let items = st.get("items").unwrap();
+            if let Value::List(seq) = items.value() {
+                assert_eq!(seq.len(), 3);
+                assert_eq!(seq.get(0).unwrap().value(), &Value::Int(10.into()));
+                assert_eq!(seq.get(1).unwrap().value(), &Value::Int(20.into()));
+                assert_eq!(seq.get(2).unwrap().value(), &Value::Int(30.into()));
+            } else {
+                panic!("expected list");
+            }
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_any_field_selects_all_struct_fields() -> IonResult<()> {
+        let binary = encode_as_binary("{a: 1, b: 2, c: 3}");
+        let queries = [PathQuery::new(vec![Step::Select(Select::AnyField)])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 3);
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_conjunction_predicates() -> IonResult<()> {
+        let binary = encode_as_binary("{a: 1, b: null.int, c: \"hi\"}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::AnyField),
+            Step::Match(Predicate::Type(IonType::Int)),
+            Step::NotMatch(Predicate::IsNull),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 1);
+            assert_eq!(st.get("a").unwrap().value(), &Value::Int(1.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_leading_predicate() -> IonResult<()> {
+        // Leading predicate: only descend into annotated top-level values
+        let binary = encode_as_binary("abc::{x: 1} {x: 2}");
+        let queries = [PathQuery::new(vec![
+            Step::Match(Predicate::HasAnnotation("abc".into())),
+            Step::Select(Select::Field("x".into())),
+        ])];
+        let result = read_filtered_v2(&binary, &queries, false)?;
+
+        // Only the first struct (annotated "abc") should produce a match
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.get("x").unwrap().value(), &Value::Int(1.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_flatten_basic() -> IonResult<()> {
+        let binary = encode_as_binary("{a: {b: 1, c: 2}}");
+        let queries = [PathQuery::fields(&["a", "b"])];
+        let result = read_filtered_v2(&binary, &queries, true)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            // With flatten, intermediate struct 'a' is collapsed.
+            // 'b: 1' is emitted directly.
+            assert_eq!(st.len(), 1);
+            assert_eq!(st.get("b").unwrap().value(), &Value::Int(1.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_flatten_deep() -> IonResult<()> {
+        let binary = encode_as_binary("{a: {b: {c: 42}}}");
+        let queries = [PathQuery::fields(&["a", "b", "c"])];
+        let result = read_filtered_v2(&binary, &queries, true)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            assert_eq!(st.len(), 1);
+            assert_eq!(st.get("c").unwrap().value(), &Value::Int(42.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_flatten_no_intermediate() -> IonResult<()> {
+        let binary = encode_as_binary("{foo: 99}");
+        let queries = [PathQuery::field("foo")];
+        let result_flat = read_filtered_v2(&binary, &queries, true)?;
+        let result_noflat = read_filtered_v2(&binary, &queries, false)?;
+
+        // No intermediate struct to collapse — output should be same
+        assert_eq!(result_flat, result_noflat);
+        Ok(())
+    }
+
+    #[test]
+    fn v2_flatten_sequences_unchanged() -> IonResult<()> {
+        let binary = encode_as_binary("{items: [1, 2, 3]}");
+        let queries = [PathQuery::new(vec![
+            Step::Select(Select::Field("items".into())),
+            Step::Select(Select::AnyIndex),
+        ])];
+        let result_flat = read_filtered_v2(&binary, &queries, true)?;
+        let result_noflat = read_filtered_v2(&binary, &queries, false)?;
+
+        // Sequences cannot be flattened
+        assert_eq!(result_flat, result_noflat);
+        Ok(())
+    }
+
+    #[test]
+    fn v2_flatten_multi_depth() -> IonResult<()> {
+        let binary = encode_as_binary("{x: 1, a: {b: 2, c: {d: 3}}}");
+        let queries = [
+            PathQuery::field("x"),
+            PathQuery::fields(&["a", "b"]),
+            PathQuery::fields(&["a", "c", "d"]),
+        ];
+        let result = read_filtered_v2(&binary, &queries, true)?;
+
+        assert_eq!(result.len(), 1);
+        let s = result.get(0).unwrap();
+        if let Value::Struct(st) = s.value() {
+            // All terminal values placed directly in top-level struct
+            assert_eq!(st.get("x").unwrap().value(), &Value::Int(1.into()));
+            assert_eq!(st.get("b").unwrap().value(), &Value::Int(2.into()));
+            assert_eq!(st.get("d").unwrap().value(), &Value::Int(3.into()));
+        } else {
+            panic!("expected struct");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v2_validation_errors() {
+        // Select after scalar type predicate
+        let result = PathQuerySet::compile(
+            vec![PathQuery::new(vec![
+                Step::Match(Predicate::Type(IonType::Int)),
+                Step::Select(Select::Field("foo".into())),
+            ])],
+            false,
+        );
+        assert!(result.is_err());
+
+        // Struct navigation after List type predicate
+        let result = PathQuerySet::compile(
+            vec![PathQuery::new(vec![
+                Step::Match(Predicate::Type(IonType::List)),
+                Step::Select(Select::Field("foo".into())),
+            ])],
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn v2_empty_query_set_matches_nothing() -> IonResult<()> {
+        let binary = encode_as_binary("1 2 3");
+        let result = read_filtered_v2(&binary, &[], false)?;
         assert_eq!(result.len(), 0);
         Ok(())
     }
