@@ -192,6 +192,18 @@ fn bench_binary(c: &mut Criterion) {
         );
 
         group.bench_with_input(
+            BenchmarkId::new("bytecode_v3_nofilter", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_with_no_filter(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
             BenchmarkId::new(
                 "bytecode_v3_streaming_binary",
                 format!("{name} ({data_size}B)"),
@@ -674,6 +686,128 @@ fn bench_fma_common_filter(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_unified_binary(c: &mut Criterion) {
+    let test_cases = ["integers", "floats", "strings", "mixed", "nested_structs"];
+
+    let mut group = c.benchmark_group("unified_binary");
+    for name in &test_cases {
+        let data = generate_binary_data(name);
+        let data_size = data.len();
+
+        group.bench_with_input(
+            BenchmarkId::new("bytecode_v3", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result = ion_rs::bytecode::materialize::read_all_v3(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("unified_in_memory", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_unified_binary(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new(
+                "bytecode_v3_streaming_binary",
+                format!("{name} ({data_size}B)"),
+            ),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("unified_streaming", format!("{name} ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_unified_streaming_binary(data)
+                            .unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+    }
+
+    // Also test with service_log if available
+    let service_log_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("service_log_legacy.10n");
+    if service_log_path.exists() {
+        let data = std::fs::read(&service_log_path).unwrap();
+        let data_size = data.len();
+
+        group.bench_with_input(
+            BenchmarkId::new("bytecode_v3", format!("service_log ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result = ion_rs::bytecode::materialize::read_all_v3(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("unified_in_memory", format!("service_log ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_unified_binary(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new(
+                "bytecode_v3_streaming_binary",
+                format!("service_log ({data_size}B)"),
+            ),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("unified_streaming", format!("service_log ({data_size}B)")),
+            &data,
+            |b, data| {
+                b.iter(|| {
+                    let result =
+                        ion_rs::bytecode::materialize::read_all_v3_unified_streaming_binary(data)
+                            .unwrap();
+                    criterion::black_box(result);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_binary,
@@ -681,6 +815,7 @@ criterion_group!(
     bench_service_log_filtered,
     bench_binary_filtered,
     bench_text,
-    bench_fma_common_filter
+    bench_fma_common_filter,
+    bench_unified_binary
 );
 criterion_main!(benches);

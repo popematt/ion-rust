@@ -1,4 +1,5 @@
 pub mod constant_pool;
+pub mod filter_policy;
 pub mod generator;
 pub mod instruction;
 pub mod ion10;
@@ -9,6 +10,7 @@ pub mod reader;
 pub mod str_text10;
 pub mod streaming_ion10;
 pub mod text10;
+pub mod unified_binary_ion10;
 
 pub mod arena_reader;
 
