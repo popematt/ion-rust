@@ -175,64 +175,6 @@ fn arena_symbol_from_text(arena: &mut BumpArena, text: &str) -> Symbol {
     Symbol::owned(s)
 }
 
-/// Copies a Vec of Symbols into the arena and constructs a `Vec<Symbol>`
-/// backed by arena memory.
-#[inline]
-fn arena_symbol_vec(arena: &mut BumpArena, symbols: Vec<Symbol>) -> Vec<Symbol> {
-    let len = symbols.len();
-    if len == 0 {
-        return unsafe { Vec::from_raw_parts(std::ptr::NonNull::dangling().as_ptr(), 0, 0) };
-    }
-    let size = len * std::mem::size_of::<Symbol>();
-    let align = std::mem::align_of::<Symbol>();
-    let ptr = arena.alloc_raw(size, align) as *mut Symbol;
-    for (i, sym) in symbols.into_iter().enumerate() {
-        unsafe { ptr.add(i).write(sym) };
-    }
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
-}
-
-/// Copies a slice of Elements into the arena and constructs a `Vec<Element>`
-/// backed by arena memory. The source Vec is consumed without dropping its
-/// backing storage (we copy element by element into the arena).
-#[inline]
-fn arena_element_vec(arena: &mut BumpArena, elements: Vec<Element>) -> Vec<Element> {
-    let len = elements.len();
-    if len == 0 {
-        return unsafe { Vec::from_raw_parts(std::ptr::NonNull::dangling().as_ptr(), 0, 0) };
-    }
-    let size = len * std::mem::size_of::<Element>();
-    let align = std::mem::align_of::<Element>();
-    let ptr = arena.alloc_raw(size, align) as *mut Element;
-    // SAFETY: ptr is properly aligned and has space for `len` Elements.
-    // We write each element via ptr::write (no drop of uninitialized memory).
-    for (i, element) in elements.into_iter().enumerate() {
-        unsafe { ptr.add(i).write(element) };
-    }
-    // SAFETY: ptr points to `len` initialized Elements in the arena.
-    // capacity == len prevents growth. Drop is skipped on arena reset.
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
-}
-
-/// Copies a slice of (Symbol, Element) pairs into the arena and constructs
-/// a `Vec<(Symbol, Element)>` backed by arena memory.
-#[inline]
-fn arena_fields_vec(
-    arena: &mut BumpArena,
-    fields: Vec<(Symbol, Element)>,
-) -> Vec<(Symbol, Element)> {
-    let len = fields.len();
-    if len == 0 {
-        return unsafe { Vec::from_raw_parts(std::ptr::NonNull::dangling().as_ptr(), 0, 0) };
-    }
-    let size = len * std::mem::size_of::<(Symbol, Element)>();
-    let align = std::mem::align_of::<(Symbol, Element)>();
-    let ptr = arena.alloc_raw(size, align) as *mut (Symbol, Element);
-    for (i, field) in fields.into_iter().enumerate() {
-        unsafe { ptr.add(i).write(field) };
-    }
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
-}
 
 // ─── ArenaReader ───────────────────────────────────────────────────────
 
@@ -261,6 +203,13 @@ pub struct ArenaReader<G: BytecodeGenerator> {
     constant_pool: ConstantPool,
     first_local_constant: usize,
     arena: BumpArena,
+    /// Reusable scratch buffers for sequence children, indexed by depth.
+    /// Cleared (not freed) after each use so capacity is retained.
+    element_scratch: Vec<Vec<Element>>,
+    /// Reusable scratch buffers for struct fields, indexed by depth.
+    field_scratch: Vec<Vec<(Symbol, Element)>>,
+    /// Current container nesting depth (0 = top level).
+    depth: usize,
 }
 
 impl<G: BytecodeGenerator> ArenaReader<G> {
@@ -275,6 +224,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             constant_pool: ConstantPool::new(),
             first_local_constant: 0,
             arena: BumpArena::new(),
+            element_scratch: Vec::new(),
+            field_scratch: Vec::new(),
+            depth: 0,
         };
         reader.refill()?;
         Ok(reader)
@@ -488,10 +440,12 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             return Ok(Annotations::empty());
         }
 
-        // Resolve annotations
-        let mut symbols = Vec::with_capacity(count);
+        // Resolve annotations directly into arena memory.
+        let size = count * std::mem::size_of::<Symbol>();
+        let align = std::mem::align_of::<Symbol>();
+        let ptr = self.arena.alloc_raw(size, align) as *mut Symbol;
         let mut p = start;
-        for _ in 0..count {
+        for i in 0..count {
             let instr = Instruction::from_raw(self.bytecode[p]);
             p += 1;
             let data = instr.data();
@@ -499,13 +453,11 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                 op::ANNOTATION_SID => self.resolve_sid_arena(data as usize),
                 op::ANNOTATION_CP => match self.constant_pool.get(data) {
                     Constant::String(arc) => {
-                        // SAFETY: The constant pool is not truncated during
-                        // materialization. The pointer is valid until arena reset.
                         let ptr = arc as *const Arc<str>;
                         Symbol {
-                            text: crate::types::symbol::SymbolText::ArenaBorrowed(
-                                unsafe { SymbolTableRef::new(ptr) },
-                            ),
+                            text: crate::types::symbol::SymbolText::ArenaBorrowed(unsafe {
+                                SymbolTableRef::new(ptr)
+                            }),
                         }
                     }
                     _ => return IonResult::decoding_error("annotation CP entry is not a string"),
@@ -514,17 +466,14 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                     let position = self.bytecode[p];
                     p += 1;
                     let text = self.generator.read_text_ref(position, data)?;
-                    // SAFETY: Generator source is stable during materialization.
                     let text: &str = unsafe { &*(text as *const str) };
                     arena_symbol_from_text(&mut self.arena, text)
                 }
                 _ => return IonResult::decoding_error("expected annotation instruction"),
             };
-            symbols.push(symbol);
+            unsafe { ptr.add(i).write(symbol) };
         }
-
-        // Move symbols into arena-backed Vec so Drop is skipped.
-        let arena_vec = arena_symbol_vec(&mut self.arena, symbols);
+        let arena_vec = unsafe { Vec::from_raw_parts(ptr, count, count) };
         Ok(Annotations::new(arena_vec))
     }
 
@@ -645,9 +594,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                     // SAFETY: CP is stable during materialization.
                     let ptr = arc as *const Arc<str>;
                     Ok(Value::Symbol(Symbol {
-                        text: crate::types::symbol::SymbolText::ArenaBorrowed(
-                            unsafe { SymbolTableRef::new(ptr) },
-                        ),
+                        text: crate::types::symbol::SymbolText::ArenaBorrowed(unsafe {
+                            SymbolTableRef::new(ptr)
+                        }),
                     }))
                 }
                 _ => IonResult::decoding_error("CP entry is not String"),
@@ -731,7 +680,12 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
 
     /// Reads a sequence (list or sexp children) until END_CONTAINER.
     fn read_sequence_arena(&mut self) -> IonResult<Sequence> {
-        let mut elements = Vec::new();
+        let d = self.depth;
+        self.depth += 1;
+        if d >= self.element_scratch.len() {
+            self.element_scratch.resize_with(d + 1, Vec::new);
+        }
+        self.element_scratch[d].clear();
         loop {
             let peek = Instruction::from_raw(self.bytecode[self.pos]);
             if peek.operation() == op::END_CONTAINER {
@@ -741,16 +695,36 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             let annotations = self.read_annotations_arena()?;
             let instr = self.consume();
             let value = self.read_value_arena(instr)?;
-            elements.push(Element::new(annotations, value));
+            self.element_scratch[d].push(Element::new(annotations, value));
         }
-        // Move the Vec's contents into the arena so Drop is skipped.
-        let arena_vec = arena_element_vec(&mut self.arena, elements);
+        self.depth -= 1;
+        // Copy elements into arena memory, then clear the scratch buffer
+        // (retaining its heap capacity for reuse).
+        let scratch = &mut self.element_scratch[d];
+        let len = scratch.len();
+        if len == 0 {
+            return Ok(Sequence::from(unsafe {
+                Vec::from_raw_parts(std::ptr::NonNull::dangling().as_ptr(), 0, 0)
+            }));
+        }
+        let size = len * std::mem::size_of::<Element>();
+        let align = std::mem::align_of::<Element>();
+        let ptr = self.arena.alloc_raw(size, align) as *mut Element;
+        for (i, element) in scratch.drain(..).enumerate() {
+            unsafe { ptr.add(i).write(element) };
+        }
+        let arena_vec = unsafe { Vec::from_raw_parts(ptr, len, len) };
         Ok(Sequence::from(arena_vec))
     }
 
     /// Reads a struct (field name/value pairs) until END_CONTAINER.
     fn read_struct_arena(&mut self) -> IonResult<Struct> {
-        let mut fields: Vec<(Symbol, Element)> = Vec::new();
+        let d = self.depth;
+        self.depth += 1;
+        if d >= self.field_scratch.len() {
+            self.field_scratch.resize_with(d + 1, Vec::new);
+        }
+        self.field_scratch[d].clear();
         loop {
             let peek = Instruction::from_raw(self.bytecode[self.pos]);
             if peek.operation() == op::END_CONTAINER {
@@ -761,10 +735,23 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             let annotations = self.read_annotations_arena()?;
             let instr = self.consume();
             let value = self.read_value_arena(instr)?;
-            fields.push((field_name, Element::new(annotations, value)));
+            self.field_scratch[d].push((field_name, Element::new(annotations, value)));
         }
-        // Move the Vec's contents into the arena so Drop is skipped.
-        let arena_vec = arena_fields_vec(&mut self.arena, fields);
+        self.depth -= 1;
+        let scratch = &mut self.field_scratch[d];
+        let len = scratch.len();
+        if len == 0 {
+            return Ok(Struct::from_vec(unsafe {
+                Vec::from_raw_parts(std::ptr::NonNull::dangling().as_ptr(), 0, 0)
+            }));
+        }
+        let size = len * std::mem::size_of::<(Symbol, Element)>();
+        let align = std::mem::align_of::<(Symbol, Element)>();
+        let ptr = self.arena.alloc_raw(size, align) as *mut (Symbol, Element);
+        for (i, field) in scratch.drain(..).enumerate() {
+            unsafe { ptr.add(i).write(field) };
+        }
+        let arena_vec = unsafe { Vec::from_raw_parts(ptr, len, len) };
         Ok(Struct::from_vec(arena_vec))
     }
 
@@ -779,9 +766,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                     // SAFETY: CP is stable during materialization.
                     let ptr = arc as *const Arc<str>;
                     Ok(Symbol {
-                        text: crate::types::symbol::SymbolText::ArenaBorrowed(
-                            unsafe { SymbolTableRef::new(ptr) },
-                        ),
+                        text: crate::types::symbol::SymbolText::ArenaBorrowed(unsafe {
+                            SymbolTableRef::new(ptr)
+                        }),
                     })
                 }
                 _ => IonResult::decoding_error("field name CP entry is not a string"),
