@@ -18,7 +18,7 @@ use memchr::memchr2;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::instr;
+use crate::bytecode::instruction::{instr, op, Instruction};
 use crate::result::IonFailure;
 use crate::{Decimal, Int, IonResult, Timestamp, UInt};
 
@@ -35,14 +35,6 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
     "$ion_shared_symbol_table",
 ];
 
-/// Result of parsing a symbol-like token (identifier or quoted symbol)
-/// that may be a SID reference (`$N`) or a text symbol.
-enum SymbolToken {
-    /// A text symbol (regular identifier or quoted symbol).
-    Text(Arc<str>),
-    /// A SID reference (`$N` where N is all digits).
-    Sid(u32),
-}
 
 /// A bytecode generator optimized for in-memory UTF-8 Ion 1.0 text.
 ///
@@ -73,6 +65,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// Skips only whitespace characters (no comments). Returns true if there
     /// are remaining bytes, false if EOF. Used inside lob literals where
     /// `//` is valid base64 rather than a comment delimiter.
+    #[inline]
     fn skip_whitespace_only(&mut self) -> bool {
         let bytes = self.source.as_bytes();
         while self.position < bytes.len() {
@@ -86,6 +79,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     /// Skips whitespace and comments. Returns true if there is more
     /// content to parse.
+    #[inline]
     fn skip_whitespace_and_comments(&mut self) -> bool {
         let bytes = self.source.as_bytes();
         loop {
@@ -172,22 +166,32 @@ impl<'a> StrTextIon10Generator<'a> {
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
 
-        // Collect annotations
-        let mut annotations: Vec<SymbolToken> = Vec::new();
+        // Emit annotations directly, but track the first one for LST detection.
+        let ann_start_pos = destination.len();
+        let mut ann_count = 0usize;
+        let mut first_ann_text: Option<&str> = None;
         loop {
             if !self.skip_whitespace_and_comments() {
                 return IonResult::decoding_error("expected value after annotations");
             }
-            if let Some((token, after_colons)) = self.try_parse_annotation()? {
-                annotations.push(token);
-                self.position = after_colons;
-            } else {
+            if !self.try_emit_annotation(destination, constant_pool)? {
                 break;
             }
+            if ann_count == 0 {
+                // Peek at what we just emitted to extract text for LST check.
+                let emitted = destination[ann_start_pos];
+                let instr_raw = Instruction::from_raw(emitted);
+                if instr_raw.operation() == op::ANNOTATION_REF {
+                    let length = instr_raw.data() as usize;
+                    let position = destination[ann_start_pos + 1] as usize;
+                    first_ann_text = Some(&self.source[position..position + length]);
+                }
+            }
+            ann_count += 1;
         }
 
         // Check for IVM: `$ion_1_0` at top-level with no annotations
-        if annotations.is_empty() {
+        if ann_count == 0 {
             let pos = self.position;
             if pos + 8 <= bytes.len() && &bytes[pos..pos + 8] == b"$ion_1_0" {
                 let after = pos + 8;
@@ -195,7 +199,6 @@ impl<'a> StrTextIon10Generator<'a> {
                     self.position = after;
                     let version_data = 1u32 << 8;
                     destination.push(instr::IVM | version_data);
-                    // Reset symbol table
                     self.symbol_table =
                         SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
                     return Ok(());
@@ -204,148 +207,24 @@ impl<'a> StrTextIon10Generator<'a> {
         }
 
         // Check for LST: `$ion_symbol_table::{ ... }`
-        if annotations.len() == 1
-            && matches!(&annotations[0], SymbolToken::Text(t) if t.as_ref() == "$ion_symbol_table")
+        if ann_count == 1
+            && first_ann_text == Some("$ion_symbol_table")
             && self.position < bytes.len()
             && bytes[self.position] == b'{'
         {
+            // Remove the annotation bytecode we just emitted — LST is a system value.
+            destination.truncate(ann_start_pos);
             self.parse_lst(destination, constant_pool)?;
             return Ok(());
-        }
-
-        // Emit annotations
-        for ann in &annotations {
-            match ann {
-                SymbolToken::Text(text) => {
-                    let idx = constant_pool.add(Constant::String(Arc::clone(text)));
-                    destination.push(instr::ANNOTATION_CP | idx);
-                }
-                SymbolToken::Sid(sid) => {
-                    destination.push(instr::ANNOTATION_SID | sid);
-                }
-            }
         }
 
         // Parse the value
         self.emit_value(destination, constant_pool)
     }
 
-    /// Tries to parse an annotation at the current position.
-    /// Returns `Some((token, position_after_colons))` if found.
-    fn try_parse_annotation(&self) -> IonResult<Option<(SymbolToken, usize)>> {
-        let bytes = self.source.as_bytes();
-        let start = self.position;
-        if start >= bytes.len() {
-            return Ok(None);
-        }
-        let b = bytes[start];
-
-        let (token, token_end) = if b == b'\'' {
-            // Quoted symbol — but NOT long string (''')
-            if start + 2 < bytes.len() && bytes[start + 1] == b'\'' && bytes[start + 2] == b'\'' {
-                return Ok(None); // Long string, not annotation
-            }
-            let mut i = start + 1;
-            let mut has_escapes = false;
-            while i < bytes.len() && bytes[i] != b'\'' {
-                if bytes[i] == b'\\' {
-                    has_escapes = true;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            if i >= bytes.len() {
-                return Ok(None);
-            }
-            let text_end = i;
-            i += 1; // skip closing '
-            let text = if has_escapes {
-                let decoded = decode_escape_sequences(&bytes[start + 1..text_end])?;
-                Arc::from(decoded.as_str())
-            } else {
-                Arc::from(&self.source[start + 1..text_end])
-            };
-            (SymbolToken::Text(text), i)
-        } else if is_identifier_start(b) {
-            let mut i = start + 1;
-            while i < bytes.len() && is_identifier_continue(bytes[i]) {
-                i += 1;
-            }
-            let text = &self.source[start..i];
-            let token = if let Some(sid) = try_parse_sid_from_text(text) {
-                SymbolToken::Sid(sid)
-            } else {
-                SymbolToken::Text(Arc::from(text))
-            };
-            (token, i)
-        } else {
-            return Ok(None);
-        };
-
-        // Check for :: after the token (with possible whitespace)
-        let mut i = token_end;
-        while i < bytes.len()
-            && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C')
-        {
-            i += 1;
-        }
-        if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':' {
-            let mut after = i + 2;
-            // Skip whitespace and comments after ::
-            while after < bytes.len()
-                && matches!(
-                    bytes[after],
-                    b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C'
-                )
-            {
-                after += 1;
-            }
-            // Also skip comments after ::
-            while after < bytes.len() && bytes[after] == b'/' {
-                if after + 1 < bytes.len() && bytes[after + 1] == b'/' {
-                    after += 2;
-                    while after < bytes.len() && bytes[after] != b'\n' && bytes[after] != b'\r' {
-                        after += 1;
-                    }
-                    if after < bytes.len() {
-                        if bytes[after] == b'\r' {
-                            after += 1;
-                            if after < bytes.len() && bytes[after] == b'\n' {
-                                after += 1;
-                            }
-                        } else {
-                            after += 1;
-                        }
-                    }
-                } else if after + 1 < bytes.len() && bytes[after + 1] == b'*' {
-                    after += 2;
-                    while after + 1 < bytes.len() {
-                        if bytes[after] == b'*' && bytes[after + 1] == b'/' {
-                            after += 2;
-                            break;
-                        }
-                        after += 1;
-                    }
-                } else {
-                    break;
-                }
-                while after < bytes.len()
-                    && matches!(
-                        bytes[after],
-                        b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C'
-                    )
-                {
-                    after += 1;
-                }
-            }
-            Ok(Some((token, after)))
-        } else {
-            Ok(None)
-        }
-    }
 
     /// Emits bytecode for a value at the current position.
+    #[inline]
     fn emit_value(
         &mut self,
         destination: &mut Vec<u32>,
@@ -377,6 +256,7 @@ impl<'a> StrTextIon10Generator<'a> {
     }
 
     /// Emits an annotated value (annotations + value).
+    #[inline]
     fn emit_annotated_value(
         &mut self,
         destination: &mut Vec<u32>,
@@ -386,22 +266,149 @@ impl<'a> StrTextIon10Generator<'a> {
             if !self.skip_whitespace_and_comments() {
                 return IonResult::decoding_error("expected value");
             }
-            if let Some((token, after)) = self.try_parse_annotation()? {
-                match token {
-                    SymbolToken::Text(text) => {
-                        let idx = constant_pool.add(Constant::String(text));
-                        destination.push(instr::ANNOTATION_CP | idx);
-                    }
-                    SymbolToken::Sid(sid) => {
-                        destination.push(instr::ANNOTATION_SID | sid);
-                    }
-                }
-                self.position = after;
-            } else {
+            if !self.try_emit_annotation(destination, constant_pool)? {
                 break;
             }
         }
         self.emit_value(destination, constant_pool)
+    }
+
+    /// Tries to parse an annotation at the current position and emit it
+    /// directly as bytecode. Returns true if an annotation was emitted.
+    #[inline]
+    fn try_emit_annotation(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<bool> {
+        let bytes = self.source.as_bytes();
+        let start = self.position;
+        if start >= bytes.len() {
+            return Ok(false);
+        }
+        let b = bytes[start];
+
+        enum TokenKind {
+            Quoted { has_escapes: bool, text_start: usize, text_end: usize },
+            Identifier { end: usize },
+        }
+
+        let (kind, token_end) = if b == b'\'' {
+            if start + 2 < bytes.len() && bytes[start + 1] == b'\'' && bytes[start + 2] == b'\'' {
+                return Ok(false);
+            }
+            let mut i = start + 1;
+            let mut has_escapes = false;
+            while i < bytes.len() && bytes[i] != b'\'' {
+                if bytes[i] == b'\\' {
+                    has_escapes = true;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i >= bytes.len() {
+                return Ok(false);
+            }
+            let text_end = i;
+            i += 1;
+            (TokenKind::Quoted { has_escapes, text_start: start + 1, text_end }, i)
+        } else if is_identifier_start(b) {
+            let mut i = start + 1;
+            while i < bytes.len() && is_identifier_continue(bytes[i]) {
+                i += 1;
+            }
+            (TokenKind::Identifier { end: i }, i)
+        } else {
+            return Ok(false);
+        };
+
+        // Check for :: BEFORE allocating anything.
+        let mut i = token_end;
+        while i < bytes.len()
+            && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C')
+        {
+            i += 1;
+        }
+        if i + 1 >= bytes.len() || bytes[i] != b':' || bytes[i + 1] != b':' {
+            return Ok(false);
+        }
+
+        // Confirmed annotation — emit directly as bytecode.
+        match kind {
+            TokenKind::Quoted { has_escapes, text_start, text_end } => {
+                if has_escapes {
+                    let decoded = decode_escape_sequences(&bytes[text_start..text_end])?;
+                    let arc = Arc::from(decoded.as_str());
+                    let idx = constant_pool.add(Constant::String(arc));
+                    destination.push(instr::ANNOTATION_CP | idx);
+                } else {
+                    let length = (text_end - text_start) as u32;
+                    destination.push(instr::ANNOTATION_REF | length);
+                    destination.push(text_start as u32);
+                }
+            }
+            TokenKind::Identifier { end } => {
+                let text = &self.source[start..end];
+                if let Some(sid) = try_parse_sid_from_text(text) {
+                    destination.push(instr::ANNOTATION_SID | sid);
+                } else {
+                    let length = (end - start) as u32;
+                    destination.push(instr::ANNOTATION_REF | length);
+                    destination.push(start as u32);
+                }
+            }
+        }
+
+        // Skip whitespace and comments after ::
+        let mut after = i + 2;
+        while after < bytes.len()
+            && matches!(
+                bytes[after],
+                b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C'
+            )
+        {
+            after += 1;
+        }
+        while after < bytes.len() && bytes[after] == b'/' {
+            if after + 1 < bytes.len() && bytes[after + 1] == b'/' {
+                after += 2;
+                while after < bytes.len() && bytes[after] != b'\n' && bytes[after] != b'\r' {
+                    after += 1;
+                }
+                if after < bytes.len() {
+                    if bytes[after] == b'\r' {
+                        after += 1;
+                        if after < bytes.len() && bytes[after] == b'\n' {
+                            after += 1;
+                        }
+                    } else {
+                        after += 1;
+                    }
+                }
+            } else if after + 1 < bytes.len() && bytes[after + 1] == b'*' {
+                after += 2;
+                while after + 1 < bytes.len() {
+                    if bytes[after] == b'*' && bytes[after + 1] == b'/' {
+                        after += 2;
+                        break;
+                    }
+                    after += 1;
+                }
+            } else {
+                break;
+            }
+            while after < bytes.len()
+                && matches!(
+                    bytes[after],
+                    b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C'
+                )
+            {
+                after += 1;
+            }
+        }
+        self.position = after;
+        Ok(true)
     }
 
     // ─── Scalar Parsing ──────────────────────────────────────────────
@@ -466,9 +473,9 @@ impl<'a> StrTextIon10Generator<'a> {
         } else {
             // It's an identifier (symbol value)
             self.position = i;
-            let text = &self.source[start..i];
-            let idx = constant_pool.add(Constant::String(Arc::from(text)));
-            destination.push(instr::SYMBOL_CP | idx);
+            let length = (i - start) as u32;
+            destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
+            destination.push(start as u32);
             Ok(())
         }
     }
@@ -515,10 +522,11 @@ impl<'a> StrTextIon10Generator<'a> {
         }
     }
 
+    #[inline]
     fn parse_symbol_value(
         &mut self,
         destination: &mut Vec<u32>,
-        constant_pool: &mut ConstantPool,
+        _constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
         let start = self.position;
@@ -531,8 +539,9 @@ impl<'a> StrTextIon10Generator<'a> {
         if let Some(sid) = try_parse_sid_from_text(text) {
             destination.push(instr::SYMBOL_SID | sid);
         } else {
-            let idx = constant_pool.add(Constant::String(Arc::from(text)));
-            destination.push(instr::SYMBOL_CP | idx);
+            let length = (i - start) as u32;
+            destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
+            destination.push(start as u32);
         }
         Ok(())
     }
@@ -621,12 +630,12 @@ impl<'a> StrTextIon10Generator<'a> {
             match memchr2(b'\'', b'\\', search_slice) {
                 Some(offset) => {
                     if search_slice[offset] == b'\'' {
-                        // No escapes
+                        // No escapes — emit SYMBOL_REF
                         let content_end = start + offset;
                         self.position = content_end + 1;
-                        let text = &self.source[start..content_end];
-                        let idx = constant_pool.add(Constant::String(Arc::from(text)));
-                        destination.push(instr::SYMBOL_CP | idx);
+                        let length = (content_end - start) as u32;
+                        destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
+                        destination.push(start as u32);
                         Ok(())
                     } else {
                         // Has escapes
@@ -817,6 +826,7 @@ impl<'a> StrTextIon10Generator<'a> {
         self.parse_number_with_sign(false, destination, constant_pool)
     }
 
+    #[inline]
     fn parse_number_with_sign(
         &mut self,
         is_negative: bool,
@@ -922,11 +932,9 @@ impl<'a> StrTextIon10Generator<'a> {
         if has_dash_after_4digits || has_t {
             let ts_end = self.scan_timestamp_end(start);
             self.position = ts_end;
-            // Parse directly from source bytes without allocation
-            let ts_bytes = self.source[start..ts_end].as_bytes();
-            let ts = parse_timestamp_direct(ts_bytes)?;
-            let idx = constant_pool.add(Constant::Timestamp(Arc::new(ts)));
-            destination.push(instr::TIMESTAMP_CP | idx);
+            let length = (ts_end - start) as u32;
+            destination.push(instr::TIMESTAMP_REF | (length & 0x003F_FFFF));
+            destination.push(start as u32);
             return Ok(());
         }
 
@@ -967,32 +975,29 @@ impl<'a> StrTextIon10Generator<'a> {
             // Decimal
             let slice = &self.source[start..i];
             if !slice.contains('_') {
-                // Fast path: parse directly without allocation
-                let dec = if is_negative {
-                    let mut buf = String::with_capacity(slice.len() + 1);
-                    buf.push('-');
-                    buf.push_str(slice);
-                    parse_text_decimal(&buf)?
-                } else {
-                    parse_text_decimal(slice)?
-                };
-                let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
-                destination.push(instr::DECIMAL_CP | idx);
+                // No underscores — emit DECIMAL_REF (include sign if negative)
+                let ref_start = if is_negative { start - 1 } else { start };
+                let length = (i - ref_start) as u32;
+                destination.push(instr::DECIMAL_REF | (length & 0x003F_FFFF));
+                destination.push(ref_start as u32);
             } else {
-                let text = self.collect_number_text(start, i, is_negative);
-                let dec = parse_text_decimal(&text)?;
-                let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
-                destination.push(instr::DECIMAL_CP | idx);
+                // Has underscores — still use REF; materializer handles stripping
+                let ref_start = if is_negative { start - 1 } else { start };
+                let length = (i - ref_start) as u32;
+                destination.push(instr::DECIMAL_REF | (length & 0x003F_FFFF));
+                destination.push(ref_start as u32);
             }
         } else {
             // Integer — try direct parse fast path
             let slice = &self.source[start..i];
             if !slice.contains('_') {
-                // Fast path: no underscores, parse directly without allocation
                 self.emit_int_from_slice(slice, is_negative, destination, constant_pool)?;
             } else {
-                let text = self.collect_number_text(start, i, is_negative);
-                self.emit_parsed_int(&text, destination, constant_pool)?;
+                // Has underscores — use INT_REF; materializer handles stripping
+                let ref_start = if is_negative { start - 1 } else { start };
+                let ref_len = (i - ref_start) as u32;
+                destination.push(instr::INT_REF | (ref_len & 0x003F_FFFF));
+                destination.push(ref_start as u32);
             }
         }
         Ok(())
@@ -1030,39 +1035,39 @@ impl<'a> StrTextIon10Generator<'a> {
         &mut self,
         is_negative: bool,
         destination: &mut Vec<u32>,
-        constant_pool: &mut ConstantPool,
+        _constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
+        let ref_start = if is_negative {
+            self.position - 1 // include the '-'
+        } else {
+            self.position // starts at '0'
+        };
         self.position += 2; // skip 0x
-        let start = self.position;
         while self.position < bytes.len()
             && (bytes[self.position].is_ascii_hexdigit() || bytes[self.position] == b'_')
         {
             self.position += 1;
         }
-        let hex_slice = &bytes[start..self.position];
-        let mut text = String::with_capacity(hex_slice.len() + 3);
-        if is_negative {
-            text.push('-');
-        }
-        text.push_str("0x");
-        for &b in hex_slice {
-            if b != b'_' {
-                text.push(b as char);
-            }
-        }
-        self.emit_parsed_int(&text, destination, constant_pool)
+        let ref_len = (self.position - ref_start) as u32;
+        destination.push(instr::INT_REF | (ref_len & 0x003F_FFFF));
+        destination.push(ref_start as u32);
+        Ok(())
     }
 
     fn parse_binary_int(
         &mut self,
         is_negative: bool,
         destination: &mut Vec<u32>,
-        constant_pool: &mut ConstantPool,
+        _constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
+        let ref_start = if is_negative {
+            self.position - 1 // include the '-'
+        } else {
+            self.position // starts at '0'
+        };
         self.position += 2; // skip 0b
-        let start = self.position;
         while self.position < bytes.len()
             && (bytes[self.position] == b'0'
                 || bytes[self.position] == b'1'
@@ -1070,22 +1075,9 @@ impl<'a> StrTextIon10Generator<'a> {
         {
             self.position += 1;
         }
-        let bin_slice = &bytes[start..self.position];
-        let mut magnitude: u128 = 0;
-        for &b in bin_slice {
-            if b != b'_' {
-                magnitude = magnitude
-                    .checked_shl(1)
-                    .ok_or_else(|| crate::IonError::decoding_error("binary integer overflow"))?
-                    | (b - b'0') as u128;
-            }
-        }
-        let value: i128 = if is_negative {
-            -(magnitude as i128)
-        } else {
-            magnitude as i128
-        };
-        emit_i128_int(value, destination, constant_pool);
+        let ref_len = (self.position - ref_start) as u32;
+        destination.push(instr::INT_REF | (ref_len & 0x003F_FFFF));
+        destination.push(ref_start as u32);
         Ok(())
     }
 
@@ -1103,38 +1095,19 @@ impl<'a> StrTextIon10Generator<'a> {
             emit_i64_int(v, destination);
             return Ok(());
         }
-        // Fallback: need to build a string for i128/BigInt parsing
-        let text = if is_negative {
-            let mut s = String::with_capacity(slice.len() + 1);
-            s.push('-');
-            s.push_str(slice);
-            s
+        // Fallback for large integers: use INT_REF to defer parsing
+        let ref_start = if is_negative {
+            // slice starts after the '-', so ref includes it
+            (slice.as_ptr() as usize - self.source.as_ptr() as usize) - 1
         } else {
-            slice.to_string()
+            slice.as_ptr() as usize - self.source.as_ptr() as usize
         };
-        self.emit_parsed_int(&text, destination, constant_pool)
-    }
-
-    fn emit_parsed_int(
-        &self,
-        text: &str,
-        destination: &mut Vec<u32>,
-        constant_pool: &mut ConstantPool,
-    ) -> IonResult<()> {
-        if let Ok(v) = text.parse::<i64>() {
-            emit_i64_int(v, destination);
-            return Ok(());
-        }
-        if let Ok(v) = parse_i128(text) {
-            emit_i128_int(v, destination, constant_pool);
-            return Ok(());
-        }
-        // Arbitrary-precision fallback for integers exceeding i128
-        let big_int = parse_big_int(text)?;
-        let idx = constant_pool.add(Constant::BigInt(Arc::new(big_int)));
-        destination.push(instr::INT_CP | idx);
+        let ref_len = if is_negative { slice.len() + 1 } else { slice.len() };
+        destination.push(instr::INT_REF | (ref_len as u32 & 0x003F_FFFF));
+        destination.push(ref_start as u32);
         Ok(())
     }
+
 
     // ─── Container Parsing ───────────────────────────────────────────
 
@@ -1205,23 +1178,11 @@ impl<'a> StrTextIon10Generator<'a> {
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
-        // Handle annotations (same logic as emit_annotated_value)
         loop {
             if !self.skip_whitespace_and_comments() {
                 return IonResult::decoding_error("expected value");
             }
-            if let Some((token, after)) = self.try_parse_annotation()? {
-                match token {
-                    SymbolToken::Text(text) => {
-                        let idx = constant_pool.add(Constant::String(text));
-                        destination.push(instr::ANNOTATION_CP | idx);
-                    }
-                    SymbolToken::Sid(sid) => {
-                        destination.push(instr::ANNOTATION_SID | sid);
-                    }
-                }
-                self.position = after;
-            } else {
+            if !self.try_emit_annotation(destination, constant_pool)? {
                 break;
             }
         }
@@ -1978,17 +1939,35 @@ impl<'a> BytecodeGenerator for StrTextIon10Generator<'a> {
         Ok(())
     }
 
-    fn read_int_ref(&self, _position: u32, _length: u32) -> IonResult<Int> {
-        // Text integers are parsed eagerly
-        IonResult::decoding_error("read_int_ref not supported for str text generator")
+    fn read_int_ref(&self, position: u32, length: u32) -> IonResult<Int> {
+        let start = position as usize;
+        let end = start + length as usize;
+        let text = &self.source[start..end];
+        let clean = if text.contains('_') {
+            std::borrow::Cow::Owned(text.chars().filter(|&c| c != '_').collect::<String>())
+        } else {
+            std::borrow::Cow::Borrowed(text)
+        };
+        parse_big_int(&clean)
     }
 
-    fn read_decimal_ref(&self, _position: u32, _length: u32) -> IonResult<Decimal> {
-        IonResult::decoding_error("read_decimal_ref not supported for str text generator")
+    fn read_decimal_ref(&self, position: u32, length: u32) -> IonResult<Decimal> {
+        let start = position as usize;
+        let end = start + length as usize;
+        let text = &self.source[start..end];
+        if text.contains('_') {
+            let stripped: String = text.chars().filter(|&c| c != '_').collect();
+            parse_text_decimal(&stripped)
+        } else {
+            parse_text_decimal(text)
+        }
     }
 
-    fn read_timestamp_ref(&self, _position: u32, _length: u32) -> IonResult<Timestamp> {
-        IonResult::decoding_error("read_timestamp_ref not supported for str text generator")
+    fn read_timestamp_ref(&self, position: u32, length: u32) -> IonResult<Timestamp> {
+        let start = position as usize;
+        let end = start + length as usize;
+        let text = self.source[start..end].as_bytes();
+        parse_timestamp_direct(text)
     }
 
     fn read_text_ref(&self, position: u32, length: u32) -> IonResult<&str> {
@@ -2014,6 +1993,7 @@ impl<'a> BytecodeGenerator for StrTextIon10Generator<'a> {
 // ─── Helper Functions ────────────────────────────────────────────────
 
 /// Returns true if the byte terminates an undelimited value.
+#[inline]
 fn is_value_terminator(b: u8) -> bool {
     matches!(
         b,
@@ -2022,11 +2002,13 @@ fn is_value_terminator(b: u8) -> bool {
 }
 
 /// Returns true if the byte can start an identifier.
+#[inline]
 fn is_identifier_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_' || b == b'$'
 }
 
 /// Returns true if the byte can continue an identifier.
+#[inline]
 fn is_identifier_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
@@ -2091,15 +2073,6 @@ fn emit_i64_int(v: i64, destination: &mut Vec<u32>) {
 }
 
 /// Emits an i128 value as the appropriate int instruction.
-fn emit_i128_int(v: i128, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
-    if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
-        emit_i64_int(v as i64, destination);
-    } else {
-        let int_value = Int::from(v);
-        let idx = constant_pool.add(Constant::BigInt(Arc::new(int_value)));
-        destination.push(instr::INT_CP | idx);
-    }
-}
 
 /// Parses an integer from a digit-only `&str` slice (no underscores) with an
 /// external sign flag. Returns `None` if the value overflows i64.
@@ -2121,21 +2094,6 @@ fn parse_i64_no_alloc(slice: &str, is_negative: bool) -> Option<i64> {
     Some(result)
 }
 
-/// Parses an integer string that may have 0x prefix.
-fn parse_i128(text: &str) -> Result<i128, std::num::ParseIntError> {
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        i128::from_str_radix(hex, 16)
-    } else if let Some(hex) = text
-        .strip_prefix("-0x")
-        .or_else(|| text.strip_prefix("-0X"))
-    {
-        let magnitude =
-            u128::from_str_radix(hex, 16).map_err(|_| "x".parse::<i128>().unwrap_err())?;
-        Ok(-(magnitude as i128))
-    } else {
-        text.parse::<i128>()
-    }
-}
 
 /// Parses an arbitrary-precision integer string that may have a sign and/or 0x prefix.
 /// Used as a fallback when the value exceeds i128.
@@ -2148,6 +2106,13 @@ fn parse_big_int(text: &str) -> IonResult<Int> {
             .or_else(|| text.strip_prefix("-0X"))
         {
             (true, hex, 16)
+        } else if let Some(bin) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+            (false, bin, 2)
+        } else if let Some(bin) = text
+            .strip_prefix("-0b")
+            .or_else(|| text.strip_prefix("-0B"))
+        {
+            (true, bin, 2)
         } else if let Some(digits) = text.strip_prefix('-') {
             (true, digits, 10)
         } else {
