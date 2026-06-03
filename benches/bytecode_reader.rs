@@ -261,6 +261,14 @@ fn bench_service_log(c: &mut Criterion) {
     );
 
     group.bench_with_input(
+        BenchmarkId::new("current_no_drop", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter_with_large_drop(|| Element::read_all(data.as_slice()).unwrap());
+        },
+    );
+
+    group.bench_with_input(
         BenchmarkId::new("bytecode_v3", format!("{data_size}B")),
         &data,
         |b, data| {
@@ -272,6 +280,14 @@ fn bench_service_log(c: &mut Criterion) {
     );
 
     group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_no_drop", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter_with_large_drop(|| ion_rs::bytecode::materialize::read_all_v3(data).unwrap());
+        },
+    );
+
+    group.bench_with_input(
         BenchmarkId::new("bytecode_v3_streaming_binary", format!("{data_size}B")),
         &data,
         |b, data| {
@@ -279,6 +295,16 @@ fn bench_service_log(c: &mut Criterion) {
                 let result =
                     ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
                 criterion::black_box(result);
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_streaming_binary_no_drop", format!("{data_size}B")),
+        &data,
+        |b, data| {
+            b.iter_with_large_drop(|| {
+                ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap()
             });
         },
     );
@@ -610,12 +636,30 @@ fn bench_fma_common_filter(c: &mut Criterion) {
     );
 
     group.bench_with_input(
+        BenchmarkId::new("current_text_no_drop", format!("{text_size}B")),
+        &text_data,
+        |b, data| {
+            b.iter_with_large_drop(|| Element::read_all(data.as_slice()).unwrap());
+        },
+    );
+
+    group.bench_with_input(
         BenchmarkId::new("bytecode_v3_str", format!("{text_size}B")),
         &text_data,
         |b, data| {
             b.iter(|| {
                 let result = ion_rs::bytecode::materialize::read_all_v3_str_text(data).unwrap();
                 criterion::black_box(result);
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_str_no_drop", format!("{text_size}B")),
+        &text_data,
+        |b, data| {
+            b.iter_with_large_drop(|| {
+                ion_rs::bytecode::materialize::read_all_v3_str_text(data).unwrap()
             });
         },
     );
@@ -633,6 +677,16 @@ fn bench_fma_common_filter(c: &mut Criterion) {
     );
 
     group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_streaming_no_drop", format!("{text_size}B")),
+        &text_data,
+        |b, data| {
+            b.iter_with_large_drop(|| {
+                ion_rs::bytecode::materialize::read_all_v3_streaming_text(data).unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
         BenchmarkId::new("current_binary", format!("{binary_size}B")),
         &binary_data,
         |b, data| {
@@ -640,6 +694,14 @@ fn bench_fma_common_filter(c: &mut Criterion) {
                 let result = Element::read_all(data.as_slice()).unwrap();
                 criterion::black_box(result);
             });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("current_binary_no_drop", format!("{binary_size}B")),
+        &binary_data,
+        |b, data| {
+            b.iter_with_large_drop(|| Element::read_all(data.as_slice()).unwrap());
         },
     );
 
@@ -655,6 +717,14 @@ fn bench_fma_common_filter(c: &mut Criterion) {
     );
 
     group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_binary_no_drop", format!("{binary_size}B")),
+        &binary_data,
+        |b, data| {
+            b.iter_with_large_drop(|| ion_rs::bytecode::materialize::read_all_v3(data).unwrap());
+        },
+    );
+
+    group.bench_with_input(
         BenchmarkId::new("bytecode_v3_streaming_binary", format!("{binary_size}B")),
         &binary_data,
         |b, data| {
@@ -662,6 +732,16 @@ fn bench_fma_common_filter(c: &mut Criterion) {
                 let result =
                     ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap();
                 criterion::black_box(result);
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("bytecode_v3_streaming_binary_no_drop", format!("{binary_size}B")),
+        &binary_data,
+        |b, data| {
+            b.iter_with_large_drop(|| {
+                ion_rs::bytecode::materialize::read_all_v3_streaming_binary(data).unwrap()
             });
         },
     );
