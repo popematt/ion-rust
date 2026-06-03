@@ -4,6 +4,8 @@ pub mod generator;
 pub mod instruction;
 pub mod ion10;
 pub mod materialize;
+#[cfg(feature = "parallel")]
+pub mod parallel_materialize;
 pub mod path_filter;
 pub mod path_filter_generator;
 pub mod reader;
