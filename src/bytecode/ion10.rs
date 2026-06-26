@@ -11,8 +11,8 @@ use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::filter_policy::{FilterPolicy, NoFilter};
 use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::instr;
-use crate::result::IonFailure;
-use crate::{Decimal, Int, IonResult, Timestamp, UInt};
+use crate::result::{DecodingError, IonFailure};
+use crate::{Decimal, Int, IonError, IonResult, Timestamp, UInt};
 
 /// Ion 1.0 binary IVM bytes.
 const IVM_BYTES: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
@@ -893,15 +893,16 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator
     }
 
     fn read_decimal_ref(&self, position: u32, length: u32) -> IonResult<Decimal> {
+        let start = position as usize;
         if length == 0 {
-            // Length 0 means the decimal value is 0d0
             return Ok(Decimal::new(0i32, 0i64));
         }
 
-        let start = position as usize;
         let end = start + length as usize;
         if end > self.source().len() {
-            return IonResult::decoding_error("decimal reference out of bounds");
+            return IonResult::decoding_error(format!(
+                "at offset {start}: decimal reference out of bounds"
+            ));
         }
         let bytes = &self.source()[start..end];
 
@@ -962,13 +963,16 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator
         let start = position as usize;
         let end = start + length as usize;
         if end > self.source().len() {
-            return IonResult::decoding_error("timestamp reference out of bounds");
+            return IonResult::decoding_error(format!(
+                "at offset {start}: timestamp reference out of bounds"
+            ));
         }
         let bytes = &self.source()[start..end];
 
-        // A timestamp must have at least 2 bytes (offset VarInt + year VarUInt).
         if bytes.len() < 2 {
-            return IonResult::decoding_error("timestamp too short");
+            return IonResult::decoding_error(format!(
+                "at offset {start}: timestamp too short"
+            ));
         }
 
         let mut pos = 0;
@@ -1102,13 +1106,15 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator
         let start = position as usize;
         let end = start + length as usize;
         if end > self.source().len() {
-            return IonResult::decoding_error("text reference out of bounds");
+            return IonResult::decoding_error(format!(
+                "at offset {start}: text reference out of bounds"
+            ));
         }
         let bytes = &self.source()[start..end];
         std::str::from_utf8(bytes).map_err(|e| {
-            crate::IonError::decoding_error(format!(
-                "invalid UTF-8 in string at offset {position}: {e}"
-            ))
+            IonError::Decoding(DecodingError::new(format!(
+                "at offset {start}: invalid UTF-8: {e}"
+            )))
         })
     }
 
@@ -1116,7 +1122,9 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator
         let start = position as usize;
         let end = start + length as usize;
         if end > self.source().len() {
-            return IonResult::decoding_error("bytes reference out of bounds");
+            return IonResult::decoding_error(format!(
+                "at offset {start}: bytes reference out of bounds"
+            ));
         }
         Ok(&self.source()[start..end])
     }
