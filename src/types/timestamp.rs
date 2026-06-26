@@ -1,10 +1,8 @@
-use crate::decimal::Sign;
 use crate::ion_data::{IonDataHash, IonDataOrd, IonEq};
 use crate::result::{IonError, IonFailure, IonResult};
 use crate::types::{CountDecimalDigits, Decimal};
-use chrono::{
-    DateTime, Datelike, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike,
-};
+#[cfg(feature = "experimental-chrono")]
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -26,15 +24,8 @@ pub enum TimestampPrecision {
     Second,
 }
 
-// [Default] cannot be derived for enum types. Providing a manual implementation of this type
-// allows us to derive Default for [Timestamp].
-
-/// Stores the precision of a Timestamp's fractional seconds, if present. This type is not
-/// self-contained; if the Timestamp has a precision that is less than or equal to nanoseconds
-/// (i.e. fewer than 10 digits), the fractional seconds value will be stored in the Timestamp's
-/// NaiveDateTime component and the Mantissa will indicate the number of digits from that value
-/// that should be used. If the precision is 10 or more digits, the Mantissa will store the value
-/// itself as a Decimal with the correct precision.
+/// Represents the fractional seconds component of a Timestamp during construction.
+/// Used internally by [`TimestampBuilder`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mantissa {
     /// The number of digits of precision in the Timestamp's fractional seconds. For example, a
@@ -49,95 +40,307 @@ pub enum Mantissa {
     Arbitrary(Decimal),
 }
 
-impl Mantissa {
-    fn decimals_equal(d1: &Decimal, d2: &Decimal) -> bool {
-        // See the [EmptyMantissa] trait for details about `is_empty()`
-        (d1.is_empty() && d2.is_empty())
-            // Exact equality test
-            || d1.eq(d2)
-            // Coefficient zeros' signs don't have to match for fractional seconds.
-            || (d1.coefficient().is_zero() && d2.coefficient().is_zero() && d1.exponent == d2.exponent)
-    }
-
-    fn decimals_compare(d1: &Decimal, d2: &Decimal) -> Ordering {
-        // See the [EmptyMantissa] trait for details about `is_empty()`
-        if d1.is_empty() && d2.is_empty() {
-            Ordering::Equal
-        } else if d1.coefficient().is_zero() && d2.coefficient().is_zero() {
-            // Coefficient zeros' signs don't have to be compared for fractional seconds.
-            d1.exponent.cmp(&d2.exponent)
-        } else {
-            // Exact comparison test
-            d1.cmp(d2)
-        }
-    }
-}
-
-trait EmptyMantissa {
-    /// Returns true if the Mantissa's value is equivalent to not having specified a
-    /// sub-second precision at all. For example, `Mantissa::Digits(0)` or
-    /// `Mantissa::Arbitrary(Decimal::new(0, 0))`.
-    fn is_empty(&self) -> bool;
-}
-
-impl EmptyMantissa for Decimal {
-    fn is_empty(&self) -> bool {
-        self.coefficient().is_zero() && self.exponent == 0
-    }
-}
-
-impl EmptyMantissa for Mantissa {
-    fn is_empty(&self) -> bool {
-        match self {
-            // Look at zero digits of the DateTime's nanoseconds
-            Mantissa::Digits(0) => true,
-            // Or a Decimal with a coefficient of zero (any sign) and an exponent of zero.
-            Mantissa::Arbitrary(d) => d.is_empty(),
-            _ => false,
-        }
-    }
-}
-
-/// Returns the first `num_digits` digits of the specified `value`.
-// This is used in Timestamp's implementation of [PartialEq].
-fn first_n_digits_of(num_digits: u32, value: u32) -> u32 {
-    let total_digits = value.count_decimal_digits();
-    if total_digits <= num_digits {
-        return value;
-    }
-    // Truncate the trailing digits
-    value / 10u32.pow(total_digits - num_digits)
-}
-
-/// Constructs a [FixedOffset] at the specified offset seconds from UTC. If the specified offset
+/// Constructs a [`FixedOffset`] at the specified offset seconds from UTC. If the specified offset
 /// is out of bounds, this method will panic.
+#[cfg(feature = "experimental-chrono")]
 fn offset_east(seconds_east: i32) -> FixedOffset {
-    FixedOffset::east_opt(seconds_east)
-        // This error case is expected to be handled before this method is called.
-        .expect("seconds_east was outside the supported range")
+    FixedOffset::east_opt(seconds_east).expect("seconds_east was outside the supported range")
 }
 
-/// Constructs a [`DateTime<FixedOffset>`] at the specified offset using the fields of
-/// [`NaiveDateTime`] representing the desired UTC datetime.
-fn datetime_at_offset(utc_datetime: &NaiveDateTime, seconds_east: i32) -> DateTime<FixedOffset> {
-    offset_east(seconds_east).from_utc_datetime(utc_datetime)
+// ─── Packed bit layout ────────────────────────────────────────────────
+//
+// All date-time fields are stored as LOCAL time in a single u64.
+// A second u64 holds the fractional seconds payload.
+//
+// Bit layout of `packed` (LSB = bit 0):
+//
+//   [13:0]  year      (14 bits, 0-9999)
+//   [17:14] month     (4 bits, 1-12)
+//   [22:18] day       (5 bits, 1-31)
+//   [27:23] hour      (5 bits, 0-23)
+//   [33:28] minute    (6 bits, 0-59)
+//   [45:34] offset    (12 bits, two's complement minutes; 0x800 = unknown)
+//   [51:46] second    (6 bits, 0-59)
+//   [54:52] precision (3 bits, 0-4 maps to TimestampPrecision)
+//   [60:56] frac_kind (5 bits, 0 = none, 1-19 = digit count)
+//   [55]    spare
+//   [63:61] spare
+//
+// `frac_payload`: when frac_kind is 1-19, this is the coefficient
+// at that scale (e.g. kind=3, payload=123 means 0.123 seconds).
+
+const YEAR_BITS: u64 = 14;
+const MONTH_BITS: u64 = 4;
+const DAY_BITS: u64 = 5;
+const HOUR_BITS: u64 = 5;
+const MINUTE_BITS: u64 = 6;
+const OFFSET_BITS: u64 = 12;
+const SECOND_BITS: u64 = 6;
+const PRECISION_BITS: u64 = 3;
+const FRAC_KIND_BITS: u64 = 5;
+
+const YEAR_SHIFT: u64 = 0;
+const MONTH_SHIFT: u64 = YEAR_SHIFT + YEAR_BITS; // 14
+const DAY_SHIFT: u64 = MONTH_SHIFT + MONTH_BITS; // 18
+const HOUR_SHIFT: u64 = DAY_SHIFT + DAY_BITS; // 23
+const MINUTE_SHIFT: u64 = HOUR_SHIFT + HOUR_BITS; // 28
+const OFFSET_SHIFT: u64 = MINUTE_SHIFT + MINUTE_BITS; // 34
+const SECOND_SHIFT: u64 = OFFSET_SHIFT + OFFSET_BITS; // 46
+const PRECISION_SHIFT: u64 = SECOND_SHIFT + SECOND_BITS; // 52
+                                                         // bit 55 is spare
+const FRAC_KIND_SHIFT: u64 = 56;
+
+const YEAR_MASK: u64 = (1 << YEAR_BITS) - 1; // 0x3FFF
+const MONTH_MASK: u64 = (1 << MONTH_BITS) - 1; // 0xF
+const DAY_MASK: u64 = (1 << DAY_BITS) - 1; // 0x1F
+const HOUR_MASK: u64 = (1 << HOUR_BITS) - 1; // 0x1F
+const MINUTE_MASK: u64 = (1 << MINUTE_BITS) - 1; // 0x3F
+const OFFSET_MASK: u64 = (1 << OFFSET_BITS) - 1; // 0xFFF
+const SECOND_MASK: u64 = (1 << SECOND_BITS) - 1; // 0x3F
+const PRECISION_MASK: u64 = (1 << PRECISION_BITS) - 1; // 0x7
+const FRAC_KIND_MASK: u64 = (1 << FRAC_KIND_BITS) - 1; // 0x1F
+
+const OFFSET_UNKNOWN_SENTINEL: u16 = 0x800;
+const MAX_FRAC_DIGITS: u32 = 19;
+
+const DAYS_IN_MONTH: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+fn is_leap_year(year: u16) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-/// Represents a point in time to a specified degree of precision. Unlike `chrono`'s [NaiveDateTime]
-/// and [DateTime], a `Timestamp` has variable precision ranging from a year to fractional seconds
-/// of an arbitrary unit.
-#[derive(Debug, Clone)]
+fn days_in_month(year: u16, month: u8) -> u8 {
+    if month == 2 && is_leap_year(year) {
+        29
+    } else {
+        DAYS_IN_MONTH[(month - 1) as usize]
+    }
+}
+
+fn validate_fields(y: u16, m: u8, d: u8, h: u8, min: u8, s: u8) -> bool {
+    if y > 9999 {
+        return false;
+    }
+    if m < 1 || m > 12 {
+        return false;
+    }
+    let max_day = days_in_month(y, m);
+    d >= 1 && d <= max_day && h <= 23 && min <= 59 && s <= 59
+}
+
+/// Adds `offset_minutes` to a local time represented by the given fields,
+/// returning the adjusted (year, month, day, hour, minute).
+fn add_offset_to_utc(
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    offset_minutes: i16,
+) -> (u16, u8, u8, u8, u8) {
+    let total_minutes = hour as i32 * 60 + minute as i32 + offset_minutes as i32;
+    let (mut d, h, m) = if total_minutes >= 0 && total_minutes < 24 * 60 {
+        // Common fast path: no day rollover
+        (
+            day as i32,
+            (total_minutes / 60) as u8,
+            (total_minutes % 60) as u8,
+        )
+    } else {
+        let day_offset = total_minutes.div_euclid(24 * 60);
+        let time_of_day = total_minutes.rem_euclid(24 * 60);
+        (
+            day as i32 + day_offset,
+            (time_of_day / 60) as u8,
+            (time_of_day % 60) as u8,
+        )
+    };
+
+    let mut mo = month as i32;
+    let mut y = year as i32;
+
+    // Handle day overflow
+    loop {
+        let max = days_in_month(y as u16, mo as u8) as i32;
+        if d <= max {
+            break;
+        }
+        d -= max;
+        mo += 1;
+        if mo > 12 {
+            mo = 1;
+            y += 1;
+        }
+    }
+    // Handle day underflow
+    while d < 1 {
+        mo -= 1;
+        if mo < 1 {
+            mo = 12;
+            y -= 1;
+        }
+        d += days_in_month(y as u16, mo as u8) as i32;
+    }
+
+    (y as u16, mo as u8, d as u8, h, m)
+}
+
+/// Subtracts `offset_minutes` from local time to get UTC fields.
+fn subtract_offset_to_utc(
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    offset_minutes: i16,
+) -> (u16, u8, u8, u8, u8) {
+    add_offset_to_utc(year, month, day, hour, minute, -offset_minutes)
+}
+
+/// Represents a point in time to a specified degree of precision. Unlike chrono's
+/// `NaiveDateTime` and `DateTime`, a `Timestamp` has variable precision ranging from a year
+/// to fractional seconds of an arbitrary unit.
+///
+/// Internally stored as two `u64`s: a packed bit-field of local-time date-time fields,
+/// and a fractional-seconds coefficient. Total size: 16 bytes.
+#[derive(Clone, Copy)]
 pub struct Timestamp {
-    pub(crate) date_time: NaiveDateTime,
-    pub(crate) offset: Option<FixedOffset>,
-    pub(crate) precision: TimestampPrecision,
-    pub(crate) fractional_seconds: Option<Mantissa>,
+    packed: u64,
+    frac_payload: u64,
+}
+
+impl Debug for Timestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Timestamp({})", self)
+    }
 }
 
 impl Timestamp {
+    /// Pack fields into the u64 bit-field. All fields must already be validated.
+    fn pack(
+        precision: TimestampPrecision,
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        offset_raw: u16,
+        frac_kind: u8,
+    ) -> u64 {
+        let prec_bits = match precision {
+            TimestampPrecision::Year => 0u64,
+            TimestampPrecision::Month => 1,
+            TimestampPrecision::Day => 2,
+            TimestampPrecision::HourAndMinute => 3,
+            TimestampPrecision::Second => 4,
+        };
+        (year as u64) << YEAR_SHIFT
+            | (month as u64) << MONTH_SHIFT
+            | (day as u64) << DAY_SHIFT
+            | (hour as u64) << HOUR_SHIFT
+            | (minute as u64) << MINUTE_SHIFT
+            | (offset_raw as u64 & OFFSET_MASK) << OFFSET_SHIFT
+            | (second as u64) << SECOND_SHIFT
+            | prec_bits << PRECISION_SHIFT
+            | (frac_kind as u64) << FRAC_KIND_SHIFT
+    }
+
+    /// Direct construction from LOCAL time fields.
+    pub(crate) fn from_fields(
+        precision: TimestampPrecision,
+        offset: Option<i16>,
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        frac_digits: u32,
+        frac_coefficient: u64,
+    ) -> IonResult<Self> {
+        if year == 0 || year > 9999 {
+            return IonResult::illegal_operation(format!(
+                "Timestamp year '{}' out of range (1-9999)",
+                year
+            ));
+        }
+        if precision >= TimestampPrecision::Month
+            && !validate_fields(year, month, day, hour, minute, second)
+        {
+            return IonResult::illegal_operation("one or more timestamp fields are out of range");
+        }
+        if frac_digits > MAX_FRAC_DIGITS {
+            return IonResult::illegal_operation(format!(
+                "fractional seconds precision ({} digits) exceeds maximum ({})",
+                frac_digits, MAX_FRAC_DIGITS
+            ));
+        }
+
+        let offset_raw = match offset {
+            None => OFFSET_UNKNOWN_SENTINEL,
+            Some(m) => {
+                if m < -1439 || m > 1439 {
+                    return IonResult::illegal_operation(format!(
+                        "offset ({} minutes) exceeds valid range (-1439..=1439)",
+                        m
+                    ));
+                }
+                m as u16
+            }
+        };
+
+        let frac_kind = frac_digits as u8;
+        let packed = Self::pack(
+            precision, year, month, day, hour, minute, second, offset_raw, frac_kind,
+        );
+
+        Ok(Timestamp {
+            packed,
+            frac_payload: frac_coefficient,
+        })
+    }
+
+    /// Construction from UTC fields + offset. Adds offset to convert to local time.
+    pub(crate) fn from_utc_fields(
+        precision: TimestampPrecision,
+        offset_minutes: i16,
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        frac_digits: u32,
+        frac_coefficient: u64,
+    ) -> IonResult<Self> {
+        // Validate the raw UTC fields before offset conversion
+        if precision >= TimestampPrecision::Month
+            && !validate_fields(year, month, day, hour, minute, second)
+        {
+            return IonResult::illegal_operation(
+                "one or more timestamp UTC fields are out of range",
+            );
+        }
+        let (ly, lmo, ld, lh, lmi) =
+            add_offset_to_utc(year, month, day, hour, minute, offset_minutes);
+        Self::from_fields(
+            precision,
+            Some(offset_minutes),
+            ly,
+            lmo,
+            ld,
+            lh,
+            lmi,
+            second,
+            frac_digits,
+            frac_coefficient,
+        )
+    }
+
     /// Converts a [`NaiveDateTime`] or [`DateTime<FixedOffset>`] to a Timestamp with the specified
-    /// precision. If the precision is [`TimestampPrecision::Second`], nanosecond precision (the maximum
-    /// supported by a [`Timelike`]) is assumed.
+    /// precision. If the precision is [`TimestampPrecision::Second`], nanosecond precision (the
+    /// maximum supported by a `Timelike`) is assumed.
     #[cfg(feature = "experimental-chrono")]
     pub fn from_datetime<D>(datetime: D, precision: TimestampPrecision) -> Timestamp
     where
@@ -145,342 +348,247 @@ impl Timestamp {
     {
         let mut timestamp: Timestamp = datetime.into();
         if precision < TimestampPrecision::Second {
-            timestamp.fractional_seconds = None;
+            timestamp.set_frac_kind(0);
+            timestamp.frac_payload = 0;
         }
-        timestamp.precision = precision;
+        timestamp.set_precision(precision);
         timestamp
     }
 
+    #[cfg(feature = "experimental-chrono")]
     pub(crate) fn from_naive_datetime(date_time: NaiveDateTime) -> Self {
-        Timestamp {
-            date_time,
-            offset: None,
-            precision: TimestampPrecision::Second,
-            fractional_seconds: Some(Mantissa::Digits(9)),
-        }
+        Self::from_fields(
+            TimestampPrecision::Second,
+            None,
+            date_time.year() as u16,
+            date_time.month() as u8,
+            date_time.day() as u8,
+            date_time.hour() as u8,
+            date_time.minute() as u8,
+            date_time.second() as u8,
+            9,
+            date_time.nanosecond() as u64,
+        )
+        .expect("chrono NaiveDateTime fields are always valid")
     }
 
+    #[cfg(feature = "experimental-chrono")]
     pub(crate) fn from_fixed_offset_datetime(
         fixed_offset_date_time: DateTime<FixedOffset>,
     ) -> Self {
-        let date_time = fixed_offset_date_time.naive_utc();
-        let offset = Some(*fixed_offset_date_time.offset());
+        let offset_seconds = fixed_offset_date_time.offset().local_minus_utc();
+        let offset_minutes = (offset_seconds / 60) as i16;
+        let local = fixed_offset_date_time.naive_local();
+        // Pack directly from local fields — chrono guarantees validity of the
+        // DateTime, and local year may exceed 9999 (e.g., UTC year 9999 Dec 31
+        // with negative offset). We bypass from_fields validation to avoid panic.
+        let packed = Self::pack(
+            TimestampPrecision::Second,
+            local.year() as u16,
+            local.month() as u8,
+            local.day() as u8,
+            local.hour() as u8,
+            local.minute() as u8,
+            local.second() as u8,
+            offset_minutes as u16,
+            9,
+        );
         Timestamp {
-            date_time,
-            offset,
-            precision: TimestampPrecision::Second,
-            fractional_seconds: Some(Mantissa::Digits(9)),
+            packed,
+            frac_payload: local.nanosecond() as u64,
         }
     }
 
+    fn frac_kind(&self) -> u8 {
+        ((self.packed >> FRAC_KIND_SHIFT) & FRAC_KIND_MASK) as u8
+    }
+
+    fn set_frac_kind(&mut self, kind: u8) {
+        self.packed &= !(FRAC_KIND_MASK << FRAC_KIND_SHIFT);
+        self.packed |= (kind as u64) << FRAC_KIND_SHIFT;
+    }
+
+    fn set_precision(&mut self, precision: TimestampPrecision) {
+        let prec_bits: u64 = match precision {
+            TimestampPrecision::Year => 0,
+            TimestampPrecision::Month => 1,
+            TimestampPrecision::Day => 2,
+            TimestampPrecision::HourAndMinute => 3,
+            TimestampPrecision::Second => 4,
+        };
+        self.packed &= !(PRECISION_MASK << PRECISION_SHIFT);
+        self.packed |= prec_bits << PRECISION_SHIFT;
+    }
+
+    #[cfg(feature = "experimental-chrono")]
     pub(crate) fn try_to_naive_datetime(&self) -> IonResult<NaiveDateTime> {
-        if self.offset.is_some() {
+        if self.offset().is_some() {
             return IonResult::illegal_operation(
                 "cannot convert a Timestamp with a known offset into a NaiveDateTime",
             );
         }
-        Ok(downconvert_to_naive_datetime_with_nanoseconds(self))
+        let nanos = self.fractional_seconds_as_nanoseconds().unwrap_or(0);
+        let dt = NaiveDate::from_ymd_opt(self.year() as i32, self.month(), self.day())
+            .and_then(|d| d.and_hms_nano_opt(self.hour(), self.minute(), self.second(), nanos))
+            .ok_or_else(|| {
+                IonError::illegal_operation("timestamp fields produce invalid NaiveDateTime")
+            })?;
+        Ok(dt)
     }
 
+    #[cfg(feature = "experimental-chrono")]
     pub(crate) fn try_to_datetime_fixed_offset(&self) -> IonResult<DateTime<FixedOffset>> {
-        if self.offset.is_none() {
-            return IonResult::illegal_operation(
+        let offset_minutes = self.offset().ok_or_else(|| {
+            IonError::illegal_operation(
                 "cannot convert a Timestamp with an unknown offset into a DateTime<FixedOffset>",
-            );
-        }
-        let date_time = downconvert_to_naive_datetime_with_nanoseconds(self);
-        Ok(self.offset.unwrap().from_utc_datetime(&date_time))
+            )
+        })?;
+        // Convert to UTC fields, then construct DateTime at the offset
+        let (uy, umo, ud, uh, umi) = subtract_offset_to_utc(
+            self.year() as u16,
+            self.month() as u8,
+            self.day() as u8,
+            self.hour() as u8,
+            self.minute() as u8,
+            offset_minutes as i16,
+        );
+        let nanos = self.fractional_seconds_as_nanoseconds().unwrap_or(0);
+        let utc_naive = NaiveDate::from_ymd_opt(uy as i32, umo as u32, ud as u32)
+            .and_then(|d| d.and_hms_nano_opt(uh as u32, umi as u32, self.second(), nanos))
+            .ok_or_else(|| {
+                IonError::illegal_operation("timestamp UTC conversion produces invalid DateTime")
+            })?;
+        let offset = FixedOffset::east_opt(offset_minutes * 60).ok_or_else(|| {
+            IonError::illegal_operation("timestamp offset out of range for chrono")
+        })?;
+        Ok(offset.from_utc_datetime(&utc_naive))
     }
 
-    /// If the precision is [TimestampPrecision::Second], returns the Decimal scale of this Timestamp's
-    /// fractional seconds; otherwise, returns None.
-    ///
-    /// For example, a Timestamp with 553 milliseconds would return a Decimal scale of 3.
+    /// If the precision is [TimestampPrecision::Second], returns the Decimal scale of this
+    /// Timestamp's fractional seconds; otherwise, returns None.
     pub fn fractional_seconds_scale(&self) -> Option<i64> {
-        // This function is used when comparing two Timestamps with different Mantissa representations.
-        use Mantissa::*;
-        match self.fractional_seconds.as_ref() {
-            // number_of_digits represent number of digits of precision in the Timestamp's fractional seconds.
-            // this is equivalent to the decimal scale when we convert the fractional seconds into a decimal
-            // and return its scale
-            Some(Digits(number_of_digits)) => Some(*number_of_digits as i64),
-            // This timestamp already stores its fractional seconds as a Decimal; return the scale of this Decimal.
-            Some(Arbitrary(decimal)) => Some(decimal.scale()),
-            // This Timestamp's precision is too low to have a fractional seconds field.
-            None => None,
+        let kind = self.frac_kind();
+        if kind == 0 {
+            None
+        } else {
+            Some(kind as i64)
         }
     }
 
-    /// If the precision is [TimestampPrecision::Second], returns a Decimal representation of this Timestamp's
-    /// fractional seconds; otherwise, returns None.
-    ///
-    /// For example, a Timestamp with 553 milliseconds would return a Decimal with
-    /// coefficient 553, exponent -3.
+    /// Returns a Decimal representation of the fractional seconds, or None if precision
+    /// is below Second or there are no fractional seconds.
     pub(crate) fn fractional_seconds_as_decimal(&self) -> Option<Decimal> {
-        // This function is used when comparing two Timestamps with different Mantissa representations.
-        use Mantissa::*;
-        match self.fractional_seconds.as_ref() {
-            // This timestamp stores its fractional seconds in its `date_time` field.
-            // We'll need to convert the date_time's nanoseconds to a Decimal and return it.
-            Some(Digits(number_of_digits)) => {
-                const MAX_NANOSECOND_DIGITS: u32 = 9; // If it were 10, it'd be > a second
-                let nanoseconds = self.date_time.nanosecond();
-                let leading_zeros = MAX_NANOSECOND_DIGITS - nanoseconds.count_decimal_digits();
-                let coefficient = if leading_zeros >= *number_of_digits {
-                    0
-                } else {
-                    first_n_digits_of(*number_of_digits - leading_zeros, nanoseconds)
-                };
-                let exponent = -i64::from(*number_of_digits);
-                Some(Decimal::new(coefficient, exponent))
-            }
-            // This timestamp already stores its fractional seconds as a Decimal; return a clone.
-            Some(Arbitrary(decimal)) => Some(decimal.clone()),
-            // This Timestamp's precision is too low to have a fractional seconds field.
-            None => None,
+        let kind = self.frac_kind();
+        if kind == 0 {
+            return None;
         }
+        let coefficient = self.frac_payload;
+        let exponent = -(kind as i64);
+        Some(Decimal::new(coefficient, exponent))
     }
 
-    /// If the precision is [TimestampPrecision::Second], returns a u32 representing
-    /// this Timestamp's fractional seconds in nanoseconds; otherwise, returns None.
-    ///
-    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would return a
-    /// number of nanoseconds, losing precision. Similarly, a Timestamp with milliseconds would
-    /// also return a number of nanoseconds, erroneously gaining precision.
+    /// Returns fractional seconds as nanoseconds (potentially lossy).
     fn fractional_seconds_as_nanoseconds(&self) -> Option<u32> {
-        // This function is used when converting a Timestamp to a DateTime<FixedOffset> or
-        // NaiveDateTime.
-        use Mantissa::*;
-        match self.fractional_seconds.as_ref() {
-            // This timestamp already stores its fractional seconds in its `date_time` field.
-            // We can ignore the `number_of_digits` (which tracks its precision) and simply return
-            // `self.date_time`'s nanoseconds.
-            Some(Digits(_number_of_digits)) => Some(self.date_time.nanosecond()),
-            // This timestamp stores its fractional seconds as a Decimal. Down-convert it to a u32
-            // representing the number of nanoseconds.
-            Some(Arbitrary(decimal)) => {
-                // nanoseconds = coefficient * 10^(exponent + 9)
-                let nano_exp = decimal.exponent + 9;
-                let mag = decimal.coefficient().magnitude();
-                let nanos: u128 = if nano_exp >= 0 {
-                    let factor = 10u128.saturating_pow(nano_exp as u32);
-                    mag.as_u128().unwrap_or(0).saturating_mul(factor)
-                } else {
-                    let divisor = 10u128.saturating_pow(nano_exp.unsigned_abs() as u32);
-                    let divided = mag.data / divisor;
-                    // Default value can only be reached if the fractional seconds are greater than 1.
-                    u128::try_from(divided).unwrap_or(0)
-                };
-                // The max number of nanos is 999,999,999 whereas u32::MAX is over 4 billion.
-                // This cast will only truncate if fractional_seconds decimal is >= 1, which is
-                // not allowed.
-                Some(nanos as u32)
-            }
-            // This Timestamp's precision is too low to have a fractional seconds field.
-            None => None,
+        let kind = self.frac_kind() as u32;
+        if kind == 0 {
+            return None;
         }
+        let coefficient = self.frac_payload;
+        // Convert coefficient at `kind` digits of precision to nanoseconds (9 digits).
+        let nanos = if kind <= 9 {
+            // Scale up: multiply by 10^(9 - kind)
+            let factor = 10u64.pow(9 - kind);
+            coefficient.saturating_mul(factor)
+        } else {
+            // Scale down: divide by 10^(kind - 9)
+            let divisor = 10u64.pow(kind - 9);
+            coefficient / divisor
+        };
+        Some(nanos as u32)
     }
 
-    /// Tests the fractional seconds fields of two timestamps for ordering. This function will
-    /// only be called if both Timestamps have a precision of [TimestampPrecision::Second].
     fn fractional_seconds_compare(&self, other: &Timestamp) -> Ordering {
-        use Mantissa::*;
-        match (
-            self.fractional_seconds.as_ref(),
-            other.fractional_seconds.as_ref(),
-        ) {
-            (None, None) => Ordering::Equal,
-            (Some(_m), None) => {
-                let d1 = self.fractional_seconds_as_decimal().unwrap();
-                let d2 = Decimal::new(0u64, 0);
-                d1.cmp(&d2)
-            }
-            (None, Some(_m)) => {
-                let d1 = Decimal::new(0u64, 0);
-                let d2 = other.fractional_seconds_as_decimal().unwrap();
-                d1.cmp(&d2)
-            }
-            (Some(Digits(_d1)), Some(Digits(_d2))) => {
-                let d1 = self.date_time.nanosecond();
-                let d2 = other.date_time.nanosecond();
-                d1.cmp(&d2)
-            }
-            (Some(Arbitrary(d1)), Some(Arbitrary(d2))) => Mantissa::decimals_compare(d1, d2),
-            (Some(Digits(_d1)), Some(Arbitrary(d2))) => {
-                let d1 = &self.fractional_seconds_as_decimal().unwrap();
-                Mantissa::decimals_compare(d1, d2)
-            }
-            (Some(Arbitrary(d1)), Some(Digits(_d2))) => {
-                let d2 = &other.fractional_seconds_as_decimal().unwrap();
-                Mantissa::decimals_compare(d1, d2)
-            }
+        let sk = self.frac_kind();
+        let ok = other.frac_kind();
+        if sk == 0 && ok == 0 {
+            return Ordering::Equal;
         }
+        // Same precision: direct coefficient comparison
+        if sk == ok {
+            return self.frac_payload.cmp(&other.frac_payload);
+        }
+        // Different precisions: normalize via decimal comparison
+        let sd = self
+            .fractional_seconds_as_decimal()
+            .unwrap_or(Decimal::new(0u64, 0));
+        let od = other
+            .fractional_seconds_as_decimal()
+            .unwrap_or(Decimal::new(0u64, 0));
+        sd.cmp(&od)
     }
 
-    /// Tests the fractional seconds fields of two timestamps for equality. This function will
-    /// only be called if both Timestamps have a precision of [TimestampPrecision::Second].
     fn fractional_seconds_equal(&self, other: &Timestamp) -> bool {
-        use Mantissa::*;
-
-        // TODO: make Timestamp::fractional_seconds to be Mantissa when creating a Timestamp to get rid of below conversion
-        // convert Option<&Mantissa> to &Mantissa
-        let m1 = match &self.fractional_seconds {
-            None => &Mantissa::Digits(0),
-            Some(m) => m,
-        };
-
-        let m2 = match &other.fractional_seconds {
-            None => &Mantissa::Digits(0),
-            Some(m) => m,
-        };
-
-        // compare fractional seconds
-        match (m1, m2) {
-            (Digits(d1), Digits(d2)) => {
-                if d1 != d2 {
-                    // Different precisions
-                    return false;
-                }
-                let d1 = first_n_digits_of(*d1, self.date_time.nanosecond());
-                let d2 = first_n_digits_of(*d2, other.date_time.nanosecond());
-                d1 == d2
-            }
-            (Arbitrary(d1), Arbitrary(d2)) => Mantissa::decimals_equal(d1, d2),
-            (Digits(_d1), Arbitrary(d2)) => {
-                let d1 = match self.fractional_seconds_as_decimal() {
-                    Some(decimal_value) => decimal_value,
-                    None => Decimal::new(0, 0),
-                };
-                Mantissa::decimals_equal(&d1, d2)
-            }
-            (Arbitrary(d1), Digits(_d2)) => {
-                let d2 = match other.fractional_seconds_as_decimal() {
-                    Some(decimal_value) => decimal_value,
-                    None => Decimal::new(0, 0),
-                };
-                Mantissa::decimals_equal(d1, &d2)
-            }
+        let sk = self.frac_kind();
+        let ok = other.frac_kind();
+        if sk != ok {
+            return false;
         }
+        self.frac_payload == other.frac_payload
     }
 
     /// Writes the fractional seconds portion of a text timestamp, including a leading `.`.
     fn format_fractional_seconds<W: std::fmt::Write>(&self, output: &mut W) -> IonResult<()> {
-        if self.fractional_seconds.is_none() {
-            // Nothing to do.
+        let kind = self.frac_kind() as u32;
+        if kind == 0 {
             return Ok(());
         }
-        let mantissa = self.fractional_seconds.as_ref().unwrap();
-        if mantissa.is_empty() {
-            // No need to write anything.
-            return Ok(());
-        }
-        match mantissa {
-            Mantissa::Digits(num_digits) => {
-                // Scale the nanoseconds down to the requested number of digits.
-                // Example: if `num_digits` is 3 (that is: millisecond precision), we need to
-                // divide the nanoseconds by 10^(9-3) to get the correct precision:
-                //      123,000,000 nanoseconds / 10^(9-3) = 123 milliseconds
-                let scaled = self.date_time.nanosecond() / 10u32.pow(9 - *num_digits);
-                // If our scaled number has fewer digits than the precision states, add leading
-                // zeros to the output to make up the difference.
-                // Example: `num_digits` is 6 (microsecond precision) but our number of microseconds
-                // is `9500` (only 4 digits), we need to add two leading zeros to make: `009500`.
-                let actual_num_digits = scaled.count_decimal_digits();
-                let num_leading_zeros = *num_digits - actual_num_digits;
-                write!(output, ".")?;
-                for _ in 0..num_leading_zeros {
-                    write!(output, "0")?;
-                }
-                write!(output, "{scaled}")?;
-                Ok(())
+        let coefficient = self.frac_payload;
+        if coefficient == 0 {
+            // Write `.` followed by `kind` zeros (e.g., `.000` for millis precision)
+            write!(output, ".")?;
+            for _ in 0..kind {
+                write!(output, "0")?;
             }
-            Mantissa::Arbitrary(decimal) => {
-                let exponent = decimal.exponent;
-                let coefficient = &decimal.coefficient();
-                if exponent >= 0 {
-                    // We know that the coefficient is non-zero (the mantissa was not empty),
-                    // so having a positive exponent would result in an illegal fractional
-                    // seconds value.
-                    return IonResult::encoding_error(
-                        "found fractional seconds decimal that was >= 1.",
-                    );
-                }
-
-                let num_digits = decimal.coefficient().number_of_decimal_digits();
-                let abs_exponent = decimal.exponent.unsigned_abs();
-                // At this point, we know that the abs_exponent is greater than num_digits because
-                // the decimal has to be < 1.
-                let num_leading_zeros = abs_exponent - num_digits as u64;
-                write!(output, ".")?;
-                for _ in 0..num_leading_zeros {
-                    write!(output, "0")?;
-                }
-                if coefficient.is_negative_zero() {
-                    write!(output, "0")?;
-                } else if coefficient.sign() == Sign::Negative {
-                    return IonResult::encoding_error(
-                        "fractional seconds cannot have a negative coefficient (other than -0)",
-                    );
-                } else {
-                    write!(output, "{}", decimal.coefficient())?;
-                }
-                Ok(())
+        } else {
+            let actual_digits = coefficient.count_decimal_digits();
+            let leading_zeros = kind.saturating_sub(actual_digits);
+            write!(output, ".")?;
+            for _ in 0..leading_zeros {
+                write!(output, "0")?;
             }
+            write!(output, "{coefficient}")?;
         }
+        Ok(())
     }
 
     pub(crate) fn format<W: std::fmt::Write>(&self, output: &mut W) -> IonResult<()> {
-        let (offset_minutes, datetime) = if let Some(minutes) = self.offset {
-            // Create a datetime with the appropriate offset that we can use for formatting.
-            let datetime: DateTime<FixedOffset> = self.try_to_datetime_fixed_offset()?;
-            // Convert the offset to minutes --v
-            (Some(minutes.local_minus_utc() / 60), datetime)
-        } else {
-            // Our timestamp has an unknown offset. Per the spec, this means it makes no
-            // assertions about *where* it was recorded, but its fields are still in UTC.
-            // Create a UTC datetime that we can use for formatting.
-            let datetime: NaiveDateTime = self.try_to_naive_datetime()?;
-            let datetime: DateTime<FixedOffset> = datetime_at_offset(&datetime, 0);
-            (None, datetime)
-        };
-
-        write!(output, "{:0>4}", datetime.year())?;
-        //                  ^-- 0-padded, right aligned, 4-digit year
-        if self.precision == TimestampPrecision::Year {
+        write!(output, "{:0>4}", self.year())?;
+        if self.precision() == TimestampPrecision::Year {
             write!(output, "T")?;
             return Ok(());
         }
 
-        write!(output, "-{:0>2}", datetime.month())?;
-        //                   ^-- delimiting hyphen and 0-padded, right aligned, 2-digit month
-        if self.precision == TimestampPrecision::Month {
+        write!(output, "-{:0>2}", self.month())?;
+        if self.precision() == TimestampPrecision::Month {
             write!(output, "T")?;
             return Ok(());
         }
 
-        write!(output, "-{:0>2}", datetime.day())?;
-        //                   ^-- delimiting hyphen and 0-padded, right aligned, 2-digit day
-        if self.precision == TimestampPrecision::Day {
+        write!(output, "-{:0>2}", self.day())?;
+        if self.precision() == TimestampPrecision::Day {
             write!(output, "T")?;
             return Ok(());
         }
 
-        write!(
-            output,
-            "T{:0>2}:{:0>2}",
-            // ^-- delimiting T, formatted hour, delimiting colon, formatted minute
-            datetime.hour(),
-            datetime.minute()
-        )?;
-        if self.precision == TimestampPrecision::HourAndMinute {
-            self.format_offset(offset_minutes, output)?;
+        write!(output, "T{:0>2}:{:0>2}", self.hour(), self.minute())?;
+        if self.precision() == TimestampPrecision::HourAndMinute {
+            self.format_offset(self.offset(), output)?;
             return Ok(());
         }
 
-        write!(output, ":{:0>2}", datetime.second())?;
-        //                   ^-- delimiting colon, formatted second
+        write!(output, ":{:0>2}", self.second())?;
         self.format_fractional_seconds(output)?;
-        self.format_offset(offset_minutes, output)?;
+        self.format_offset(self.offset(), output)?;
         Ok(())
     }
 
@@ -493,12 +601,10 @@ impl Timestamp {
             None => ("-", 0, 0),
             Some(offset_minutes) => {
                 const MINUTES_PER_HOUR: i32 = 60;
-                // Split the offset into a sign and magnitude for formatting
                 let sign = if offset_minutes >= 0 { "+" } else { "-" };
                 let offset_minutes = offset_minutes.abs();
                 let hours = offset_minutes / MINUTES_PER_HOUR;
                 let minutes = offset_minutes % MINUTES_PER_HOUR;
-
                 (sign, hours, minutes)
             }
         };
@@ -520,112 +626,112 @@ impl Timestamp {
     }
 
     /// Returns the offset in minutes that has been specified in the [Timestamp].
-    /// A positive value indicates Eastern Hemisphere, while a negative value indicates Western Hemisphere.
+    /// A positive value indicates Eastern Hemisphere, while a negative value indicates
+    /// Western Hemisphere.
     pub fn offset(&self) -> Option<i32> {
-        self.offset.map(|offset| offset.local_minus_utc() / 60)
+        let raw = ((self.packed >> OFFSET_SHIFT) & OFFSET_MASK) as u16;
+        if raw == OFFSET_UNKNOWN_SENTINEL {
+            return None;
+        }
+        // Sign-extend from 12 bits
+        let val = ((raw as i16) << 4) >> 4;
+        Some(val as i32)
     }
 
     /// Returns the precision that has been specified in the [Timestamp].
     pub fn precision(&self) -> TimestampPrecision {
-        self.precision
+        match (self.packed >> PRECISION_SHIFT) & PRECISION_MASK {
+            0 => TimestampPrecision::Year,
+            1 => TimestampPrecision::Month,
+            2 => TimestampPrecision::Day,
+            3 => TimestampPrecision::HourAndMinute,
+            _ => TimestampPrecision::Second,
+        }
     }
 
     /// Returns the year that has been specified in the [Timestamp].
     pub fn year(&self) -> u32 {
-        // verify if the timestamp has an offset
-        if let Some(offset) = self.offset {
-            // `NaiveDateTime#hours()` returns hours normalized as per UTC
-            // for local time we need to +/- the difference
-            let local_date_time =
-                DateTime::<FixedOffset>::from_naive_utc_and_offset(self.date_time, offset);
-            return local_date_time.year() as u32;
-        }
-        self.date_time.year() as u32
+        ((self.packed >> YEAR_SHIFT) & YEAR_MASK) as u32
     }
 
     /// Returns the month that has been specified in the [Timestamp].
-    /// Returns the month number starting from 1.
-    /// The return value ranges from 1 to 12.
+    /// Returns the month number starting from 1. The return value ranges from 1 to 12.
     pub fn month(&self) -> u32 {
-        // verify if the timestamp has an offset
-        if let Some(offset) = self.offset {
-            // `NaiveDateTime#hours()` returns hours normalized as per UTC
-            // for local time we need to +/- the difference
-            let local_date_time =
-                DateTime::<FixedOffset>::from_naive_utc_and_offset(self.date_time, offset);
-            return local_date_time.month();
-        }
-        self.date_time.month()
+        ((self.packed >> MONTH_SHIFT) & MONTH_MASK) as u32
     }
 
     /// Returns the day that has been specified in the [Timestamp].
     /// Returns the day of month starting from 1.
-    // The return value ranges from 1 to 31. (The last day of month differs by months.)
     pub fn day(&self) -> u32 {
-        // verify if the timestamp has an offset
-        if let Some(offset) = self.offset {
-            // `NaiveDateTime#hours()` returns hours normalized as per UTC
-            // for local time we need to +/- the difference
-            let local_date_time =
-                DateTime::<FixedOffset>::from_naive_utc_and_offset(self.date_time, offset);
-            return local_date_time.day();
-        }
-        self.date_time.day()
+        ((self.packed >> DAY_SHIFT) & DAY_MASK) as u32
     }
 
     /// Returns the hour(s) that has been specified in the [Timestamp].
     /// Returns the hour number from 0 to 23.
     pub fn hour(&self) -> u32 {
-        // verify if the timestamp has an offset
-        if let Some(offset) = self.offset {
-            // `NaiveDateTime#hours()` returns hours normalized as per UTC
-            // for local time we need to +/- the difference
-            let local_date_time =
-                DateTime::<FixedOffset>::from_naive_utc_and_offset(self.date_time, offset);
-            return local_date_time.hour();
-        }
-        self.date_time.hour()
+        ((self.packed >> HOUR_SHIFT) & HOUR_MASK) as u32
     }
 
     /// Returns the minute(s) that has been specified in the [Timestamp].
     /// Returns the minute number from 0 to 59.
     pub fn minute(&self) -> u32 {
-        // verify if the timestamp has an offset
-        if let Some(offset) = self.offset {
-            // `NaiveDateTime#hours()` returns minutes normalized as per UTC
-            // for local time we need to +/- the difference
-            let local_date_time =
-                DateTime::<FixedOffset>::from_naive_utc_and_offset(self.date_time, offset);
-            return local_date_time.minute();
-        }
-        self.date_time.minute()
+        ((self.packed >> MINUTE_SHIFT) & MINUTE_MASK) as u32
     }
 
     /// Returns the second(s) that has been specified in the [Timestamp].
     /// Returns the second number from 0 to 59.
     pub fn second(&self) -> u32 {
-        self.date_time.second()
+        ((self.packed >> SECOND_SHIFT) & SECOND_MASK) as u32
     }
 
     /// Return a UTC timestamp for this [Timestamp]
     pub fn to_utc(&self) -> Timestamp {
-        Self::from_naive_datetime(self.date_time)
+        let offset_minutes = match self.offset() {
+            None => return *self,
+            Some(m) => m as i16,
+        };
+        let (uy, umo, ud, uh, umi) = subtract_offset_to_utc(
+            self.year() as u16,
+            self.month() as u8,
+            self.day() as u8,
+            self.hour() as u8,
+            self.minute() as u8,
+            offset_minutes,
+        );
+        // Pack directly without validation — the source timestamp was already
+        // valid, and UTC conversion can produce year 0 (e.g., 0001-01-01T00:30+01:00
+        // → 0000-12-31T23:30 UTC). This is fine for comparison purposes.
+        let packed = Self::pack(
+            self.precision(),
+            uy,
+            umo,
+            ud,
+            uh,
+            umi,
+            self.second() as u8,
+            OFFSET_UNKNOWN_SENTINEL,
+            self.frac_kind(),
+        );
+        Timestamp {
+            packed,
+            frac_payload: self.frac_payload,
+        }
     }
 
     /// Returns this Timestamp's fractional seconds in nanoseconds
     ///
-    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would return a
-    /// number of nanoseconds, losing precision. If it loses precision then truncation is performed.
-    /// (e.g. a timestamp with fractional seconds of `0.000000000999` would return `0`)
+    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would
+    /// return a number of nanoseconds, losing precision. If it loses precision then
+    /// truncation is performed.
     pub fn nanoseconds(&self) -> u32 {
         self.fractional_seconds_as_nanoseconds().unwrap_or_default()
     }
 
     /// Returns this Timestamp's fractional seconds in microseconds
     ///
-    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would return a
-    /// number of microseconds, losing precision. If it loses precision then truncation is performed.
-    /// (e.g. a timestamp with fractional seconds of `0.000000999` would return `0`)
+    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would
+    /// return a number of microseconds, losing precision. If it loses precision then
+    /// truncation is performed.
     pub fn microseconds(&self) -> u32 {
         self.fractional_seconds_as_nanoseconds()
             .map(|s| s / 1_000)
@@ -634,9 +740,9 @@ impl Timestamp {
 
     /// Returns this Timestamp's fractional seconds in milliseconds
     ///
-    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would return a
-    /// number of milliseconds, losing precision. If it loses precision then truncation is performed.
-    /// (e.g. a timestamp with fractional seconds of `0.000999` would return `0`)
+    /// NOTE: This is a potentially lossy operation. A Timestamp with picoseconds would
+    /// return a number of milliseconds, losing precision. If it loses precision then
+    /// truncation is performed.
     pub fn milliseconds(&self) -> u32 {
         self.fractional_seconds_as_nanoseconds()
             .map(|s| s / 1_000_000)
@@ -660,70 +766,44 @@ impl PartialOrd for Timestamp {
 
 impl Ord for Timestamp {
     fn cmp(&self, other: &Self) -> Ordering {
-        let self_datetime = self.date_time.with_nanosecond(0).unwrap();
-        let other_datetime = other.date_time.with_nanosecond(0).unwrap();
+        // Convert both to UTC for instant comparison
+        let self_utc = self.to_utc();
+        let other_utc = other.to_utc();
 
-        let self_datetime = self
-            .offset
-            .map(|offset| offset.from_utc_datetime(&self_datetime))
-            .unwrap_or_else(|| datetime_at_offset(&self_datetime, 0));
-        let other_datetime = other
-            .offset
-            .map(|offset| offset.from_utc_datetime(&other_datetime))
-            .unwrap_or_else(|| datetime_at_offset(&other_datetime, 0));
-
-        let date_time_comparison = self_datetime.cmp(&other_datetime);
-
-        match date_time_comparison {
-            // if the datetime comparison is Ordering::Equal,
-            // then return fractional seconds comparison result
-            Ordering::Equal => self.fractional_seconds_compare(other),
-            // if datetime comparison is not equal,
-            // then no need to check for fractional seconds comparison
-            _ => date_time_comparison,
+        let cmp = self_utc.year().cmp(&other_utc.year());
+        if cmp != Ordering::Equal {
+            return cmp;
         }
+        let cmp = self_utc.month().cmp(&other_utc.month());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = self_utc.day().cmp(&other_utc.day());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = self_utc.hour().cmp(&other_utc.hour());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = self_utc.minute().cmp(&other_utc.minute());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let cmp = self_utc.second().cmp(&other_utc.second());
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        self.fractional_seconds_compare(other)
     }
 }
 
 /// Two Timestamps are considered equal (though not necessarily IonEq) if they represent the same
-/// instant in time. TimestampPrecision is ignored. Offsets do not have to match as long as the instants
-/// being represented match. Examples:
-/// * `2022T` == `2022T-01`
-/// * `2022T` == `2022T-01-01T00:00:00.000+00:00`
-/// * `2022T-05-11T12:00:00.000Z` == `2022T-05-11T07:00:00.000-05:00`
+/// instant in time. TimestampPrecision is ignored. Offsets do not have to match as long as the
+/// instants being represented match.
 impl PartialEq for Timestamp {
     fn eq(&self, other: &Self) -> bool {
-        // First, compare the two Timestamps' fractional seconds. We do this first because
-        // Timestamps with different Mantissa representations are a bit tricky to compare. Once
-        // we've established that the fractional seconds match, we can compare all of the other
-        // fields in the timestamp by comparing their respective `DateTime`s.
-        if !self.fractional_seconds_equal(other) {
-            return false;
-        }
-
-        // When a Timestamp is created, any fields beyond its precision are set to the lowest
-        // legal value for that field. So the Timestamp `2022-05T` (which has `Month` precision)
-        // would have a `day` field of `1` and hour, minute, and seconds fields of `0`. This makes
-        // it easy to compare Timestamps with different precisions.
-
-        // Make copies of their respective DateTime values but with the fractional seconds zeroed
-        // out. We're not modifying `self` or `other`, and we've already compared their fractional
-        // seconds so it's ok to ignore them from here on.
-        let self_datetime = self.date_time.with_nanosecond(0).unwrap();
-        let other_datetime = other.date_time.with_nanosecond(0).unwrap();
-
-        // Apply each Timestamp's offset to the DateTime. If there's no offset, set it to UTC.
-        let self_datetime = self
-            .offset
-            .map(|offset| offset.from_utc_datetime(&self_datetime))
-            .unwrap_or_else(|| datetime_at_offset(&self_datetime, 0));
-        let other_datetime = other
-            .offset
-            .map(|offset| offset.from_utc_datetime(&other_datetime))
-            .unwrap_or_else(|| datetime_at_offset(&other_datetime, 0));
-
-        // Compare the resulting `DateTime<FixedOffset>`s
-        self_datetime == other_datetime
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -731,51 +811,45 @@ impl Eq for Timestamp {}
 
 impl IonEq for Timestamp {
     fn ion_eq(&self, other: &Self) -> bool {
-        if self.precision != other.precision {
+        let prec = self.precision();
+        if prec != other.precision() {
             return false;
         }
-        // Timestamps are only considered Ion-equal if they have the same offset, including "unknown".
-        if self.offset != other.offset {
+        if self.offset() != other.offset() {
             return false;
         }
-        let self_dt = self.date_time;
-        let other_dt = other.date_time;
-        if self_dt.year() != other_dt.year() {
+        if self.year() != other.year() {
             return false;
         }
-        if self.precision >= TimestampPrecision::Month && self_dt.month() != other_dt.month() {
+        if prec >= TimestampPrecision::Month && self.month() != other.month() {
             return false;
         }
-        if self.precision >= TimestampPrecision::Day && self_dt.day() != other_dt.day() {
+        if prec >= TimestampPrecision::Day && self.day() != other.day() {
             return false;
         }
-        if self.precision >= TimestampPrecision::HourAndMinute
-            && (self_dt.hour() != other_dt.hour() || self_dt.minute() != other_dt.minute())
+        if prec >= TimestampPrecision::HourAndMinute
+            && (self.hour() != other.hour() || self.minute() != other.minute())
         {
             return false;
         }
-        if self.precision <= TimestampPrecision::HourAndMinute {
+        if prec <= TimestampPrecision::HourAndMinute {
             return true;
         }
-
-        if self_dt.second() != other_dt.second() || !self.fractional_seconds_equal(other) {
+        if self.second() != other.second() {
             return false;
         }
-
-        true
+        self.fractional_seconds_equal(other)
     }
 }
 
 impl IonDataOrd for Timestamp {
     fn ion_cmp(&self, other: &Self) -> Ordering {
-        // Compare by point in time
         let ord = self.cmp(other);
         if ord != Ordering::Equal {
             return ord;
         };
 
-        // And then by precision
-        let ord = self.precision.cmp(&other.precision);
+        let ord = self.precision().cmp(&other.precision());
         if ord != Ordering::Equal {
             return ord;
         };
@@ -794,39 +868,38 @@ impl IonDataOrd for Timestamp {
             _ => {}
         }
 
-        // And finally by offset (unknown, then least to greatest)
-        match [self.offset, other.offset] {
+        // By offset (unknown, then least to greatest)
+        match [self.offset(), other.offset()] {
             [None, Some(_)] => Ordering::Less,
             [None, None] => Ordering::Equal,
             [Some(_), None] => Ordering::Greater,
-            [Some(o1), Some(o2)] => o1.local_minus_utc().cmp(&o2.local_minus_utc()),
+            [Some(o1), Some(o2)] => o1.cmp(&o2),
         }
     }
 }
 
 impl IonDataHash for Timestamp {
     fn ion_data_hash<H: Hasher>(&self, state: &mut H) {
-        self.precision.hash(state);
-        let self_dt = self.date_time;
-        self_dt.year().hash(state);
-        if self.precision >= TimestampPrecision::Month {
-            self_dt.month().hash(state)
+        let prec = self.precision();
+        prec.hash(state);
+        self.year().hash(state);
+        if prec >= TimestampPrecision::Month {
+            self.month().hash(state)
         }
-        if self.precision >= TimestampPrecision::Day {
-            self_dt.day().hash(state)
+        if prec >= TimestampPrecision::Day {
+            self.day().hash(state)
         }
-        if self.precision >= TimestampPrecision::HourAndMinute {
-            self_dt.hour().hash(state);
-            self_dt.minute().hash(state);
+        if prec >= TimestampPrecision::HourAndMinute {
+            self.hour().hash(state);
+            self.minute().hash(state);
         }
-        if self.precision == TimestampPrecision::Second {
-            self_dt.second().hash(state);
-
-            let fractional_seconds_scale = self.fractional_seconds_scale();
-            match fractional_seconds_scale {
+        if prec == TimestampPrecision::Second {
+            self.second().hash(state);
+            let scale = self.fractional_seconds_scale();
+            match scale {
                 None | Some(0) => {}
                 Some(1..=9) => {
-                    fractional_seconds_scale.unwrap().hash(state);
+                    scale.unwrap().hash(state);
                     self.fractional_seconds_as_nanoseconds()
                         .unwrap()
                         .hash(state);
@@ -838,7 +911,7 @@ impl IonDataHash for Timestamp {
                 }
             }
         }
-        self.offset.hash(state);
+        self.offset().hash(state);
     }
 }
 
@@ -846,14 +919,12 @@ impl IonDataHash for Timestamp {
 /// This builder uses the type-state pattern to expose only those methods which can result in a
 /// valid Timestamp. For example, it is not possible to set the `day` field without first setting
 /// the `year` and `month` fields.
-// See the unit tests for usage examples.
 #[derive(Debug, Clone)]
 pub struct TimestampBuilder<T> {
     _state: PhantomData<T>,
     fields_are_utc: bool,
     precision: TimestampPrecision,
     offset: Option<i32>,
-    // year..second are always set. Default is the implied value for the field if precision is less than that field.
     year: u32,
     month: u32,
     day: u32,
@@ -866,8 +937,6 @@ pub struct TimestampBuilder<T> {
 
 impl<T> TimestampBuilder<T> {
     fn change_state<U>(self) -> TimestampBuilder<U> {
-        // If we ever discover a performance difference, this entire function could be replaced with one line.
-        // unsafe { std::mem::transmute(self) }
         TimestampBuilder {
             _state: PhantomData,
             fields_are_utc: self.fields_are_utc,
@@ -884,170 +953,103 @@ impl<T> TimestampBuilder<T> {
         }
     }
 
-    /// Sets all of the fields on the given [`NaiveDateTime`] or [`DateTime<FixedOffset>`] using the
-    /// values from the TimestampBuilder. Only those fields required by the TimestampBuilder's
-    /// configured [`TimestampPrecision`] will be set.
-    fn configure_datetime<D>(&mut self, mut datetime: D) -> IonResult<D>
-    where
-        D: Datelike + Timelike + Debug,
-    {
-        if self.year == 0 || self.year > 9999 {
-            return IonResult::illegal_operation(format!(
-                "Timestamp year '{}' out of range (1-9999)",
-                self.year
-            ));
-        }
-        datetime = datetime.with_year(self.year as i32).ok_or_else(|| {
-            IonError::illegal_operation(format!("specified year ('{}') is invalid", self.year))
-        })?;
-        if self.precision == TimestampPrecision::Year {
-            return Ok(datetime);
-        }
-
-        // If precision >= Month, the month must be set.
-        let month = self.month;
-        datetime = datetime.with_month(month).ok_or_else(|| {
-            IonError::illegal_operation(format!("specified month ('{month}') is invalid"))
-        })?;
-        if self.precision == TimestampPrecision::Month {
-            return Ok(datetime);
-        }
-
-        // If precision >= Day, the day must be set.
-        let day = self.day;
-        datetime = datetime.with_day(day).ok_or_else(|| {
-            IonError::illegal_operation(format!("specified day ('{day}') is invalid"))
-        })?;
-        if self.precision == TimestampPrecision::Day {
-            return Ok(datetime);
-        }
-
-        // If precision >= HourAndMinute, the hour and minute must be set.
-        let hour = self.hour;
-        datetime = datetime.with_hour(hour).ok_or_else(|| {
-            IonError::illegal_operation(format!("specified hour ('{hour}') is invalid"))
-        })?;
-        let minute = self.minute;
-        datetime = datetime.with_minute(minute).ok_or_else(|| {
-            IonError::illegal_operation(format!("specified minute ('{minute}') is invalid"))
-        })?;
-        if self.precision == TimestampPrecision::HourAndMinute {
-            return Ok(datetime);
-        }
-
-        // If precision >= Second, the second must be set...
-        let second = self.second;
-        datetime = datetime.with_second(second).ok_or_else(|| {
-            IonError::illegal_operation(format!("provided second ('{second}') is invalid."))
-        })?;
-
-        // ...along with the fractional seconds.
-        // If fractional seconds is Digit, self.nanoseconds will be Some(_).
-        // If it's Arbitrary, self.nanoseconds will be None and we should set the nanoseconds
-        // field to 0. The real value will be stored in the Timestamp alongside the DateTime
-        // as a Decimal.
-        datetime = datetime
-            .with_nanosecond(self.nanoseconds.unwrap_or(0))
-            .ok_or_else(|| {
-                IonError::illegal_operation(format!("provided nanosecond ('{second}') is invalid"))
-            })?;
-
-        Ok(datetime)
-    }
-
-    // A [NaiveDateTime] has no offset. This function attempts to apply the provided offset to the
-    // NaiveDateTime, producing a DateTime<FixedOffset>. If the offset is invalid or the combination
-    // of offset and datetime would produce an invalid Timestamp, this function will return Err.
-    fn apply_offset(
-        offset_minutes: i32,
-        fields_are_utc: bool,
-        datetime: NaiveDateTime,
-    ) -> IonResult<DateTime<FixedOffset>> {
-        // The chrono APIs express their DateTime offsets in seconds, but the Ion APIs use minutes.
-        const SECONDS_PER_MINUTE: i32 = 60;
-        let offset_seconds = offset_minutes * SECONDS_PER_MINUTE;
-        let offset = FixedOffset::east_opt(offset_seconds).ok_or_else(|| {
-            IonError::illegal_operation(format!(
-                "specified offset ({offset_minutes} minutes) is invalid"
-            ))
-        })?;
-
-        // If the fields of the datetime are UTC, constructing a DateTime<FixedOffset> is guaranteed
-        // to succeed. Return it directly.
-        if fields_are_utc {
-            return Ok(offset.from_utc_datetime(&datetime));
-        }
-
-        // Otherwise, apply the offset to our (local) NaiveDateTime and make sure the resulting
-        // DateTime<FixedOffset> is valid.
-        match offset.from_local_datetime(&datetime) {
-            LocalResult::None => {
-                IonResult::illegal_operation(
-                    format!(
-                        "specified offset/datetime pair is invalid (offset={offset_minutes}, datetime={datetime})"
-                    )
-                )
-            },
-            LocalResult::Single(datetime) => Ok(datetime),
-            LocalResult::Ambiguous(_min, _max) => {
-                IonResult::illegal_operation(
-                    format!(
-                        "specified offset/datetime pair produces an ambiguous timestamp (offset={offset_minutes}, datetime={datetime})"
-                    )
-                )
-            }
-        }
-    }
-
     /// Attempt to construct a [Timestamp] using the values configured on the [TimestampBuilder].
-    /// If any of the individual fields are invalid (for example, a `month` value that is greater
-    /// than `12`) or if the resulting timestamp would represent a non-existent point in time
-    /// (like those bypassed by daylight saving time), this method will return an `Err(IonError)`.
-    pub fn build(mut self) -> IonResult<Timestamp> {
-        // Start with a clean slate NaiveDateTime that we can configure. (These are cheap to copy.)
-        let mut datetime: NaiveDateTime = NaiveDate::from_ymd_opt(0, 1, 1)
-            .unwrap()
-            .and_hms_nano_opt(0, 0, 0, 0)
-            .unwrap();
-        // Set all of the time fields on the datetime using the data from our TimestampBuilder
-        datetime = self.configure_datetime(datetime)?;
-        // If the timestamp we're building has a known offset...
-        let mut timestamp: Timestamp = if let Some(offset_minutes) = self.offset {
-            // ...apply the offset to our NaiveDateTime, producing a DateTime<FixedOffset>
-            let datetime_with_offset: DateTime<FixedOffset> =
-                Self::apply_offset(offset_minutes, self.fields_are_utc, datetime)?;
-            // ...and convert the DateTime<FixedOffset> into a full Timestamp.
-            Timestamp::from_fixed_offset_datetime(datetime_with_offset)
-        } else {
-            // Otherwise, there's not a known offset. We can directly convert our NaiveDateTime
-            // into a full Timestamp.
-            Timestamp::from_naive_datetime(datetime)
-        };
-        if self.precision < TimestampPrecision::Second {
-            timestamp.fractional_seconds = None;
-        }
-        timestamp.precision = self.precision;
-
-        // Copy the fractional seconds from the builder to the Timestamp.
-        if self.precision == TimestampPrecision::Second {
-            timestamp.fractional_seconds = self.fractional_seconds;
-            if let Some(Mantissa::Arbitrary(ref decimal)) = &timestamp.fractional_seconds {
-                if decimal.is_less_than_zero() {
-                    return IonResult::illegal_operation(
-                        "cannot create a timestamp with negative fractional seconds",
-                    );
+    pub fn build(self) -> IonResult<Timestamp> {
+        // Determine fractional seconds digits and coefficient
+        let (frac_digits, frac_coefficient) = if self.precision == TimestampPrecision::Second {
+            match &self.fractional_seconds {
+                Some(Mantissa::Digits(digits)) => {
+                    let nanos = self.nanoseconds.unwrap_or(0) as u64;
+                    // Convert nanoseconds (9 digits precision) to the requested digit count.
+                    let coefficient = if *digits <= 9 {
+                        nanos / 10u64.pow(9 - *digits)
+                    } else {
+                        nanos * 10u64.pow(*digits - 9)
+                    };
+                    (*digits, coefficient)
                 }
-                if decimal.is_greater_than_or_equal_to_one() {
-                    return IonResult::illegal_operation(
-                        "cannot create a timestamp with a fractional seconds >= 1.0",
-                    );
+                Some(Mantissa::Arbitrary(decimal)) => {
+                    if decimal.is_less_than_zero() {
+                        return IonResult::illegal_operation(
+                            "cannot create a timestamp with negative fractional seconds",
+                        );
+                    }
+                    if decimal.is_greater_than_or_equal_to_one() {
+                        return IonResult::illegal_operation(
+                            "cannot create a timestamp with a fractional seconds >= 1.0",
+                        );
+                    }
+                    if decimal.is_zero() && decimal.exponent >= 0 {
+                        // Zero with non-negative exponent = no fractional precision
+                        (0u32, 0u64)
+                    } else if decimal.is_zero() {
+                        // Zero with negative exponent = explicit zero precision
+                        // (e.g., 0d-4 means .0000)
+                        // Clamp to MAX_FRAC_DIGITS; beyond that, still zero value
+                        let digits = (decimal.exponent.unsigned_abs() as u32).min(MAX_FRAC_DIGITS);
+                        (digits, 0u64)
+                    } else {
+                        let digits = decimal.exponent.unsigned_abs() as u32;
+                        if digits > MAX_FRAC_DIGITS {
+                            return IonResult::illegal_operation(format!(
+                                "fractional seconds precision ({} digits) exceeds maximum ({})",
+                                digits, MAX_FRAC_DIGITS
+                            ));
+                        }
+                        let coeff = decimal.coefficient().magnitude().as_u128().unwrap_or(0) as u64;
+                        (digits, coeff)
+                    }
                 }
-                if decimal.is_zero() && decimal.exponent >= 0 {
-                    timestamp.fractional_seconds = None;
-                }
+                None => (0u32, 0u64),
             }
+        } else {
+            (0u32, 0u64)
+        };
+
+        let offset_i16 = self.offset.map(|m| m as i16);
+
+        if self.fields_are_utc {
+            if let Some(offset_minutes) = offset_i16 {
+                Timestamp::from_utc_fields(
+                    self.precision,
+                    offset_minutes,
+                    self.year as u16,
+                    self.month as u8,
+                    self.day as u8,
+                    self.hour as u8,
+                    self.minute as u8,
+                    self.second as u8,
+                    frac_digits,
+                    frac_coefficient,
+                )
+            } else {
+                Timestamp::from_fields(
+                    self.precision,
+                    None,
+                    self.year as u16,
+                    self.month as u8,
+                    self.day as u8,
+                    self.hour as u8,
+                    self.minute as u8,
+                    self.second as u8,
+                    frac_digits,
+                    frac_coefficient,
+                )
+            }
+        } else {
+            Timestamp::from_fields(
+                self.precision,
+                offset_i16,
+                self.year as u16,
+                self.month as u8,
+                self.day as u8,
+                self.hour as u8,
+                self.minute as u8,
+                self.second as u8,
+                frac_digits,
+                frac_coefficient,
+            )
         }
-        Ok(timestamp)
     }
 
     /// Like [Self::build], but the fields provided for each time unit are understood
@@ -1240,22 +1242,6 @@ impl TimestampBuilder<HasFractionalSeconds> {
 pub struct HasOffset;
 // No impl for TimestampBuilder<HasOffset> because `build()` is included in TimestampBuilder<T>
 
-fn downconvert_to_naive_datetime_with_nanoseconds(timestamp: &Timestamp) -> NaiveDateTime {
-    if timestamp.precision == TimestampPrecision::Second {
-        // DateTime always uses nanosecond precision. If our Timestamp uses a Decimal for
-        // its fractional seconds, attempt to convert it to a number of nanoseconds.
-        // This operation may add or lose precision, but is necessary to conform with
-        // chrono's expectations.
-        let nanoseconds = timestamp.fractional_seconds_as_nanoseconds().unwrap_or(0);
-        // Copy `self.date_time` and set the copy's nanoseconds to this new value.
-        // Modifying the nanoseconds should never be invalid.
-        timestamp.date_time.with_nanosecond(nanoseconds).unwrap()
-    } else {
-        // NaiveDateTime implements `Copy`
-        timestamp.date_time
-    }
-}
-
 #[cfg(feature = "experimental-chrono")]
 impl TryInto<NaiveDateTime> for Timestamp {
     type Error = IonError;
@@ -1293,14 +1279,13 @@ mod timestamp_tests {
     use super::*;
     use crate::ion_data::IonEq;
     use crate::result::IonResult;
-    use crate::types::Mantissa;
     use crate::{Decimal, Int, Timestamp, TimestampPrecision};
-    use chrono::NaiveDateTime;
+    #[cfg(feature = "experimental-chrono")]
+    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Timelike};
     use rstest::*;
     use std::cmp::Ordering;
     use std::io::Write;
     use std::ops::Mul;
-    use std::str::FromStr;
 
     #[test]
     fn test_timestamps_with_same_ymd_hms_millis_at_known_offset_are_equal() -> IonResult<()> {
@@ -1704,8 +1689,8 @@ mod timestamp_tests {
             .build()
             .unwrap_or_else(|e| panic!("Couldn't build timestamp: {e:?}"));
 
-        assert_eq!(timestamp1.precision, TimestampPrecision::Second);
-        assert_eq!(timestamp1.fractional_seconds, Some(Mantissa::Digits(3)));
+        assert_eq!(timestamp1.precision(), TimestampPrecision::Second);
+        assert_eq!(timestamp1.fractional_seconds_scale(), Some(3));
         assert_eq!(timestamp1, timestamp2);
 
         assert!(timestamp1.ion_eq(&timestamp2));
@@ -1728,7 +1713,7 @@ mod timestamp_tests {
             .build()
             .unwrap_or_else(|e| panic!("Couldn't build timestamp: {e:?}"));
 
-        assert_eq!(timestamp1.precision, TimestampPrecision::HourAndMinute);
+        assert_eq!(timestamp1.precision(), TimestampPrecision::HourAndMinute);
         assert_eq!(timestamp1, timestamp2)
     }
 
@@ -1896,22 +1881,30 @@ mod timestamp_tests {
             .build()?;
         assert_eq!(timestamp_3.nanoseconds(), 0);
 
-        // Big fractional coefficient
+        // Big fractional coefficient (>19 digits) is rejected by Variant A
         let big_coefficient: Int = Int::from(i128::MAX).data.mul(4).into();
-        let timestamp_4 = Timestamp::with_ymd(2023, 1, 1)
+        let result = Timestamp::with_ymd(2023, 1, 1)
             .with_hour_and_minute(0, 0)
             .with_second(0)
             .with_fractional_seconds(Decimal::new(big_coefficient, -39))
-            .build()?;
-        assert_eq!(timestamp_4.nanoseconds(), 680564733);
+            .build();
+        assert!(result.is_err());
 
-        // Exponent delta > 38: result should be 0
-        let timestamp_5 = Timestamp::with_ymd(2023, 1, 1)
+        // Exponent delta > 19 digits: also rejected
+        let result = Timestamp::with_ymd(2023, 1, 1)
             .with_hour_and_minute(0, 0)
             .with_second(0)
             .with_fractional_seconds(Decimal::new(1i64, -50))
+            .build();
+        assert!(result.is_err());
+
+        // 19 fractional digits (max allowed) should work
+        let timestamp_4 = Timestamp::with_ymd(2023, 1, 1)
+            .with_hour_and_minute(0, 0)
+            .with_second(0)
+            .with_fractional_seconds(Decimal::new(123456789u64, -9))
             .build()?;
-        assert_eq!(timestamp_5.nanoseconds(), 0);
+        assert_eq!(timestamp_4.nanoseconds(), 123456789);
 
         Ok(())
     }
@@ -1951,6 +1944,37 @@ mod timestamp_tests {
     }
 
     #[test]
+    fn test_timestamp_to_utc_year_boundary() -> IonResult<()> {
+        // UTC conversion that crosses year boundary to year 0 must not panic
+        let ts = TimestampBuilder::with_ymd(1, 1, 1)
+            .with_hour_and_minute(0, 30)
+            .with_offset(60)
+            .build()?;
+        let utc = ts.to_utc();
+        assert_eq!(utc.year(), 0);
+        assert_eq!(utc.month(), 12);
+        assert_eq!(utc.day(), 31);
+        assert_eq!(utc.hour(), 23);
+        assert_eq!(utc.minute(), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_timestamp_comparison_year_boundary_no_panic() -> IonResult<()> {
+        // Comparing timestamps where UTC conversion yields year 0 must not panic
+        let ts1 = TimestampBuilder::with_ymd(1, 1, 1)
+            .with_hour_and_minute(0, 30)
+            .with_offset(60)
+            .build()?;
+        let ts2 = TimestampBuilder::with_ymd(1, 1, 1)
+            .with_hour_and_minute(1, 30)
+            .with_offset(60)
+            .build()?;
+        assert!(ts1 < ts2);
+        Ok(())
+    }
+
+    #[test]
     fn test_timestamp_fractional_seconds_scale() -> IonResult<()> {
         // Set fractional seconds as Decimal
         let timestamp_with_micro_seconds = TimestampBuilder::with_ymd(2021, 4, 6)
@@ -1974,7 +1998,7 @@ mod timestamp_tests {
             .with_offset(-5 * 60)
             .build()?;
         assert_eq!(
-            timestamp_with_redundant_fractional_seconds.precision,
+            timestamp_with_redundant_fractional_seconds.precision(),
             TimestampPrecision::Second
         );
         assert_eq!(
@@ -2007,31 +2031,6 @@ mod timestamp_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_first_n_digits_of() {
-        assert_eq!(0, super::first_n_digits_of(1, 0));
-        assert_eq!(1, super::first_n_digits_of(1, 1));
-        assert_eq!(2, super::first_n_digits_of(1, 2));
-
-        assert_eq!(0, super::first_n_digits_of(3, 0));
-        assert_eq!(1, super::first_n_digits_of(3, 1));
-        assert_eq!(2, super::first_n_digits_of(3, 2));
-        assert_eq!(99, super::first_n_digits_of(9, 99));
-        assert_eq!(999, super::first_n_digits_of(9, 999));
-        assert_eq!(9999, super::first_n_digits_of(9, 9999));
-
-        assert_eq!(0, super::first_n_digits_of(0, 123456789));
-        assert_eq!(1, super::first_n_digits_of(1, 123456789));
-        assert_eq!(12, super::first_n_digits_of(2, 123456789));
-        assert_eq!(123, super::first_n_digits_of(3, 123456789));
-        assert_eq!(1234, super::first_n_digits_of(4, 123456789));
-        assert_eq!(12345, super::first_n_digits_of(5, 123456789));
-        assert_eq!(123456, super::first_n_digits_of(6, 123456789));
-        assert_eq!(1234567, super::first_n_digits_of(7, 123456789));
-        assert_eq!(12345678, super::first_n_digits_of(8, 123456789));
-        assert_eq!(123456789, super::first_n_digits_of(9, 123456789));
-    }
-
     #[rstest]
     #[case::timestamp_with_same_year(TimestampBuilder::with_year(2020).build().unwrap(), TimestampBuilder::with_year(2020).build().unwrap(), Ordering::Equal)]
     #[case::timestamp_with_different_year(TimestampBuilder::with_year(2020).build().unwrap(), TimestampBuilder::with_year(2021).build().unwrap(), Ordering::Less)]
@@ -2055,36 +2054,40 @@ mod timestamp_tests {
 
     #[test]
     fn ion_eq_fraction_seconds_mixed_mantissa() {
-        let t1 = Timestamp {
-            date_time: NaiveDateTime::from_str("1857-05-29T19:25:59.100").unwrap(),
-            offset: Some(offset_east(60 * 60 * 23 + 60 * 59)),
-            precision: TimestampPrecision::Second,
-            fractional_seconds: Some(Mantissa::Digits(1)),
-        };
-        let t2 = Timestamp {
-            date_time: NaiveDateTime::from_str("1857-05-29T19:25:59").unwrap(),
-            offset: Some(offset_east(60 * 60 * 23 + 60 * 59)),
-            precision: TimestampPrecision::Second,
-            fractional_seconds: Some(Mantissa::Arbitrary(Decimal::new(1u64, -1))),
-        };
+        // 1857-05-29T19:25:59.1+23:59
+        // offset = 23*60 + 59 = 1439 minutes
+        let t1 = TimestampBuilder::with_ymd(1857, 5, 29)
+            .with_hms(19, 25, 59)
+            .with_fractional_seconds(Decimal::new(1u64, -1))
+            .with_offset(1439)
+            .build()
+            .unwrap();
+        let t2 = TimestampBuilder::with_ymd(1857, 5, 29)
+            .with_hms(19, 25, 59)
+            .with_fractional_seconds(Decimal::new(1u64, -1))
+            .with_offset(1439)
+            .build()
+            .unwrap();
         assert_eq!(t1, t2);
         assert!(t1.ion_eq(&t2));
     }
 
     #[test]
     fn ion_eq_fraction_seconds_mixed_mantissa_2() {
-        let t1 = Timestamp {
-            date_time: NaiveDateTime::from_str("2001-08-01T18:18:49.006").unwrap(),
-            offset: Some(offset_east(60 * 60 + 60)),
-            precision: TimestampPrecision::Second,
-            fractional_seconds: Some(Mantissa::Digits(5)),
-        };
-        let t2 = Timestamp {
-            date_time: NaiveDateTime::from_str("2001-08-01T18:18:49").unwrap(),
-            offset: Some(offset_east(60 * 60 + 60)),
-            precision: TimestampPrecision::Second,
-            fractional_seconds: Some(Mantissa::Arbitrary(Decimal::new(600u64, -5))),
-        };
+        // 2001-08-01T18:18:49.00600+01:01
+        // offset = 61 minutes
+        let t1 = TimestampBuilder::with_ymd(2001, 8, 1)
+            .with_hms(18, 18, 49)
+            .with_fractional_seconds(Decimal::new(600u64, -5))
+            .with_offset(61)
+            .build()
+            .unwrap();
+        let t2 = TimestampBuilder::with_ymd(2001, 8, 1)
+            .with_hms(18, 18, 49)
+            .with_fractional_seconds(Decimal::new(600u64, -5))
+            .with_offset(61)
+            .build()
+            .unwrap();
         assert_eq!(t1, t2);
         assert!(t1.ion_eq(&t2));
     }

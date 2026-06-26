@@ -8,6 +8,8 @@ use test_generator::test_resources;
 mod ion_tests;
 
 const TO_STRING_SKIP_LIST: &[&str] = &[
+    // Packed Timestamp (Variant A) limits fractional seconds to 19 digits.
+    "ion-tests/iontestdata/good/equivs/timestampsLargeFractionalPrecision.ion",
     // These tests have shared symbol table imports in them, which the Reader does not
     // yet support.
     "ion-tests/iontestdata/good/subfieldVarInt.ion",
