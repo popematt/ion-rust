@@ -35,7 +35,6 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
     "$ion_shared_symbol_table",
 ];
 
-
 /// A bytecode generator optimized for in-memory UTF-8 Ion 1.0 text.
 ///
 /// Accepts `&str` input and exploits the UTF-8 guarantee to:
@@ -222,7 +221,6 @@ impl<'a> StrTextIon10Generator<'a> {
         self.emit_value(destination, constant_pool)
     }
 
-
     /// Emits bytecode for a value at the current position.
     #[inline]
     fn emit_value(
@@ -289,8 +287,14 @@ impl<'a> StrTextIon10Generator<'a> {
         let b = bytes[start];
 
         enum TokenKind {
-            Quoted { has_escapes: bool, text_start: usize, text_end: usize },
-            Identifier { end: usize },
+            Quoted {
+                has_escapes: bool,
+                text_start: usize,
+                text_end: usize,
+            },
+            Identifier {
+                end: usize,
+            },
         }
 
         let (kind, token_end) = if b == b'\'' {
@@ -312,7 +316,14 @@ impl<'a> StrTextIon10Generator<'a> {
             }
             let text_end = i;
             i += 1;
-            (TokenKind::Quoted { has_escapes, text_start: start + 1, text_end }, i)
+            (
+                TokenKind::Quoted {
+                    has_escapes,
+                    text_start: start + 1,
+                    text_end,
+                },
+                i,
+            )
         } else if is_identifier_start(b) {
             let mut i = start + 1;
             while i < bytes.len() && is_identifier_continue(bytes[i]) {
@@ -336,7 +347,11 @@ impl<'a> StrTextIon10Generator<'a> {
 
         // Confirmed annotation — emit directly as bytecode.
         match kind {
-            TokenKind::Quoted { has_escapes, text_start, text_end } => {
+            TokenKind::Quoted {
+                has_escapes,
+                text_start,
+                text_end,
+            } => {
                 if has_escapes {
                     let decoded = decode_escape_sequences(&bytes[text_start..text_end])?;
                     let arc = Arc::from(decoded.as_str());
@@ -1102,12 +1117,15 @@ impl<'a> StrTextIon10Generator<'a> {
         } else {
             slice.as_ptr() as usize - self.source.as_ptr() as usize
         };
-        let ref_len = if is_negative { slice.len() + 1 } else { slice.len() };
+        let ref_len = if is_negative {
+            slice.len() + 1
+        } else {
+            slice.len()
+        };
         destination.push(instr::INT_REF | (ref_len as u32 & 0x003F_FFFF));
         destination.push(ref_start as u32);
         Ok(())
     }
-
 
     // ─── Container Parsing ───────────────────────────────────────────
 
@@ -2094,7 +2112,6 @@ fn parse_i64_no_alloc(slice: &str, is_negative: bool) -> Option<i64> {
     Some(result)
 }
 
-
 /// Parses an arbitrary-precision integer string that may have a sign and/or 0x prefix.
 /// Used as a fallback when the value exceeds i128.
 fn parse_big_int(text: &str) -> IonResult<Int> {
@@ -2121,7 +2138,7 @@ fn parse_big_int(text: &str) -> IonResult<Int> {
     let uint = UInt::from_str_radix(magnitude_str, radix)?;
     let int_value = Int::from(&uint);
     if is_negative {
-        Ok(-int_value)
+        Ok(int_value.neg())
     } else {
         Ok(int_value)
     }
