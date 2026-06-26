@@ -300,7 +300,10 @@ fn bench_service_log(c: &mut Criterion) {
     );
 
     group.bench_with_input(
-        BenchmarkId::new("bytecode_v3_streaming_binary_no_drop", format!("{data_size}B")),
+        BenchmarkId::new(
+            "bytecode_v3_streaming_binary_no_drop",
+            format!("{data_size}B"),
+        ),
         &data,
         |b, data| {
             b.iter_with_large_drop(|| {
@@ -737,7 +740,10 @@ fn bench_fma_common_filter(c: &mut Criterion) {
     );
 
     group.bench_with_input(
-        BenchmarkId::new("bytecode_v3_streaming_binary_no_drop", format!("{binary_size}B")),
+        BenchmarkId::new(
+            "bytecode_v3_streaming_binary_no_drop",
+            format!("{binary_size}B"),
+        ),
         &binary_data,
         |b, data| {
             b.iter_with_large_drop(|| {

@@ -48,7 +48,13 @@ fn main() {
         let par_time = start.elapsed() / 5;
         println!("Parallel   (w/ drop): {:?}", par_time);
 
-        println!("\nSpeedup (w/ drop):  {:.2}x", seq_time.as_secs_f64() / par_time.as_secs_f64());
-        println!("Speedup (no drop):  {:.2}x", seq_no_drop.as_secs_f64() / par_no_drop.as_secs_f64());
+        println!(
+            "\nSpeedup (w/ drop):  {:.2}x",
+            seq_time.as_secs_f64() / par_time.as_secs_f64()
+        );
+        println!(
+            "Speedup (no drop):  {:.2}x",
+            seq_no_drop.as_secs_f64() / par_no_drop.as_secs_f64()
+        );
     }
 }

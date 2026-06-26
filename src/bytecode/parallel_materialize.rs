@@ -24,8 +24,10 @@ use crate::bytecode::ion10::BinaryIon10Generator;
 use crate::bytecode::materialize::SYSTEM_SYMBOLS;
 use crate::element::Annotations;
 use crate::result::IonFailure;
-use crate::{Bytes, Decimal, Element, Int, IonResult, IonType, Sequence, Str, Struct, Symbol,
-            Timestamp, UInt, Value};
+use crate::{
+    Bytes, Decimal, Element, Int, IonResult, IonType, Sequence, Str, Struct, Symbol, Timestamp,
+    UInt, Value,
+};
 
 /// Reads all top-level values from binary Ion data, materializing TLVs in
 /// parallel using Rayon.
@@ -177,9 +179,8 @@ fn scan_segments<S: AsRef<[u8]>>(
                 let tlv_start = pos;
 
                 // Lazily create the Arc snapshot for this symbol table state
-                let symtab = current_symtab.get_or_insert_with(|| {
-                    Arc::from(symbol_table.as_slice())
-                });
+                let symtab =
+                    current_symtab.get_or_insert_with(|| Arc::from(symbol_table.as_slice()));
 
                 // Skip past this entire TLV to find where it ends.
                 let tlv_end = skip_top_level_value(bytecode, pos);
@@ -778,9 +779,7 @@ impl<'a> TlvMaterializer<'a> {
 
         let hour = read_var_uint_from_slice(bytes, &mut pos)?;
         if pos >= bytes.len() {
-            return IonResult::decoding_error(
-                "timestamps with an hour must also specify a minute",
-            );
+            return IonResult::decoding_error("timestamps with an hour must also specify a minute");
         }
 
         let minute = read_var_uint_from_slice(bytes, &mut pos)?;
@@ -810,9 +809,7 @@ impl<'a> TlvMaterializer<'a> {
         let coeff_bytes = &bytes[pos..];
 
         if coeff_bytes.len() > 16 {
-            return IonResult::decoding_error(
-                "timestamp fractional coefficient exceeds 128 bits",
-            );
+            return IonResult::decoding_error("timestamp fractional coefficient exceeds 128 bits");
         }
 
         let fractional_seconds = if coeff_bytes.is_empty() {
@@ -1026,10 +1023,7 @@ mod tests {
         let binary = encode_as_binary(text);
         let expected = Element::read_all(&binary)?;
         let parallel = read_all_v3_parallel(&binary)?;
-        assert_eq!(
-            expected, parallel,
-            "mismatch for mixed types input"
-        );
+        assert_eq!(expected, parallel, "mismatch for mixed types input");
         Ok(())
     }
 }
