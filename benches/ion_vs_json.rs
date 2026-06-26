@@ -139,8 +139,7 @@ fn bench_owned_dom(c: &mut Criterion) {
             let mut count = 0usize;
             for line in JSON_NESTED.lines() {
                 let mut bytes = line.as_bytes().to_vec();
-                let v: simd_json::OwnedValue =
-                    simd_json::to_owned_value(&mut bytes).unwrap();
+                let v: simd_json::OwnedValue = simd_json::to_owned_value(&mut bytes).unwrap();
                 black_box(&v);
                 count += 1;
             }
@@ -177,8 +176,7 @@ fn bench_owned_dom(c: &mut Criterion) {
             let mut count = 0usize;
             for line in JSON_EMF.lines() {
                 let mut bytes = line.as_bytes().to_vec();
-                let v: simd_json::OwnedValue =
-                    simd_json::to_owned_value(&mut bytes).unwrap();
+                let v: simd_json::OwnedValue = simd_json::to_owned_value(&mut bytes).unwrap();
                 black_box(&v);
                 count += 1;
             }
@@ -278,8 +276,7 @@ fn bench_arena_dom(c: &mut Criterion) {
             let mut count = 0usize;
             for line in JSON_NESTED.lines() {
                 let mut bytes = line.as_bytes().to_vec();
-                let v: simd_json::BorrowedValue =
-                    simd_json::to_borrowed_value(&mut bytes).unwrap();
+                let v: simd_json::BorrowedValue = simd_json::to_borrowed_value(&mut bytes).unwrap();
                 black_box(&v);
                 count += 1;
             }
@@ -308,8 +305,7 @@ fn bench_arena_dom(c: &mut Criterion) {
             let mut count = 0usize;
             for line in JSON_EMF.lines() {
                 let mut bytes = line.as_bytes().to_vec();
-                let v: simd_json::BorrowedValue =
-                    simd_json::to_borrowed_value(&mut bytes).unwrap();
+                let v: simd_json::BorrowedValue = simd_json::to_borrowed_value(&mut bytes).unwrap();
                 black_box(&v);
                 count += 1;
             }
@@ -604,15 +600,13 @@ fn bench_write(c: &mut Criterion) {
     use ion_rs::{v1_0, Element, Sequence};
 
     // Pre-parse the data into DOM form so we're only measuring write speed.
-    let emf_elements: Sequence =
-        ion_rs::bytecode::materialize::read_all_v3(ION_EMF).unwrap();
+    let emf_elements: Sequence = ion_rs::bytecode::materialize::read_all_v3(ION_EMF).unwrap();
     let emf_json_values: Vec<serde_json::Value> = JSON_EMF
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
 
-    let log_elements: Sequence =
-        ion_rs::bytecode::materialize::read_all_v3(ION_SMALL).unwrap();
+    let log_elements: Sequence = ion_rs::bytecode::materialize::read_all_v3(ION_SMALL).unwrap();
     let log_json_values: Vec<serde_json::Value> = JSON_SMALL
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
