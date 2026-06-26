@@ -156,6 +156,28 @@ fn arena_string(arena: &mut BumpArena, text: &str) -> String {
     unsafe { String::from_raw_parts(ptr, len, len) }
 }
 
+/// Creates a `String` pointing directly into the source data buffer
+/// without copying. The String's Drop will never run (arena doesn't
+/// run destructors), so the fact that we don't own this memory is safe.
+///
+/// # Safety
+/// - `text` must point into a buffer that outlives the ArenaReader
+///   (guaranteed because the generator borrows the source).
+/// - The returned String is only accessible as `&str` via `&Element`.
+#[inline]
+unsafe fn source_string(text: &str) -> String {
+    let len = text.len();
+    String::from_raw_parts(text.as_ptr() as *mut u8, len, len)
+}
+
+/// Creates a `Vec<u8>` pointing directly into the source data buffer
+/// without copying. Same safety invariants as `source_string`.
+#[inline]
+unsafe fn source_bytes(bytes: &[u8]) -> Vec<u8> {
+    let len = bytes.len();
+    Vec::from_raw_parts(bytes.as_ptr() as *mut u8, len, len)
+}
+
 /// Copies `bytes` into the arena and constructs a `Vec<u8>` backed by
 /// arena memory.
 #[inline]
@@ -175,6 +197,12 @@ fn arena_symbol_from_text(arena: &mut BumpArena, text: &str) -> Symbol {
     Symbol::owned(s)
 }
 
+/// Creates a Symbol pointing directly into source data without copying.
+/// Same safety invariants as `source_string`.
+#[inline]
+unsafe fn source_symbol(text: &str) -> Symbol {
+    Symbol::owned(source_string(text))
+}
 
 // ─── ArenaReader ───────────────────────────────────────────────────────
 
@@ -466,8 +494,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                     let position = self.bytecode[p];
                     p += 1;
                     let text = self.generator.read_text_ref(position, data)?;
-                    let text: &str = unsafe { &*(text as *const str) };
-                    arena_symbol_from_text(&mut self.arena, text)
+                    // SAFETY: text points into the generator's source buffer
+                    // which outlives the ArenaReader. The String's Drop never runs.
+                    unsafe { source_symbol(text) }
                 }
                 _ => return IonResult::decoding_error("expected annotation instruction"),
             };
@@ -578,9 +607,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::STRING_REF => {
                 let position = self.consume_raw();
                 let text = self.generator.read_text_ref(position, instr.data())?;
-                // SAFETY: The generator's source data is stable during materialization.
-                let text: &str = unsafe { &*(text as *const str) };
-                let s = arena_string(&mut self.arena, text);
+                // SAFETY: text points into the generator's source buffer which
+                // outlives the ArenaReader. The String's Drop never runs.
+                let s = unsafe { source_string(text) };
                 Ok(Value::String(Str::from(s)))
             }
             op::NULL_STRING => Ok(Value::Null(IonType::String)),
@@ -612,9 +641,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::SYMBOL_REF => {
                 let position = self.consume_raw();
                 let text = self.generator.read_text_ref(position, instr.data())?;
-                // SAFETY: The generator's source data is stable during materialization.
-                let text: &str = unsafe { &*(text as *const str) };
-                Ok(Value::Symbol(arena_symbol_from_text(&mut self.arena, text)))
+                // SAFETY: text points into the generator's source buffer which
+                // outlives the ArenaReader. The String's Drop never runs.
+                Ok(Value::Symbol(unsafe { source_symbol(text) }))
             }
             op::NULL_SYMBOL => Ok(Value::Null(IonType::Symbol)),
 
@@ -632,9 +661,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::BLOB_REF => {
                 let position = self.consume_raw();
                 let bytes = self.generator.read_bytes_ref(position, instr.data())?;
-                // SAFETY: Generator source data is stable during materialization.
-                let bytes: &[u8] = unsafe { &*(bytes as *const [u8]) };
-                let v = arena_bytes(&mut self.arena, bytes);
+                // SAFETY: bytes points into the generator's source buffer which
+                // outlives the ArenaReader. The Vec's Drop never runs.
+                let v = unsafe { source_bytes(bytes) };
                 Ok(Value::Blob(Bytes::from(v)))
             }
             op::NULL_BLOB => Ok(Value::Null(IonType::Blob)),
@@ -653,9 +682,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::CLOB_REF => {
                 let position = self.consume_raw();
                 let bytes = self.generator.read_bytes_ref(position, instr.data())?;
-                // SAFETY: Generator source data is stable during materialization.
-                let bytes: &[u8] = unsafe { &*(bytes as *const [u8]) };
-                let v = arena_bytes(&mut self.arena, bytes);
+                // SAFETY: bytes points into the generator's source buffer which
+                // outlives the ArenaReader. The Vec's Drop never runs.
+                let v = unsafe { source_bytes(bytes) };
                 Ok(Value::Clob(Bytes::from(v)))
             }
             op::NULL_CLOB => Ok(Value::Null(IonType::Clob)),
@@ -776,9 +805,9 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::FIELD_NAME_REF => {
                 let position = self.consume_raw();
                 let text = self.generator.read_text_ref(position, data)?;
-                // SAFETY: Generator source is stable during materialization.
-                let text: &str = unsafe { &*(text as *const str) };
-                Ok(arena_symbol_from_text(&mut self.arena, text))
+                // SAFETY: text points into the generator's source buffer which
+                // outlives the ArenaReader. The String's Drop never runs.
+                Ok(unsafe { source_symbol(text) })
             }
             _ => IonResult::decoding_error("expected field name instruction"),
         }
