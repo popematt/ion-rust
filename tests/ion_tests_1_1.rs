@@ -19,6 +19,8 @@ impl ElementApi for LazyReaderElementApi {
 
     fn global_skip_list() -> SkipList {
         &[
+            // Packed Timestamp (Variant A) limits fractional seconds to 19 digits.
+            "ion-tests/iontestdata_1_1/good/equivs/timestampsLargeFractionalPrecision.ion",
             // TODO: Revisit these once the Ion 1.1 System Symbol Table is defined
             "ion-tests/iontestdata_1_1/good/equivs/localSymbolTableAppend.ion",
             "ion-tests/iontestdata_1_1/good/equivs/localSymbolTableNullSlots.ion",

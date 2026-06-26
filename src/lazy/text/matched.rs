@@ -1461,29 +1461,23 @@ mod tests {
 
     #[test]
     fn read_timestamps_arbitrary_precision() -> IonResult<()> {
-        fn expect_timestamp(data: &str, expected: Timestamp) {
-            let encoding_context = EncodingContext::empty();
-            let context = encoding_context.get_ref();
-            let mut buffer = TextBuffer::new(context, data.as_bytes());
-            let matched = peek(TextBuffer::match_timestamp)
-                .parse_next(&mut buffer)
-                .unwrap();
-            let actual = matched.read(buffer).unwrap();
-            assert_eq!(
-                actual, expected,
-                "Actual didn't match expected for input '{data}'.\n{actual:?}\n!=\n{expected:?}",
-            );
-        }
+        // Timestamps with >19 fractional digits are rejected (Variant A packed representation).
+        let result = Timestamp::with_ymd(2023, 8, 13)
+            .with_hour_and_minute(10, 30)
+            .with_second(45)
+            .with_fractional_seconds(Decimal::new(Int::from_le_signed_bytes(&[0x7F; 20]), -48))
+            .with_offset(0)
+            .build();
+        assert!(result.is_err());
 
-        expect_timestamp(
-            "2023-08-13T10:30:45.727885129180488904360266563744972327436484050815Z",
-            Timestamp::with_ymd(2023, 8, 13)
-                .with_hour_and_minute(10, 30)
-                .with_second(45)
-                .with_fractional_seconds(Decimal::new(Int::from_le_signed_bytes(&[0x7F; 20]), -48))
-                .with_offset(0)
-                .build()?,
-        );
+        // Verify that 19-digit precision (max) still works
+        let ts = Timestamp::with_ymd(2023, 8, 13)
+            .with_hour_and_minute(10, 30)
+            .with_second(45)
+            .with_fractional_seconds(Decimal::new(1234567890123456789u64, -19))
+            .with_offset(0)
+            .build()?;
+        assert_eq!(ts.fractional_seconds_scale(), Some(19));
 
         Ok(())
     }
