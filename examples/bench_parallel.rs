@@ -29,6 +29,9 @@ fn main() {
         }
         let par_time = start.elapsed() / 5;
         println!("Parallel:   {:?}", par_time);
-        println!("Speedup:    {:.2}x", seq_time.as_secs_f64() / par_time.as_secs_f64());
+        println!(
+            "Speedup:    {:.2}x",
+            seq_time.as_secs_f64() / par_time.as_secs_f64()
+        );
     }
 }
