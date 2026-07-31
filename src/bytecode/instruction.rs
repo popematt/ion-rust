@@ -117,7 +117,7 @@ use crate::IonType;
 /// ```
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-pub(crate) struct Instruction(u32);
+pub struct Instruction(u32);
 
 impl Instruction {
     /// Constructs an instruction from a raw packed u32.
@@ -298,7 +298,7 @@ pub(crate) fn render_bytecode(bytecode: &[Instruction]) -> String {
     out
 }
 
-pub(crate) mod operation_kind {
+pub mod operation_kind {
     use crate::IonType;
 
     pub const UNSET: u8 = 0;
@@ -358,7 +358,7 @@ pub(crate) mod operation_kind {
     }
 }
 
-pub(crate) mod op {
+pub mod op {
     use super::operation_kind as kind;
 
     const fn make(kind: u8, variant: u8) -> u8 {
@@ -451,7 +451,7 @@ pub(crate) mod op {
     pub const META_COMMENT: u8 = make(kind::METADATA, 2);
 }
 
-pub(crate) mod instr {
+pub mod instr {
     use super::op;
 
     const fn make(operation: u8, operand_count: u8) -> u32 {

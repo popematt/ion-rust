@@ -16,7 +16,7 @@ use crate::{Decimal, Int, Timestamp};
 /// - Cloning a constant for the caller is cheap (Arc::clone).
 /// - Strings can be shared directly with `Symbol::shared(Arc<str>)`.
 #[derive(Clone, Debug)]
-pub(crate) enum Constant {
+pub enum Constant {
     BigInt(Arc<Int>),
     Decimal(Arc<Decimal>),
     Timestamp(Arc<Timestamp>),
@@ -31,7 +31,7 @@ pub(crate) enum Constant {
 /// user-value constants from a refill cycle can be discarded while
 /// retaining macro-owned constants.
 #[derive(Debug)]
-pub(crate) struct ConstantPool {
+pub struct ConstantPool {
     entries: Vec<Constant>,
 }
 

@@ -59,7 +59,7 @@ pub(crate) fn read_one_v2(data: &[u8]) -> IonResult<Element> {
 // ─── read_all_v3: linear bytecode walker ────────────────────────────
 
 /// Ion 1.0 system symbol table (SIDs 1-9).
-pub(crate) const SYSTEM_SYMBOLS: [&str; 9] = [
+pub const SYSTEM_SYMBOLS: [&str; 9] = [
     "$ion",
     "$ion_1_0",
     "$ion_symbol_table",
