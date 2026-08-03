@@ -43,6 +43,7 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
 /// - Parse in a single pass (no scan phase)
 pub struct StrTextIon10Generator<'a> {
     source: &'a str,
+    source_arc: Arc<str>,
     position: usize,
     symbol_table: Vec<Option<Arc<str>>>,
     /// Whether we have already emitted all bytecode (and END_OF_INPUT).
@@ -52,9 +53,11 @@ pub struct StrTextIon10Generator<'a> {
 impl<'a> StrTextIon10Generator<'a> {
     /// Creates a new in-memory text generator from the given string.
     pub fn new(source: &'a str) -> Self {
+        let source_arc = Arc::from(source);
         let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         Self {
             source,
+            source_arc,
             position: 0,
             symbol_table,
             done: false,
@@ -2005,6 +2008,10 @@ impl<'a> BytecodeGenerator for StrTextIon10Generator<'a> {
             return IonResult::decoding_error("bytes reference out of bounds");
         }
         Ok(&self.source.as_bytes()[start..end])
+    }
+
+    fn source_arc(&self) -> Option<&Arc<str>> {
+        Some(&self.source_arc)
     }
 }
 

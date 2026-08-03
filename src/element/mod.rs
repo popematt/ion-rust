@@ -710,6 +710,7 @@ impl Element {
                     // SAFETY: The pointer is valid while we hold this Element.
                     Ok(unsafe { ptr.text() }.to_string())
                 }
+                SymbolText::SourceSlice(substr) => Ok(substr.as_str().to_string()),
             },
             _ => {
                 let sym = Self {

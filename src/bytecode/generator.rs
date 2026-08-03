@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::bytecode::constant_pool::ConstantPool;
 use crate::{Decimal, Int, IonResult, Timestamp};
 
@@ -41,6 +43,13 @@ pub trait BytecodeGenerator {
 
     /// Reads raw bytes from the source, borrowing from the underlying data.
     fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]>;
+
+    /// Returns a shared reference to the source buffer as an Arc, if
+    /// this generator supports zero-copy text materialization.
+    /// Returns None for generators that don't (binary, streaming).
+    fn source_arc(&self) -> Option<&Arc<str>> {
+        None
+    }
 }
 
 impl BytecodeGenerator for Box<dyn BytecodeGenerator> {
@@ -70,5 +79,9 @@ impl BytecodeGenerator for Box<dyn BytecodeGenerator> {
 
     fn read_bytes_ref(&self, position: u32, length: u32) -> IonResult<&[u8]> {
         (**self).read_bytes_ref(position, length)
+    }
+
+    fn source_arc(&self) -> Option<&Arc<str>> {
+        (**self).source_arc()
     }
 }

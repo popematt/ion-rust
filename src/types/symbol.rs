@@ -1,3 +1,4 @@
+use crate::bytecode::arc_substr::ArcSubstr;
 use crate::ion_data::{IonDataHash, IonDataOrd, IonEq};
 use crate::result::IonFailure;
 use crate::{IonResult, SymbolRef};
@@ -93,6 +94,8 @@ pub(crate) enum SymbolText {
     // This Symbol borrows from an arena reader's symbol table via raw pointer.
     // The pointer targets an `Arc<str>` entry that is stable during materialization.
     ArenaBorrowed(SymbolTableRef),
+    // This Symbol is a zero-copy sub-slice of a source buffer via Arc.
+    SourceSlice(ArcSubstr),
     // This Symbol is equivalent to SID zero (`$0`)
     Unknown,
 }
@@ -106,6 +109,7 @@ impl SymbolText {
             // SAFETY: When this variant exists, the arena reader guarantees
             // the pointer is valid for the lifetime of any accessible reference.
             SymbolText::ArenaBorrowed(ptr) => unsafe { ptr.text() },
+            SymbolText::SourceSlice(s) => s.as_str(),
             SymbolText::Unknown => return None,
         };
         Some(text)
@@ -131,6 +135,7 @@ impl Clone for SymbolText {
                 // Cloning upgrades to a fully independent `Shared(Arc<str>)`.
                 SymbolText::Shared(unsafe { ptr.to_arc() })
             }
+            SymbolText::SourceSlice(s) => SymbolText::SourceSlice(s.clone()),
             SymbolText::Unknown => SymbolText::Unknown,
         }
     }
@@ -191,6 +196,12 @@ impl Symbol {
     pub fn unknown_text() -> Symbol {
         Symbol {
             text: SymbolText::Unknown,
+        }
+    }
+
+    pub(crate) fn source_slice(substr: ArcSubstr) -> Symbol {
+        Symbol {
+            text: SymbolText::SourceSlice(substr),
         }
     }
 

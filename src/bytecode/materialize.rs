@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::bytecode::arc_substr::ArcSubstr;
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
 use crate::bytecode::instruction::{op, operation_kind, Instruction};
@@ -285,10 +286,13 @@ pub(crate) struct BytecodeElementIterator<G: BytecodeGenerator> {
     symbol_table: Vec<Option<Arc<str>>>,
     constant_pool: ConstantPool,
     first_local_constant: usize,
+    /// Cached source Arc for zero-copy text materialization.
+    source_arc: Option<Arc<str>>,
 }
 
 impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
     pub(crate) fn new(generator: G) -> IonResult<Self> {
+        let source_arc = generator.source_arc().cloned();
         let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         let mut iter = Self {
             generator,
@@ -297,6 +301,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             symbol_table,
             constant_pool: ConstantPool::new(),
             first_local_constant: 0,
+            source_arc,
         };
         // Perform initial refill to populate bytecode.
         iter.refill()?;
@@ -455,8 +460,12 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 op::ANNOTATION_REF => {
                     let position = self.bytecode[p];
                     p += 1;
-                    let text = self.generator.read_text_ref(position, data)?;
-                    Symbol::from(text)
+                    if let Some(ref arc) = self.source_arc {
+                        Symbol::source_slice(ArcSubstr::new(arc, position, data))
+                    } else {
+                        let text = self.generator.read_text_ref(position, data)?;
+                        Symbol::from(text)
+                    }
                 }
                 _ => return IonResult::decoding_error("expected annotation instruction"),
             };
@@ -543,8 +552,16 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             },
             op::STRING_REF => {
                 let position = self.consume_raw();
-                let text = self.generator.read_text_ref(position, instr.data())?;
-                Ok(Value::String(Str::from(text)))
+                if let Some(ref arc) = self.source_arc {
+                    Ok(Value::String(Str::from_source(ArcSubstr::new(
+                        arc,
+                        position,
+                        instr.data(),
+                    ))))
+                } else {
+                    let text = self.generator.read_text_ref(position, instr.data())?;
+                    Ok(Value::String(Str::from(text)))
+                }
             }
             op::NULL_STRING => Ok(Value::Null(IonType::String)),
 
@@ -566,8 +583,16 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             }
             op::SYMBOL_REF => {
                 let position = self.consume_raw();
-                let text = self.generator.read_text_ref(position, instr.data())?;
-                Ok(Value::Symbol(Symbol::from(text)))
+                if let Some(ref arc) = self.source_arc {
+                    Ok(Value::Symbol(Symbol::source_slice(ArcSubstr::new(
+                        arc,
+                        position,
+                        instr.data(),
+                    ))))
+                } else {
+                    let text = self.generator.read_text_ref(position, instr.data())?;
+                    Ok(Value::Symbol(Symbol::from(text)))
+                }
             }
             op::NULL_SYMBOL => Ok(Value::Null(IonType::Symbol)),
 
@@ -653,8 +678,12 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             },
             op::FIELD_NAME_REF => {
                 let position = self.consume_raw();
-                let text = self.generator.read_text_ref(position, data)?;
-                Ok(Symbol::from(text))
+                if let Some(ref arc) = self.source_arc {
+                    Ok(Symbol::source_slice(ArcSubstr::new(arc, position, data)))
+                } else {
+                    let text = self.generator.read_text_ref(position, data)?;
+                    Ok(Symbol::from(text))
+                }
             }
             _ => IonResult::decoding_error("expected field name instruction"),
         }
