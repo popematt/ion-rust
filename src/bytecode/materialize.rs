@@ -663,7 +663,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             let element = self.read_element()?;
             fields.push((field_name, element));
         }
-        Ok(Struct::from_iter(fields))
+        Ok(Struct::from_vec(fields))
     }
 
     /// Reads a field name instruction and resolves it to a `Symbol`.
@@ -909,7 +909,7 @@ fn materialize_struct<G: BytecodeGenerator>(reader: &mut BytecodeReader<G>) -> I
         fields.push((field_name, element));
     }
     reader.step_out()?;
-    Ok(Struct::from_iter(fields))
+    Ok(Struct::from_vec(fields))
 }
 
 #[cfg(test)]

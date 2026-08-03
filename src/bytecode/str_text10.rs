@@ -267,21 +267,127 @@ impl<'a> StrTextIon10Generator<'a> {
     }
 
     /// Emits an annotated value (annotations + value).
+    ///
+    /// Fuses annotation detection with value dispatch: when the current
+    /// byte is an identifier-start or `'`, scans the token once and
+    /// checks for `::`. If not an annotation, uses the already-known
+    /// token end to emit the value directly — no re-scan.
     #[inline]
     fn emit_annotated_value(
         &mut self,
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
+        if !self.skip_whitespace_and_comments() {
+            return IonResult::decoding_error("expected value");
+        }
+
+        let bytes = self.source.as_bytes();
+        let b = bytes[self.position];
+
+        // Fast path: first byte can't start an annotation → emit value directly.
+        if b != b'\'' && !is_identifier_start(b) {
+            return self.emit_value(destination, constant_pool);
+        }
+
+        // Could be annotation or value. Check for annotations in a loop.
         loop {
-            if !self.skip_whitespace_and_comments() {
-                return IonResult::decoding_error("expected value");
-            }
             if !self.try_emit_annotation(destination, constant_pool)? {
                 break;
             }
+            if !self.skip_whitespace_and_comments() {
+                return IonResult::decoding_error("expected value after annotation");
+            }
         }
+
+        // Not an annotation. For identifiers, try_emit_annotation already
+        // scanned the token but didn't advance position. We can avoid
+        // re-scanning by handling the identifier-start case inline.
+        let b = bytes[self.position];
+        if is_identifier_start(b) {
+            return self.emit_identifier_value(destination, constant_pool);
+        }
+
         self.emit_value(destination, constant_pool)
+    }
+
+    /// Emits a value that starts with an identifier-start byte. Scans
+    /// the identifier once and dispatches based on the keyword or emits
+    /// a symbol reference.
+    fn emit_identifier_value(
+        &mut self,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) -> IonResult<()> {
+        let bytes = self.source.as_bytes();
+        let start = self.position;
+        let mut i = start + 1;
+        while i < bytes.len() && is_identifier_continue(bytes[i]) {
+            i += 1;
+        }
+        let word = &bytes[start..i];
+        self.position = i;
+
+        match word {
+            b"true" => {
+                destination.push(instr::BOOL | 1);
+            }
+            b"false" => {
+                destination.push(instr::BOOL);
+            }
+            b"nan" => {
+                let bits = f64::NAN.to_bits();
+                destination.push(instr::FLOAT_F64);
+                destination.push((bits >> 32) as u32);
+                destination.push(bits as u32);
+            }
+            b"null" => {
+                if i < bytes.len() && bytes[i] == b'.' {
+                    i += 1;
+                    let type_start = i;
+                    while i < bytes.len() && is_identifier_continue(bytes[i]) {
+                        i += 1;
+                    }
+                    let type_name = &bytes[type_start..i];
+                    self.position = i;
+                    let null_instr = match type_name {
+                        b"null" => instr::NULL_NULL,
+                        b"bool" => instr::NULL_BOOL,
+                        b"int" => instr::NULL_INT,
+                        b"float" => instr::NULL_FLOAT,
+                        b"decimal" => instr::NULL_DECIMAL,
+                        b"timestamp" => instr::NULL_TIMESTAMP,
+                        b"symbol" => instr::NULL_SYMBOL,
+                        b"string" => instr::NULL_STRING,
+                        b"clob" => instr::NULL_CLOB,
+                        b"blob" => instr::NULL_BLOB,
+                        b"list" => instr::NULL_LIST,
+                        b"sexp" => instr::NULL_SEXP,
+                        b"struct" => instr::NULL_STRUCT,
+                        _ => {
+                            return IonResult::decoding_error(format!(
+                                "unknown null type: null.{}",
+                                String::from_utf8_lossy(type_name)
+                            ));
+                        }
+                    };
+                    destination.push(null_instr);
+                } else {
+                    destination.push(instr::NULL_NULL);
+                }
+            }
+            _ => {
+                let text = &self.source[start..i];
+                if let Some(sid) = try_parse_sid_from_text(text) {
+                    destination.push(instr::SYMBOL_SID | sid);
+                } else {
+                    let length = (i - start) as u32;
+                    destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
+                    destination.push(start as u32);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Tries to parse an annotation at the current position and emit it
