@@ -35,6 +35,18 @@ const SYSTEM_SYMBOLS: [&str; 9] = [
     "$ion_shared_symbol_table",
 ];
 
+/// Whitespace lookup table -- true for Ion whitespace bytes (space, tab, CR, LF, VT, FF).
+const WS: [bool; 256] = {
+    let mut t = [false; 256];
+    t[0x09] = true; // \t
+    t[0x0A] = true; // \n
+    t[0x0B] = true; // VT
+    t[0x0C] = true; // FF
+    t[0x0D] = true; // \r
+    t[0x20] = true; // space
+    t
+};
+
 /// A bytecode generator optimized for in-memory UTF-8 Ion 1.0 text.
 ///
 /// Accepts `&str` input and exploits the UTF-8 guarantee to:
@@ -71,9 +83,10 @@ impl<'a> StrTextIon10Generator<'a> {
     fn skip_whitespace_only(&mut self) -> bool {
         let bytes = self.source.as_bytes();
         while self.position < bytes.len() {
-            match bytes[self.position] {
-                b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C' => self.position += 1,
-                _ => return true,
+            if WS[bytes[self.position] as usize] {
+                self.position += 1;
+            } else {
+                return true;
             }
         }
         false
@@ -88,59 +101,56 @@ impl<'a> StrTextIon10Generator<'a> {
             if self.position >= bytes.len() {
                 return false;
             }
-            match bytes[self.position] {
-                b' ' | b'\t' | b'\r' | b'\n' | b'\x0B' | b'\x0C' => {
-                    self.position += 1;
+            let b = bytes[self.position];
+            if WS[b as usize] {
+                self.position += 1;
+            } else if b == b'/' {
+                if self.position + 1 >= bytes.len() {
+                    return true;
                 }
-                b'/' => {
-                    if self.position + 1 >= bytes.len() {
-                        return true;
+                match bytes[self.position + 1] {
+                    b'/' => {
+                        // Line comment: use memchr2 to find \r or \n
+                        self.position += 2;
+                        let remaining = &bytes[self.position..];
+                        match memchr2(b'\r', b'\n', remaining) {
+                            Some(offset) => {
+                                self.position += offset + 1;
+                                // If we stopped at \r and next is \n, consume it too
+                                if remaining[offset] == b'\r'
+                                    && self.position < bytes.len()
+                                    && bytes[self.position] == b'\n'
+                                {
+                                    self.position += 1;
+                                }
+                            }
+                            None => self.position = bytes.len(),
+                        }
                     }
-                    match bytes[self.position + 1] {
-                        b'/' => {
-                            // Line comment: use memchr2 to find \r or \n
-                            self.position += 2;
+                    b'*' => {
+                        // Block comment: find */
+                        self.position += 2;
+                        loop {
                             let remaining = &bytes[self.position..];
-                            match memchr2(b'\r', b'\n', remaining) {
+                            match memchr(b'*', remaining) {
                                 Some(offset) => {
                                     self.position += offset + 1;
-                                    // If we stopped at \r and next is \n, consume it too
-                                    if remaining[offset] == b'\r'
-                                        && self.position < bytes.len()
-                                        && bytes[self.position] == b'\n'
-                                    {
+                                    if self.position < bytes.len() && bytes[self.position] == b'/' {
                                         self.position += 1;
-                                    }
-                                }
-                                None => self.position = bytes.len(),
-                            }
-                        }
-                        b'*' => {
-                            // Block comment: find */
-                            self.position += 2;
-                            loop {
-                                let remaining = &bytes[self.position..];
-                                match memchr(b'*', remaining) {
-                                    Some(offset) => {
-                                        self.position += offset + 1;
-                                        if self.position < bytes.len()
-                                            && bytes[self.position] == b'/'
-                                        {
-                                            self.position += 1;
-                                            break;
-                                        }
-                                    }
-                                    None => {
-                                        self.position = bytes.len();
                                         break;
                                     }
                                 }
+                                None => {
+                                    self.position = bytes.len();
+                                    break;
+                                }
                             }
                         }
-                        _ => return true,
                     }
+                    _ => return true,
                 }
-                _ => return true,
+            } else {
+                return true;
             }
         }
     }
@@ -1142,25 +1152,58 @@ impl<'a> StrTextIon10Generator<'a> {
         let start_index = destination.len();
         destination.push(0); // placeholder for LIST_START
 
+        // Skip initial whitespace and any leading commas to find first value or ']'
+        if !self.skip_list_separators(bytes) {
+            return IonResult::decoding_error("unterminated list");
+        }
+
+        // Check for empty list (or list with only commas)
+        if bytes[self.position] == b']' {
+            self.position += 1;
+            destination.push(instr::END_CONTAINER);
+            let bytecode_length = destination.len() - start_index - 1;
+            destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
+            return Ok(());
+        }
+
         loop {
-            if !self.skip_whitespace_and_comments() {
+            // At this point, self.position is at a non-whitespace byte that
+            // starts a value (not ']' or ',').
+            // emit_annotated_value does its own ws skip, which will be a no-op
+            // here since we're already positioned.
+            self.emit_annotated_value(destination, constant_pool)?;
+
+            // After value, skip whitespace/commas and check for ']'
+            if !self.skip_list_separators(bytes) {
                 return IonResult::decoding_error("unterminated list");
             }
             if bytes[self.position] == b']' {
                 self.position += 1;
                 break;
             }
-            if bytes[self.position] == b',' {
-                self.position += 1;
-                continue;
-            }
-            self.emit_annotated_value(destination, constant_pool)?;
+            // Position is at the start of the next value.
         }
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
         destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
         Ok(())
+    }
+
+    /// Skips whitespace, comments, and commas in a list context.
+    /// Returns true if there is more content, false at EOF.
+    #[inline]
+    fn skip_list_separators(&mut self, bytes: &[u8]) -> bool {
+        loop {
+            if !self.skip_whitespace_and_comments() {
+                return false;
+            }
+            if bytes[self.position] == b',' {
+                self.position += 1;
+            } else {
+                return true;
+            }
+        }
     }
 
     fn parse_sexp(
@@ -1173,7 +1216,28 @@ impl<'a> StrTextIon10Generator<'a> {
         let start_index = destination.len();
         destination.push(0); // placeholder for SEXP_START
 
+        // Skip initial whitespace once
+        if !self.skip_whitespace_and_comments() {
+            return IonResult::decoding_error("unterminated sexp");
+        }
+
+        // Check for empty sexp
+        if bytes[self.position] == b')' {
+            self.position += 1;
+            destination.push(instr::END_CONTAINER);
+            let bytecode_length = destination.len() - start_index - 1;
+            destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+            return Ok(());
+        }
+
         loop {
+            // At this point, self.position is at a non-whitespace byte that
+            // starts a value (not ')').
+            // emit_sexp_annotated_value does its own ws skip, which will be
+            // a no-op here since we're already positioned.
+            self.emit_sexp_annotated_value(destination, constant_pool)?;
+
+            // After value, skip whitespace and check for ')'
             if !self.skip_whitespace_and_comments() {
                 return IonResult::decoding_error("unterminated sexp");
             }
@@ -1181,7 +1245,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 self.position += 1;
                 break;
             }
-            self.emit_sexp_annotated_value(destination, constant_pool)?;
+            // No delimiter needed in sexp -- next value starts at current position.
         }
 
         destination.push(instr::END_CONTAINER);
@@ -1295,33 +1359,48 @@ impl<'a> StrTextIon10Generator<'a> {
         let start_index = destination.len();
         destination.push(0); // placeholder for STRUCT_START
 
+        // Skip initial whitespace and any leading commas
+        if !self.skip_struct_separators(bytes) {
+            return IonResult::decoding_error("unterminated struct");
+        }
+
+        // Check for empty struct
+        if bytes[self.position] == b'}' {
+            self.position += 1;
+            destination.push(instr::END_CONTAINER);
+            let bytecode_length = destination.len() - start_index - 1;
+            destination[start_index] = instr::STRUCT_START | (bytecode_length as u32 & 0x003F_FFFF);
+            return Ok(());
+        }
+
         loop {
+            // At this point, self.position is at a non-whitespace byte
+            // that is the start of a field name (not '}' or ',').
+
+            // Parse field name -- no whitespace skip needed, we're already positioned.
+            self.emit_field_name(destination, constant_pool)?;
+
+            // Skip whitespace before ':'
             if !self.skip_whitespace_and_comments() {
+                return IonResult::decoding_error("expected ':' after field name");
+            }
+            if bytes[self.position] != b':' {
+                return IonResult::decoding_error("expected ':' after field name");
+            }
+            self.position += 1;
+
+            // Parse field value (emit_annotated_value does its own ws skip)
+            self.emit_annotated_value(destination, constant_pool)?;
+
+            // After value, skip whitespace/commas and check for '}'
+            if !self.skip_struct_separators(bytes) {
                 return IonResult::decoding_error("unterminated struct");
             }
             if bytes[self.position] == b'}' {
                 self.position += 1;
                 break;
             }
-            if bytes[self.position] == b',' {
-                self.position += 1;
-                continue;
-            }
-
-            // Parse and emit field name instruction
-            self.emit_field_name(destination, constant_pool)?;
-
-            // Skip colon
-            if !self.skip_whitespace_and_comments() {
-                return IonResult::decoding_error("expected ':' after field name");
-            }
-            if self.position >= bytes.len() || bytes[self.position] != b':' {
-                return IonResult::decoding_error("expected ':' after field name");
-            }
-            self.position += 1;
-
-            // Parse field value
-            self.emit_annotated_value(destination, constant_pool)?;
+            // Position is at the start of the next field name.
         }
 
         destination.push(instr::END_CONTAINER);
@@ -1330,17 +1409,34 @@ impl<'a> StrTextIon10Generator<'a> {
         Ok(())
     }
 
+    /// Skips whitespace, comments, and commas in a struct context.
+    /// Returns true if there is more content, false at EOF.
+    #[inline]
+    fn skip_struct_separators(&mut self, bytes: &[u8]) -> bool {
+        loop {
+            if !self.skip_whitespace_and_comments() {
+                return false;
+            }
+            if bytes[self.position] == b',' {
+                self.position += 1;
+            } else {
+                return true;
+            }
+        }
+    }
+
     /// Parses a field name and emits a `FIELD_NAME_REF` (for unescaped names)
     /// or `FIELD_NAME_CP` (for names with escape sequences) instruction.
+    ///
+    /// Caller must ensure `self.position` is at a non-whitespace byte (the
+    /// start of the field name). This avoids a redundant whitespace skip since
+    /// `parse_struct` already guarantees positioning.
     fn emit_field_name(
         &mut self,
         destination: &mut Vec<u32>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
-        if !self.skip_whitespace_and_comments() {
-            return IonResult::decoding_error("expected field name");
-        }
         let b = bytes[self.position];
         if b == b'\'' {
             // Check for triple-quoted string ('''...''')
