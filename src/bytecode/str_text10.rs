@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use ice_code::ice as cold_path;
 use memchr::memchr;
 use memchr::memchr2;
 
@@ -259,10 +260,12 @@ impl<'a> StrTextIon10Generator<'a> {
             b'+' | b'-' => self.parse_signed_number(destination, constant_pool),
             b'0'..=b'9' => self.parse_number(destination, constant_pool),
             _ if is_identifier_start(b) => self.parse_symbol_value(destination, constant_pool),
-            _ => IonResult::decoding_error(format!(
-                "unexpected character '{}' at position {}",
-                b as char, self.position
-            )),
+            _ => cold_path!({
+                IonResult::decoding_error(format!(
+                    "unexpected character '{}' at position {}",
+                    b as char, self.position
+                ))
+            }),
         }
     }
 
@@ -1080,16 +1083,14 @@ impl<'a> StrTextIon10Generator<'a> {
             if !slice.contains('_') {
                 // Fast path: parse directly without allocation
                 let value: f64 = if is_negative {
-                    // Negative floats: the sign was already consumed, so we
-                    // need to negate the parsed positive value.
-                    let positive: f64 = slice.parse().map_err(|e| {
-                        crate::IonError::decoding_error(format!("invalid float: {e}"))
-                    })?;
+                    let positive: f64 = slice
+                        .parse()
+                        .map_err(|e| cold_path!({ float_error(e) }))?;
                     -positive
                 } else {
-                    slice.parse().map_err(|e| {
-                        crate::IonError::decoding_error(format!("invalid float: {e}"))
-                    })?
+                    slice
+                        .parse()
+                        .map_err(|e| cold_path!({ float_error(e) }))?
                 };
                 let bits = value.to_bits();
                 destination.push(instr::FLOAT_F64);
@@ -1099,7 +1100,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 let text = self.collect_number_text(start, i, is_negative);
                 let value: f64 = text
                     .parse()
-                    .map_err(|e| crate::IonError::decoding_error(format!("invalid float: {e}")))?;
+                    .map_err(|e| cold_path!({ float_error(e) }))?;
                 let bits = value.to_bits();
                 destination.push(instr::FLOAT_F64);
                 destination.push((bits >> 32) as u32);
@@ -2219,6 +2220,11 @@ impl<'a> BytecodeGenerator for StrTextIon10Generator<'a> {
 
 // ─── Helper Functions ────────────────────────────────────────────────
 
+#[inline(never)]
+fn float_error(e: std::num::ParseFloatError) -> crate::IonError {
+    crate::IonError::decoding_error(format!("invalid float: {e}"))
+}
+
 /// Returns true if the byte terminates an undelimited value.
 #[inline]
 fn is_value_terminator(b: u8) -> bool {
@@ -2970,24 +2976,55 @@ fn parse_text_decimal(text: &str) -> IonResult<Decimal> {
     };
 
     let frac_digits = frac_part.len() as i64;
-    let full_coeff_str = format!("{integer_part}{frac_part}");
     let total_exp = exp - frac_digits;
 
-    if full_coeff_str.is_empty() || full_coeff_str == "-" || full_coeff_str == "+" {
+    // Determine sign and strip it for digit processing.
+    let (is_negative, int_digits) = if let Some(rest) = integer_part.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = integer_part.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, integer_part)
+    };
+
+    // Check for empty/zero coefficient.
+    if int_digits.is_empty() && frac_part.is_empty() {
         return Ok(Decimal::new(0i32, total_exp));
     }
+    if is_negative
+        && int_digits.bytes().all(|b| b == b'0')
+        && frac_part.bytes().all(|b| b == b'0')
+    {
+        return Ok(Decimal::negative_zero_with_exponent(total_exp));
+    }
 
-    // Check for negative zero
-    if let Some(after_sign) = full_coeff_str.strip_prefix('-') {
-        if after_sign.chars().all(|c| c == '0') {
-            return Ok(Decimal::negative_zero_with_exponent(total_exp));
+    // Parse coefficient from integer_part + frac_part without allocating
+    // a concatenated string. Accumulate into i128 directly.
+    let mut coeff: i128 = 0;
+    let mut overflowed = false;
+    for &b in int_digits.as_bytes().iter().chain(frac_part.as_bytes()) {
+        if b == b'_' {
+            continue;
+        }
+        let digit = (b.wrapping_sub(b'0')) as i128;
+        match coeff.checked_mul(10).and_then(|c| c.checked_add(digit)) {
+            Some(v) => coeff = v,
+            None => {
+                overflowed = true;
+                break;
+            }
         }
     }
 
-    // Try i128 first (fast path), fall back to arbitrary-precision Int
-    if let Ok(coefficient) = full_coeff_str.parse::<i128>() {
-        return Ok(Decimal::new(coefficient, total_exp));
+    if !overflowed {
+        if is_negative {
+            coeff = -coeff;
+        }
+        return Ok(Decimal::new(coeff, total_exp));
     }
+
+    // Overflow: fall back to big integer parsing with allocation.
+    let full_coeff_str = format!("{integer_part}{frac_part}");
     let coefficient = parse_big_int(&full_coeff_str)?;
     Ok(Decimal::new(coefficient, total_exp))
 }
