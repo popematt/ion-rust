@@ -106,9 +106,11 @@ impl BumpArena {
     fn alloc_raw(&mut self, size: usize, align: usize) -> *mut u8 {
         if self.chunks.is_empty() {
             let cap = INITIAL_CHUNK_SIZE.max(size + align);
-            // Zero-initialized; the memset cost is negligible relative to
-            // the work saved by arena allocation over the chunk's lifetime.
-            self.chunks.push(vec![0u8; cap]);
+            // SAFETY: All arena memory is written before being read
+            // (via ptr::write or copy_nonoverlapping). No zeroing needed.
+            let mut chunk = Vec::with_capacity(cap);
+            unsafe { chunk.set_len(cap); }
+            self.chunks.push(chunk);
         }
 
         let chunk = self.chunks.last().unwrap();
@@ -129,7 +131,10 @@ impl BumpArena {
             // chunk or large enough for this allocation.
             let prev_cap = chunk_len;
             let new_cap = (prev_cap * 2).max(size + align);
-            self.chunks.push(vec![0u8; new_cap]);
+            // SAFETY: Same as above — all memory is written before read.
+            let mut chunk = Vec::with_capacity(new_cap);
+            unsafe { chunk.set_len(new_cap); }
+            self.chunks.push(chunk);
             self.offset = size; // aligned offset is 0 for fresh chunk
                                 // SAFETY: The new chunk has capacity >= size, and offset 0
                                 // satisfies any alignment (system allocator returns
