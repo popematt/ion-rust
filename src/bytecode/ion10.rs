@@ -541,35 +541,13 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         destination.push(0); // placeholder for start instruction
 
         let end_position = self.position + content_length;
-        while self.position < end_position {
-            if is_struct {
-                // Struct fields are prefixed by a VarUInt SID
-                let field_sid = self.read_var_uint() as u32;
 
-                // Check if the following value is NOP padding. In Ion 1.0
-                // structs, NOP padding can appear with any field SID
-                // (including non-zero). The NOP is identified by type code 0
-                // in the next type descriptor (with L != 0xF, which would be
-                // null.null).
-                let peek_td = self.source()[self.position];
-                let peek_tc = peek_td >> 4;
-                let peek_low = peek_td & 0x0F;
-                if peek_tc == type_code::NOP && peek_low != 0x0F {
-                    // NOP padding — skip field SID and the NOP value
-                    let (_nop_tc, nop_length) = self.read_type_descriptor();
-                    self.position += nop_length;
-                    continue;
-                }
-
-                debug_assert!(
-                    field_sid <= 0x003F_FFFF,
-                    "field name SID exceeds 22-bit data field"
-                );
-                // Mask to 22 bits to prevent corrupt opcodes in release builds.
-                destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+        if is_struct {
+            self.emit_struct_fields(end_position, destination, constant_pool);
+        } else {
+            while self.position < end_position {
+                let _ = self.emit_value(destination, constant_pool);
             }
-            // LSTs only appear at the top level, not inside containers.
-            let _ = self.emit_value(destination, constant_pool);
         }
 
         destination.push(instr::END_CONTAINER);
@@ -578,8 +556,84 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
             bytecode_length <= 0x003F_FFFF,
             "container bytecode length exceeds 22-bit data field"
         );
-        // Mask to 22 bits to prevent corrupt opcodes in release builds.
         destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+    }
+
+    /// Emits struct fields with prefetched type descriptors to expose
+    /// instruction-level parallelism. Reads the next field's SID and TD
+    /// while emitting bytecode for the current field's value.
+    #[inline]
+    fn emit_struct_fields(
+        &mut self,
+        end_position: usize,
+        destination: &mut Vec<u32>,
+        constant_pool: &mut ConstantPool,
+    ) {
+        if self.position >= end_position {
+            return;
+        }
+
+        // Read first field's SID + type descriptor ahead of the loop.
+        let mut field_sid = self.read_var_uint() as u32;
+        let mut td_and_len = self.read_type_descriptor();
+
+        loop {
+            let (tc, length) = td_and_len;
+
+            // Handle NOP padding
+            if tc == type_code::NOP && length != NULL_SENTINEL {
+                self.position += length;
+                if self.position >= end_position {
+                    break;
+                }
+                field_sid = self.read_var_uint() as u32;
+                td_and_len = self.read_type_descriptor();
+                continue;
+            }
+
+            // Emit field name
+            destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+
+            // Determine where this value ends (for scalars with known
+            // length, we can prefetch next field's header).
+            let value_end_known = match tc {
+                // Containers and annotations have their own sub-loops;
+                // we can't prefetch past them.
+                type_code::LIST | type_code::SEXP | type_code::STRUCT
+                | type_code::ANNOTATION => false,
+                _ => length != NULL_SENTINEL,
+            };
+
+            if value_end_known && (self.position + length) < end_position {
+                // We know where this scalar ends. Read the NEXT field's
+                // SID and TD now — these loads are independent of the
+                // current value's bytecode emission and can execute in
+                // parallel on an OoO core.
+                let next_field_start = self.position + length;
+                let source = self.source();
+                let next_sid = read_var_uint_inline(source, next_field_start);
+                let next_sid_len = var_uint_len(source, next_field_start);
+                let next_td_pos = next_field_start + next_sid_len;
+                let next_td = source[next_td_pos];
+
+                // Emit current value's bytecode
+                self.emit_value_body(tc, length, destination, constant_pool);
+
+                // Use prefetched values for next iteration
+                field_sid = next_sid;
+                self.position = next_td_pos;
+                td_and_len = self.read_type_descriptor();
+            } else {
+                // Can't prefetch (container, null, or last field).
+                self.emit_value_body(tc, length, destination, constant_pool);
+
+                if self.position >= end_position {
+                    break;
+                }
+                field_sid = self.read_var_uint() as u32;
+                td_and_len = self.read_type_descriptor();
+            }
+        }
     }
 
     /// Emits an annotation wrapper: annotation SIDs followed by the
@@ -749,6 +803,45 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
 /// Reads a VarUInt (variable-length unsigned integer) from a byte slice.
 /// Ion 1.0 VarUInt encoding: each byte contributes 7 bits of data.
 /// The high bit (0x80) is set on the *last* byte (stop bit).
+/// Read a VarUInt from a known position without advancing state.
+/// Used for prefetching the next field's SID in the struct loop.
+#[inline(always)]
+fn read_var_uint_inline(source: &[u8], pos: usize) -> u32 {
+    let b0 = source[pos];
+    if b0 & VARINT_STOP_BIT != 0 {
+        return (b0 & VARUINT_DATA_MASK) as u32;
+    }
+    let b1 = source[pos + 1];
+    if b1 & VARINT_STOP_BIT != 0 {
+        return ((b0 & VARUINT_DATA_MASK) as u32) << 7
+            | (b1 & VARUINT_DATA_MASK) as u32;
+    }
+    // 3+ byte VarUInt — rare for SIDs, fall back to loop
+    let mut result = ((b0 & VARUINT_DATA_MASK) as u32) << 7
+        | (b1 & VARUINT_DATA_MASK) as u32;
+    let mut i = pos + 2;
+    loop {
+        let b = source[i];
+        i += 1;
+        result = (result << 7) | (b & VARUINT_DATA_MASK) as u32;
+        if b & VARINT_STOP_BIT != 0 {
+            return result;
+        }
+    }
+}
+
+/// Returns the byte length of a VarUInt starting at `pos`.
+#[inline(always)]
+fn var_uint_len(source: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    loop {
+        if source[i] & VARINT_STOP_BIT != 0 {
+            return i - pos + 1;
+        }
+        i += 1;
+    }
+}
+
 /// Returns the decoded value as u32. Errors if VarUInt exceeds 5 bytes
 /// (u32 range) or if no stop bit is found within the slice.
 fn read_var_uint_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<u32> {
