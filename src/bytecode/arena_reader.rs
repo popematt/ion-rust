@@ -265,6 +265,23 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
         Ok(reader)
     }
 
+    /// Resets the reader with a new generator, reusing all internal
+    /// buffers. The arena, bytecode buffer, scratch Vecs, and constant
+    /// pool retain their allocated capacity — no new heap allocations
+    /// occur during reset (aside from the initial refill).
+    pub fn reset(&mut self, generator: G) -> IonResult<()> {
+        self.generator = generator;
+        self.bytecode.clear();
+        self.pos = 0;
+        self.symbol_table.truncate(SYSTEM_SYMBOLS.len());
+        self.constant_pool.clear();
+        self.first_local_constant = 0;
+        self.arena.reset();
+        self.depth = 0;
+        self.refill()?;
+        Ok(())
+    }
+
     /// Returns the number of chunks in the arena (for diagnostics).
     pub fn arena_chunk_count(&self) -> usize {
         self.arena.chunks.len()
