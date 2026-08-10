@@ -203,7 +203,7 @@ fn subtract_offset_to_utc(
 ///
 /// Internally stored as two `u64`s: a packed bit-field of local-time date-time fields,
 /// and a fractional-seconds coefficient. Total size: 16 bytes.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Timestamp {
     packed: u64,
     frac_payload: u64,
@@ -687,7 +687,7 @@ impl Timestamp {
     /// Return a UTC timestamp for this [Timestamp]
     pub fn to_utc(&self) -> Timestamp {
         let offset_minutes = match self.offset() {
-            None => return *self,
+            None => return self.clone(),
             Some(m) => m as i16,
         };
         let (uy, umo, ud, uh, umi) = subtract_offset_to_utc(
