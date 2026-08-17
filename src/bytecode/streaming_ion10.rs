@@ -10,12 +10,11 @@
 //! `END_OF_INPUT` when the source is fully consumed.
 
 use std::io::Read;
-use std::ops::Neg;
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::instr;
+use crate::bytecode::instruction::{instr, Instruction, Word};
 use crate::result::IonFailure;
 use crate::{Decimal, Int, IonResult, Timestamp, UInt};
 
@@ -314,6 +313,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
                     low as usize
                 }
             }
+            type_code::BOOL => 0,
             type_code::ANNOTATION => {
                 if low == 0x0E {
                     match self.read_varuint_at(start + 1, &mut header_size)? {
@@ -388,7 +388,11 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
 
     /// Emits bytecode for a single value at the current position.
     /// Returns `true` if the value was a system value (LST).
-    fn emit_value(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) -> bool {
+    fn emit_value(
+        &mut self,
+        destination: &mut Vec<Word>,
+        constant_pool: &mut ConstantPool,
+    ) -> bool {
         let (tc, length) = self.read_type_descriptor();
         self.emit_value_body(tc, length, destination, constant_pool)
     }
@@ -398,7 +402,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         &mut self,
         tc: u8,
         length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         if length == NULL_SENTINEL && tc <= type_code::STRUCT {
@@ -463,7 +467,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
     }
 
     /// Emits a typed null instruction.
-    fn emit_null(&self, tc: u8, destination: &mut Vec<u32>) {
+    fn emit_null(&self, tc: u8, destination: &mut Vec<Word>) {
         let null_instr = match tc {
             type_code::BOOL => instr::NULL_BOOL,
             type_code::POS_INT | type_code::NEG_INT => instr::NULL_INT,
@@ -483,8 +487,8 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
     }
 
     /// Emits a boolean value.
-    fn emit_bool(&self, low_nibble: usize, destination: &mut Vec<u32>) {
-        let value = if low_nibble == 0 { 0u32 } else { 1u32 };
+    fn emit_bool(&self, low_nibble: usize, destination: &mut Vec<Word>) {
+        let value = if low_nibble == 0 { 0 } else { 1 };
         destination.push(instr::BOOL | value);
     }
 
@@ -493,11 +497,11 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         &mut self,
         tc: u8,
         length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if length == 0 {
-            destination.push(instr::INT_I16);
+            destination.push(instr::INT_I32);
             return;
         }
 
@@ -516,41 +520,36 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         &self,
         magnitude: u64,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if !is_negative {
-            if magnitude <= i16::MAX as u64 {
-                destination.push(instr::INT_I16 | magnitude as u32);
-            } else if magnitude <= i32::MAX as u64 {
-                destination.push(instr::INT_I32);
-                destination.push(magnitude as u32);
+            if magnitude <= i32::MAX as u64 {
+                destination
+                    .push(Instruction::with_data_from(instr::INT_I32, magnitude as u32).raw());
             } else if magnitude <= i64::MAX as u64 {
                 let v = magnitude as i64;
                 destination.push(instr::INT_I64);
-                destination.push((v >> 32) as u32);
-                destination.push(v as u32);
+                destination.push(v as Word);
             } else {
                 let value = Int::from(magnitude as i128);
                 let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-                destination.push(instr::INT_CP | idx);
+                destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
             }
         } else {
             let neg_value = -(magnitude as i128);
-            if neg_value >= i16::MIN as i128 {
-                destination.push(instr::INT_I16 | (neg_value as i16 as u16 as u32));
-            } else if neg_value >= i32::MIN as i128 {
-                destination.push(instr::INT_I32);
-                destination.push(neg_value as i32 as u32);
+            if neg_value >= i32::MIN as i128 {
+                destination.push(
+                    Instruction::with_data_from(instr::INT_I32, neg_value as i32 as u32).raw(),
+                );
             } else if neg_value >= i64::MIN as i128 {
                 let v = neg_value as i64;
                 destination.push(instr::INT_I64);
-                destination.push((v >> 32) as u32);
-                destination.push(v as u32);
+                destination.push(v as Word);
             } else {
                 let value = Int::from(neg_value);
                 let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-                destination.push(instr::INT_CP | idx);
+                destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
             }
         }
     }
@@ -560,7 +559,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         &mut self,
         length: usize,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let bytes = &self.buffer[self.position..self.position + length];
@@ -572,26 +571,23 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         };
         self.position += length;
         let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-        destination.push(instr::INT_CP | idx);
+        destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
     }
 
     /// Emits a float value.
-    fn emit_float(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_float(&mut self, length: usize, destination: &mut Vec<Word>) {
         match length {
             0 => {
                 destination.push(instr::FLOAT_F32);
-                destination.push(0u32);
             }
             4 => {
                 let bits = self.read_uint(4) as u32;
-                destination.push(instr::FLOAT_F32);
-                destination.push(bits);
+                destination.push(Instruction::with_data_from(instr::FLOAT_F32, bits).raw());
             }
             8 => {
                 let bits = self.read_uint(8);
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             }
             _ => {
                 self.position += length;
@@ -600,76 +596,75 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
     }
 
     /// Emits a decimal value as DECIMAL_REF.
-    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<Word>) {
         if length == 0 {
             destination.push(instr::DECIMAL_REF);
-            destination.push(self.position as u32);
+            destination.push(self.position as Word);
             return;
         }
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "decimal length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "decimal length exceeds 32-bit data field"
         );
-        destination.push(instr::DECIMAL_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::DECIMAL_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a timestamp value as TIMESTAMP_REF.
-    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "timestamp length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "timestamp length exceeds 32-bit data field"
         );
-        destination.push(instr::TIMESTAMP_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::TIMESTAMP_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a symbol value as SYMBOL_SID.
-    fn emit_symbol(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_symbol(&mut self, length: usize, destination: &mut Vec<Word>) {
         if length == 0 {
             destination.push(instr::SYMBOL_SID);
             return;
         }
         let sid = self.read_uint(length) as u32;
-        debug_assert!(sid <= 0x003F_FFFF, "SID exceeds 22-bit data field");
-        destination.push(instr::SYMBOL_SID | (sid & 0x003F_FFFF));
+        destination.push(Instruction::with_data_from(instr::SYMBOL_SID, sid).raw());
     }
 
     /// Emits a string as STRING_REF.
-    fn emit_string(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_string(&mut self, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "string length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "string length exceeds 32-bit data field"
         );
-        destination.push(instr::STRING_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::STRING_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a lob (blob or clob) as a REF instruction.
-    fn emit_lob_ref(&mut self, instr_base: u32, length: usize, destination: &mut Vec<u32>) {
+    fn emit_lob_ref(&mut self, instr_base: Word, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "lob length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "lob length exceeds 32-bit data field"
         );
-        destination.push(instr_base | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr_base, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a container (list, sexp, or struct).
     fn emit_container(
         &mut self,
-        start_instr: u32,
+        start_instr: Word,
         content_length: usize,
         is_struct: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let start_index = destination.len();
@@ -690,11 +685,8 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
                     continue;
                 }
 
-                debug_assert!(
-                    field_sid <= 0x003F_FFFF,
-                    "field name SID exceeds 22-bit data field"
-                );
-                destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+                destination
+                    .push(Instruction::with_data_from(instr::FIELD_NAME_SID, field_sid).raw());
             }
             let _ = self.emit_value(destination, constant_pool);
         }
@@ -702,10 +694,11 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
         debug_assert!(
-            bytecode_length <= 0x003F_FFFF,
-            "container bytecode length exceeds 22-bit data field"
+            u32::try_from(bytecode_length).is_ok(),
+            "container bytecode length exceeds 32-bit data field"
         );
-        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(start_instr, bytecode_length as u32).raw();
     }
 
     /// Emits an annotation wrapper.
@@ -713,7 +706,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
     fn emit_annotation_wrapper(
         &mut self,
         wrapper_length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         let wrapper_end = self.position + wrapper_length;
@@ -744,11 +737,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
 
         // Not an LST — emit annotation SIDs
         for sid in annotation_sids {
-            debug_assert!(
-                sid <= 0x003F_FFFF,
-                "annotation SID exceeds 22-bit data field"
-            );
-            destination.push(instr::ANNOTATION_SID | (sid & 0x003F_FFFF));
+            destination.push(Instruction::with_data_from(instr::ANNOTATION_SID, sid).raw());
         }
 
         // Emit the annotated value
@@ -761,7 +750,7 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
 
     /// Parses a local symbol table struct and emits a
     /// `DIRECTIVE_SET_SYMBOLS` directive.
-    fn parse_local_symbol_table(&mut self, wrapper_end: usize, destination: &mut Vec<u32>) {
+    fn parse_local_symbol_table(&mut self, wrapper_end: usize, destination: &mut Vec<Word>) {
         let (tc, struct_length) = self.read_type_descriptor();
         debug_assert_eq!(tc, type_code::STRUCT);
         let struct_end = self.position + struct_length;
@@ -799,8 +788,9 @@ impl<R: Read> StreamingBinaryIon10Generator<R> {
         for entry in &new_symbols {
             match entry {
                 Some((offset, length)) => {
-                    destination.push(instr::STRING_REF | *length as u32);
-                    destination.push(*offset as u32);
+                    destination
+                        .push(Instruction::with_data_from(instr::STRING_REF, *length as u32).raw());
+                    destination.push(*offset as Word);
                 }
                 None => {
                     destination.push(instr::SYMBOL_SID);
@@ -869,7 +859,7 @@ fn read_var_int_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<i64> {
 impl<R: Read> BytecodeGenerator for StreamingBinaryIon10Generator<R> {
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Compact: discard consumed bytes from previous refill cycle.
@@ -899,7 +889,7 @@ impl<R: Read> BytecodeGenerator for StreamingBinaryIon10Generator<R> {
             if self.ensure_available(4)? && self.is_at_ivm() {
                 self.position += 4;
                 let version_data = 1u32 << 8;
-                destination.push(instr::IVM | version_data);
+                destination.push(instr::IVM | version_data as Word);
                 destination.push(instr::REFILL);
                 return Ok(());
             }
@@ -1185,7 +1175,7 @@ mod tests {
 
     /// Helper: generate bytecode from Ion 1.0 binary bytes using the
     /// streaming generator.
-    fn generate(source: Vec<u8>) -> (Vec<u32>, ConstantPool) {
+    fn generate(source: Vec<u8>) -> (Vec<Word>, ConstantPool) {
         let mut gen = StreamingBinaryIon10Generator::new(Cursor::new(source));
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -1194,7 +1184,7 @@ mod tests {
     }
 
     /// Helper: generate bytecode, consuming all refills until END_OF_INPUT.
-    fn generate_all(source: Vec<u8>) -> (Vec<u32>, ConstantPool) {
+    fn generate_all(source: Vec<u8>) -> (Vec<Word>, ConstantPool) {
         let mut gen = StreamingBinaryIon10Generator::new(Cursor::new(source));
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -1237,8 +1227,8 @@ mod tests {
 
         let int_idx = dest
             .iter()
-            .position(|&w| Instruction::from_raw(w).operation() == op::INT_I16)
-            .expect("should have INT_I16");
+            .position(|&w| Instruction::from_raw(w).operation() == op::INT_I32)
+            .expect("should have INT_I32");
         let int_instr = Instruction::from_raw(dest[int_idx]);
         assert_eq!(int_instr.data_as_i16(), 1);
     }
@@ -1248,7 +1238,7 @@ mod tests {
         let source = vec![0x20];
         let (dest, _cp) = generate(source);
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 0);
     }
 
@@ -1257,7 +1247,7 @@ mod tests {
         let source = vec![0x21, 0x05];
         let (dest, _cp) = generate(source);
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 5);
     }
 
@@ -1266,7 +1256,7 @@ mod tests {
         let source = vec![0x31, 0x05];
         let (dest, _cp) = generate(source);
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), -5);
     }
 
@@ -1292,14 +1282,14 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let i1 = Instruction::from_raw(dest[0]);
-        assert_eq!(i1.operation(), op::INT_I16);
+        assert_eq!(i1.operation(), op::INT_I32);
         assert_eq!(i1.data_as_i16(), 1);
 
         let b = Instruction::from_raw(dest[1]);
         assert_eq!(b.operation(), op::BOOL);
 
         let i2 = Instruction::from_raw(dest[2]);
-        assert_eq!(i2.operation(), op::INT_I16);
+        assert_eq!(i2.operation(), op::INT_I32);
         assert_eq!(i2.data_as_i16(), 2);
 
         assert_eq!(dest[3], instr::END_OF_INPUT);
@@ -1327,7 +1317,7 @@ mod tests {
         assert_eq!(instr_word.operation(), op::STRING_REF);
         assert_eq!(instr_word.data(), 5);
 
-        let text = gen.read_text_ref(dest[1], 5).unwrap();
+        let text = gen.read_text_ref(dest[1] as u32, 5).unwrap();
         assert_eq!(text, "hello");
     }
 
@@ -1341,7 +1331,7 @@ mod tests {
         gen.refill(&mut dest, &mut cp).unwrap();
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 5);
     }
 
@@ -1389,7 +1379,7 @@ mod tests {
         dest.clear();
         gen.refill(&mut dest, &mut cp).unwrap();
         let int_instr = Instruction::from_raw(dest[0]);
-        assert_eq!(int_instr.operation(), op::INT_I16);
+        assert_eq!(int_instr.operation(), op::INT_I32);
         assert_eq!(int_instr.data_as_i16(), 42);
     }
 
@@ -1399,7 +1389,7 @@ mod tests {
         let source = vec![0x03, 0x00, 0x00, 0x00, 0x21, 0x01];
         let (dest, _cp) = generate(source);
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 1);
     }
 
@@ -1409,7 +1399,7 @@ mod tests {
         let source = vec![0x0E, 0x83, 0x00, 0x00, 0x00, 0x21, 0x01];
         let (dest, _cp) = generate(source);
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 1);
     }
 

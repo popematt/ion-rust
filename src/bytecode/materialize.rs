@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::bytecode::arc_substr::ArcSubstr;
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::{op, operation_kind, Instruction};
+use crate::bytecode::instruction::{op, operation_kind, Instruction, Word};
 use crate::bytecode::ion10::BinaryIon10Generator;
 use crate::bytecode::reader::{BytecodeReader, SymbolToken};
 use crate::element::Annotations;
@@ -281,7 +281,7 @@ pub fn read_all_v3_str_text(data: &[u8]) -> IonResult<Sequence> {
 /// machine.
 pub(crate) struct BytecodeElementIterator<G: BytecodeGenerator> {
     generator: G,
-    bytecode: Vec<u32>,
+    bytecode: Vec<Word>,
     pos: usize,
     symbol_table: Vec<Option<Arc<str>>>,
     constant_pool: ConstantPool,
@@ -316,9 +316,9 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
         Instruction::from_raw(raw)
     }
 
-    /// Reads the raw u32 at the current position and advances pos.
+    /// Reads the raw word at the current position and advances pos.
     #[inline(always)]
-    fn consume_raw(&mut self) -> u32 {
+    fn consume_raw(&mut self) -> Word {
         let raw = self.bytecode[self.pos];
         self.pos += 1;
         raw
@@ -370,7 +370,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                         op::END_CONTAINER => break,
                         op::STRING_REF => {
                             let length = instr.data();
-                            let position = self.consume_raw();
+                            let position = self.consume_raw() as u32;
                             match self.generator.read_text_ref(position, length) {
                                 Ok(text) => {
                                     self.symbol_table.push(Some(Arc::from(text)));
@@ -458,7 +458,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                     _ => return IonResult::decoding_error("annotation CP entry is not a string"),
                 },
                 op::ANNOTATION_REF => {
-                    let position = self.bytecode[p];
+                    let position = self.bytecode[p] as u32;
                     p += 1;
                     if let Some(ref arc) = self.source_arc {
                         Symbol::source_slice(ArcSubstr::new(arc, position, data))
@@ -490,36 +490,22 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             op::NULL_BOOL => Ok(Value::Null(IonType::Bool)),
 
             op::INT_I16 => Ok(Value::Int(Int::from(instr.data_as_i16() as i64))),
-            op::INT_I32 => {
-                let v = self.consume_raw() as i32;
-                Ok(Value::Int(Int::from(v as i64)))
-            }
-            op::INT_I64 => {
-                let hi = self.consume_raw() as u64;
-                let lo = self.consume_raw() as u64;
-                Ok(Value::Int(Int::from(((hi << 32) | lo) as i64)))
-            }
+            op::INT_I32 => Ok(Value::Int(Int::from(instr.data_as_i32() as i64))),
+            op::INT_I64 => Ok(Value::Int(Int::from(self.consume_raw() as i64))),
             op::INT_CP => match self.constant_pool.get(instr.data()) {
                 Constant::BigInt(arc) => Ok(Value::Int(arc.as_ref().clone())),
                 _ => IonResult::decoding_error("CP entry is not BigInt"),
             },
             op::INT_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 Ok(Value::Int(
                     self.generator.read_int_ref(position, instr.data())?,
                 ))
             }
             op::NULL_INT => Ok(Value::Null(IonType::Int)),
 
-            op::FLOAT_F32 => {
-                let bits = self.consume_raw();
-                Ok(Value::Float(f32::from_bits(bits) as f64))
-            }
-            op::FLOAT_F64 => {
-                let hi = self.consume_raw() as u64;
-                let lo = self.consume_raw() as u64;
-                Ok(Value::Float(f64::from_bits((hi << 32) | lo)))
-            }
+            op::FLOAT_F32 => Ok(Value::Float(f32::from_bits(instr.data()) as f64)),
+            op::FLOAT_F64 => Ok(Value::Float(f64::from_bits(self.consume_raw()))),
             op::NULL_FLOAT => Ok(Value::Null(IonType::Float)),
 
             op::DECIMAL_CP => match self.constant_pool.get(instr.data()) {
@@ -527,7 +513,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 _ => IonResult::decoding_error("CP entry is not Decimal"),
             },
             op::DECIMAL_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 Ok(Value::Decimal(
                     self.generator.read_decimal_ref(position, instr.data())?,
                 ))
@@ -539,7 +525,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 _ => IonResult::decoding_error("CP entry is not Timestamp"),
             },
             op::SHORT_TIMESTAMP_REF | op::TIMESTAMP_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 Ok(Value::Timestamp(
                     self.generator.read_timestamp_ref(position, instr.data())?,
                 ))
@@ -551,7 +537,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 _ => IonResult::decoding_error("CP entry is not String"),
             },
             op::STRING_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 if let Some(ref arc) = self.source_arc {
                     Ok(Value::String(Str::from_source(ArcSubstr::new(
                         arc,
@@ -582,7 +568,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 Ok(Value::Symbol(Symbol::from(&*s)))
             }
             op::SYMBOL_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 if let Some(ref arc) = self.source_arc {
                     Ok(Value::Symbol(Symbol::source_slice(ArcSubstr::new(
                         arc,
@@ -601,7 +587,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 _ => IonResult::decoding_error("CP entry is not Bytes"),
             },
             op::BLOB_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let bytes = self.generator.read_bytes_ref(position, instr.data())?;
                 Ok(Value::Blob(Bytes::from(bytes)))
             }
@@ -612,7 +598,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 _ => IonResult::decoding_error("CP entry is not Bytes"),
             },
             op::CLOB_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let bytes = self.generator.read_bytes_ref(position, instr.data())?;
                 Ok(Value::Clob(Bytes::from(bytes)))
             }
@@ -677,7 +663,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                 _ => IonResult::decoding_error("field name CP entry is not a string"),
             },
             op::FIELD_NAME_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 if let Some(ref arc) = self.source_arc {
                     Ok(Symbol::source_slice(ArcSubstr::new(arc, position, data)))
                 } else {

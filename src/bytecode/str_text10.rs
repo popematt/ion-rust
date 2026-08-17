@@ -19,7 +19,7 @@ use memchr::memchr2;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::{instr, op, Instruction};
+use crate::bytecode::instruction::{instr, op, Instruction, Word};
 use crate::result::IonFailure;
 use crate::{Decimal, Int, IonResult, Timestamp, UInt};
 
@@ -159,7 +159,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// Emits all top-level values into the destination buffer.
     fn emit_all(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         loop {
@@ -174,7 +174,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// Emits a top-level value (with possible IVM/LST detection).
     fn emit_top_level_value(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -211,7 +211,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 if after >= bytes.len() || is_value_terminator(bytes[after]) {
                     self.position = after;
                     let version_data = 1u32 << 8;
-                    destination.push(instr::IVM | version_data);
+                    destination.push(instr::IVM | version_data as Word);
                     self.symbol_table =
                         SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
                     return Ok(());
@@ -239,7 +239,7 @@ impl<'a> StrTextIon10Generator<'a> {
     #[inline]
     fn emit_value(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -278,7 +278,7 @@ impl<'a> StrTextIon10Generator<'a> {
     #[inline]
     fn emit_annotated_value(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         if !self.skip_whitespace_and_comments() {
@@ -319,7 +319,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// a symbol reference.
     fn emit_identifier_value(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -341,8 +341,7 @@ impl<'a> StrTextIon10Generator<'a> {
             b"nan" => {
                 let bits = f64::NAN.to_bits();
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             }
             b"null" => {
                 if i < bytes.len() && bytes[i] == b'.' {
@@ -382,11 +381,11 @@ impl<'a> StrTextIon10Generator<'a> {
             _ => {
                 let text = &self.source[start..i];
                 if let Some(sid) = try_parse_sid_from_text(text) {
-                    destination.push(instr::SYMBOL_SID | sid);
+                    destination.push(Instruction::with_data_from(instr::SYMBOL_SID, sid).raw());
                 } else {
                     let length = (i - start) as u32;
-                    destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
-                    destination.push(start as u32);
+                    destination.push(Instruction::with_data_from(instr::SYMBOL_REF, length).raw());
+                    destination.push(start as Word);
                 }
             }
         }
@@ -398,7 +397,7 @@ impl<'a> StrTextIon10Generator<'a> {
     #[inline]
     fn try_emit_annotation(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<bool> {
         let bytes = self.source.as_bytes();
@@ -478,21 +477,23 @@ impl<'a> StrTextIon10Generator<'a> {
                     let decoded = decode_escape_sequences(&bytes[text_start..text_end])?;
                     let arc = Arc::from(decoded.as_str());
                     let idx = constant_pool.add(Constant::String(arc));
-                    destination.push(instr::ANNOTATION_CP | idx);
+                    destination.push(Instruction::with_data_from(instr::ANNOTATION_CP, idx).raw());
                 } else {
                     let length = (text_end - text_start) as u32;
-                    destination.push(instr::ANNOTATION_REF | length);
-                    destination.push(text_start as u32);
+                    destination
+                        .push(Instruction::with_data_from(instr::ANNOTATION_REF, length).raw());
+                    destination.push(text_start as Word);
                 }
             }
             TokenKind::Identifier { end } => {
                 let text = &self.source[start..end];
                 if let Some(sid) = try_parse_sid_from_text(text) {
-                    destination.push(instr::ANNOTATION_SID | sid);
+                    destination.push(Instruction::with_data_from(instr::ANNOTATION_SID, sid).raw());
                 } else {
                     let length = (end - start) as u32;
-                    destination.push(instr::ANNOTATION_REF | length);
-                    destination.push(start as u32);
+                    destination
+                        .push(Instruction::with_data_from(instr::ANNOTATION_REF, length).raw());
+                    destination.push(start as Word);
                 }
             }
         }
@@ -552,7 +553,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_null_or_identifier(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -604,22 +605,21 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position = i;
             let bits = f64::NAN.to_bits();
             destination.push(instr::FLOAT_F64);
-            destination.push((bits >> 32) as u32);
-            destination.push(bits as u32);
+            destination.push(bits);
             Ok(())
         } else {
             // It's an identifier (symbol value)
             self.position = i;
             let length = (i - start) as u32;
-            destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
-            destination.push(start as u32);
+            destination.push(Instruction::with_data_from(instr::SYMBOL_REF, length).raw());
+            destination.push(start as Word);
             Ok(())
         }
     }
 
     fn parse_true(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -640,7 +640,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_false(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -662,8 +662,8 @@ impl<'a> StrTextIon10Generator<'a> {
     #[inline]
     fn parse_symbol_value(
         &mut self,
-        destination: &mut Vec<u32>,
-        _constant_pool: &mut ConstantPool,
+        destination: &mut Vec<Word>,
+        constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
         let start = self.position;
@@ -674,11 +674,11 @@ impl<'a> StrTextIon10Generator<'a> {
         self.position = i;
         let text = &self.source[start..i];
         if let Some(sid) = try_parse_sid_from_text(text) {
-            destination.push(instr::SYMBOL_SID | sid);
+            destination.push(Instruction::with_data_from(instr::SYMBOL_SID, sid).raw());
         } else {
             let length = (i - start) as u32;
-            destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
-            destination.push(start as u32);
+            destination.push(Instruction::with_data_from(instr::SYMBOL_REF, length).raw());
+            destination.push(start as Word);
         }
         Ok(())
     }
@@ -686,7 +686,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// Parses a short string using memchr2 for fast delimiter finding.
     fn parse_string(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -706,8 +706,9 @@ impl<'a> StrTextIon10Generator<'a> {
                         // No escapes, no \r — fast path: emit STRING_REF
                         self.position = content_end + 1; // skip closing "
                         let length = offset as u32;
-                        destination.push(instr::STRING_REF | (length & 0x003F_FFFF));
-                        destination.push(start as u32);
+                        destination
+                            .push(Instruction::with_data_from(instr::STRING_REF, length).raw());
+                        destination.push(start as Word);
                         Ok(())
                     }
                 } else {
@@ -724,7 +725,7 @@ impl<'a> StrTextIon10Generator<'a> {
     fn parse_string_with_escapes(
         &mut self,
         start: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -744,13 +745,13 @@ impl<'a> StrTextIon10Generator<'a> {
 
         let decoded = decode_string_content(&bytes[start..content_end])?;
         let idx = constant_pool.add(Constant::String(Arc::from(decoded.as_str())));
-        destination.push(instr::STRING_CP | idx);
+        destination.push(Instruction::with_data_from(instr::STRING_CP, idx).raw());
         Ok(())
     }
 
     fn parse_quoted_symbol_or_long_string(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -771,8 +772,9 @@ impl<'a> StrTextIon10Generator<'a> {
                         let content_end = start + offset;
                         self.position = content_end + 1;
                         let length = (content_end - start) as u32;
-                        destination.push(instr::SYMBOL_REF | (length & 0x003F_FFFF));
-                        destination.push(start as u32);
+                        destination
+                            .push(Instruction::with_data_from(instr::SYMBOL_REF, length).raw());
+                        destination.push(start as Word);
                         Ok(())
                     } else {
                         // Has escapes
@@ -791,7 +793,7 @@ impl<'a> StrTextIon10Generator<'a> {
                         self.position = i + 1;
                         let decoded = decode_escape_sequences(&bytes[start..content_end])?;
                         let idx = constant_pool.add(Constant::String(Arc::from(decoded.as_str())));
-                        destination.push(instr::SYMBOL_CP | idx);
+                        destination.push(Instruction::with_data_from(instr::SYMBOL_CP, idx).raw());
                         Ok(())
                     }
                 }
@@ -802,7 +804,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_long_string(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -858,7 +860,7 @@ impl<'a> StrTextIon10Generator<'a> {
         }
 
         let idx = constant_pool.add(Constant::String(Arc::from(result.as_str())));
-        destination.push(instr::STRING_CP | idx);
+        destination.push(Instruction::with_data_from(instr::STRING_CP, idx).raw());
         Ok(())
     }
 
@@ -923,7 +925,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_signed_number(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -943,8 +945,7 @@ impl<'a> StrTextIon10Generator<'a> {
                     self.position = after;
                     let bits = value.to_bits();
                     destination.push(instr::FLOAT_F64);
-                    destination.push((bits >> 32) as u32);
-                    destination.push(bits as u32);
+                    destination.push(bits);
                     return Ok(());
                 }
             }
@@ -957,7 +958,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_number(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.parse_number_with_sign(false, destination, constant_pool)
@@ -967,7 +968,7 @@ impl<'a> StrTextIon10Generator<'a> {
     fn parse_number_with_sign(
         &mut self,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1070,8 +1071,8 @@ impl<'a> StrTextIon10Generator<'a> {
             let ts_end = self.scan_timestamp_end(start);
             self.position = ts_end;
             let length = (ts_end - start) as u32;
-            destination.push(instr::TIMESTAMP_REF | (length & 0x003F_FFFF));
-            destination.push(start as u32);
+            destination.push(Instruction::with_data_from(instr::TIMESTAMP_REF, length).raw());
+            destination.push(start as Word);
             return Ok(());
         }
 
@@ -1083,28 +1084,21 @@ impl<'a> StrTextIon10Generator<'a> {
             if !slice.contains('_') {
                 // Fast path: parse directly without allocation
                 let value: f64 = if is_negative {
-                    let positive: f64 = slice
-                        .parse()
-                        .map_err(|e| cold_path!({ float_error(e) }))?;
+                    let positive: f64 =
+                        slice.parse().map_err(|e| cold_path!({ float_error(e) }))?;
                     -positive
                 } else {
-                    slice
-                        .parse()
-                        .map_err(|e| cold_path!({ float_error(e) }))?
+                    slice.parse().map_err(|e| cold_path!({ float_error(e) }))?
                 };
                 let bits = value.to_bits();
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             } else {
                 let text = self.collect_number_text(start, i, is_negative);
-                let value: f64 = text
-                    .parse()
-                    .map_err(|e| cold_path!({ float_error(e) }))?;
+                let value: f64 = text.parse().map_err(|e| cold_path!({ float_error(e) }))?;
                 let bits = value.to_bits();
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             }
         } else if has_dot || has_d_exp {
             // Decimal
@@ -1113,14 +1107,14 @@ impl<'a> StrTextIon10Generator<'a> {
                 // No underscores — emit DECIMAL_REF (include sign if negative)
                 let ref_start = if is_negative { start - 1 } else { start };
                 let length = (i - ref_start) as u32;
-                destination.push(instr::DECIMAL_REF | (length & 0x003F_FFFF));
-                destination.push(ref_start as u32);
+                destination.push(Instruction::with_data_from(instr::DECIMAL_REF, length).raw());
+                destination.push(ref_start as Word);
             } else {
                 // Has underscores — still use REF; materializer handles stripping
                 let ref_start = if is_negative { start - 1 } else { start };
                 let length = (i - ref_start) as u32;
-                destination.push(instr::DECIMAL_REF | (length & 0x003F_FFFF));
-                destination.push(ref_start as u32);
+                destination.push(Instruction::with_data_from(instr::DECIMAL_REF, length).raw());
+                destination.push(ref_start as Word);
             }
         } else {
             // Integer — try direct parse fast path
@@ -1131,8 +1125,8 @@ impl<'a> StrTextIon10Generator<'a> {
                 // Has underscores — use INT_REF; materializer handles stripping
                 let ref_start = if is_negative { start - 1 } else { start };
                 let ref_len = (i - ref_start) as u32;
-                destination.push(instr::INT_REF | (ref_len & 0x003F_FFFF));
-                destination.push(ref_start as u32);
+                destination.push(Instruction::with_data_from(instr::INT_REF, ref_len).raw());
+                destination.push(ref_start as Word);
             }
         }
         Ok(())
@@ -1169,8 +1163,8 @@ impl<'a> StrTextIon10Generator<'a> {
     fn parse_hex_int(
         &mut self,
         is_negative: bool,
-        destination: &mut Vec<u32>,
-        _constant_pool: &mut ConstantPool,
+        destination: &mut Vec<Word>,
+        constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
         let ref_start = if is_negative {
@@ -1185,16 +1179,16 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position += 1;
         }
         let ref_len = (self.position - ref_start) as u32;
-        destination.push(instr::INT_REF | (ref_len & 0x003F_FFFF));
-        destination.push(ref_start as u32);
+        destination.push(Instruction::with_data_from(instr::INT_REF, ref_len).raw());
+        destination.push(ref_start as Word);
         Ok(())
     }
 
     fn parse_binary_int(
         &mut self,
         is_negative: bool,
-        destination: &mut Vec<u32>,
-        _constant_pool: &mut ConstantPool,
+        destination: &mut Vec<Word>,
+        constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
         let ref_start = if is_negative {
@@ -1211,8 +1205,8 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position += 1;
         }
         let ref_len = (self.position - ref_start) as u32;
-        destination.push(instr::INT_REF | (ref_len & 0x003F_FFFF));
-        destination.push(ref_start as u32);
+        destination.push(Instruction::with_data_from(instr::INT_REF, ref_len).raw());
+        destination.push(ref_start as Word);
         Ok(())
     }
 
@@ -1222,7 +1216,7 @@ impl<'a> StrTextIon10Generator<'a> {
         &self,
         slice: &str,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Try to parse as i64 using manual accumulation to avoid allocation
@@ -1242,8 +1236,8 @@ impl<'a> StrTextIon10Generator<'a> {
         } else {
             slice.len()
         };
-        destination.push(instr::INT_REF | (ref_len as u32 & 0x003F_FFFF));
-        destination.push(ref_start as u32);
+        destination.push(Instruction::with_data_from(instr::INT_REF, ref_len as u32).raw());
+        destination.push(ref_start as Word);
         Ok(())
     }
 
@@ -1251,7 +1245,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_list(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1269,7 +1263,8 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position += 1;
             destination.push(instr::END_CONTAINER);
             let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
+            destination[start_index] =
+                Instruction::with_data_from(instr::LIST_START, bytecode_length as u32).raw();
             return Ok(());
         }
 
@@ -1293,7 +1288,8 @@ impl<'a> StrTextIon10Generator<'a> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(instr::LIST_START, bytecode_length as u32).raw();
         Ok(())
     }
 
@@ -1315,7 +1311,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_sexp(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1333,7 +1329,8 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position += 1;
             destination.push(instr::END_CONTAINER);
             let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+            destination[start_index] =
+                Instruction::with_data_from(instr::SEXP_START, bytecode_length as u32).raw();
             return Ok(());
         }
 
@@ -1357,7 +1354,8 @@ impl<'a> StrTextIon10Generator<'a> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(instr::SEXP_START, bytecode_length as u32).raw();
         Ok(())
     }
 
@@ -1367,7 +1365,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// a number, parses it as an operator symbol.
     fn emit_sexp_annotated_value(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         loop {
@@ -1392,7 +1390,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// - Any sign not followed by digit/`i` -> operator symbol
     fn emit_sexp_value(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1430,7 +1428,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// a SYMBOL_CP instruction.
     fn parse_operator_symbol(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1440,13 +1438,13 @@ impl<'a> StrTextIon10Generator<'a> {
         }
         let text = &self.source[start..self.position];
         let idx = constant_pool.add(Constant::String(Arc::from(text)));
-        destination.push(instr::SYMBOL_CP | idx);
+        destination.push(Instruction::with_data_from(instr::SYMBOL_CP, idx).raw());
         Ok(())
     }
 
     fn parse_struct_or_lob(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1458,7 +1456,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_struct(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1476,7 +1474,8 @@ impl<'a> StrTextIon10Generator<'a> {
             self.position += 1;
             destination.push(instr::END_CONTAINER);
             let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = instr::STRUCT_START | (bytecode_length as u32 & 0x003F_FFFF);
+            destination[start_index] =
+                Instruction::with_data_from(instr::STRUCT_START, bytecode_length as u32).raw();
             return Ok(());
         }
 
@@ -1512,7 +1511,8 @@ impl<'a> StrTextIon10Generator<'a> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::STRUCT_START | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(instr::STRUCT_START, bytecode_length as u32).raw();
         Ok(())
     }
 
@@ -1540,7 +1540,7 @@ impl<'a> StrTextIon10Generator<'a> {
     /// `parse_struct` already guarantees positioning.
     fn emit_field_name(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1555,7 +1555,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 let text = self.parse_long_string_content()?;
                 let arc = Arc::from(text.as_str());
                 let idx = constant_pool.add(Constant::String(arc));
-                destination.push(instr::FIELD_NAME_CP | idx);
+                destination.push(Instruction::with_data_from(instr::FIELD_NAME_CP, idx).raw());
             } else {
                 // Quoted symbol
                 self.position += 1;
@@ -1569,8 +1569,10 @@ impl<'a> StrTextIon10Generator<'a> {
                             self.position = content_end + 1;
                             let length = (content_end - start) as u32;
                             debug_assert!(length <= 0x003F_FFFF);
-                            destination.push(instr::FIELD_NAME_REF | length);
-                            destination.push(start as u32);
+                            destination.push(
+                                Instruction::with_data_from(instr::FIELD_NAME_REF, length).raw(),
+                            );
+                            destination.push(start as Word);
                         } else {
                             // Has escapes — decode and emit FIELD_NAME_CP
                             let mut i = start;
@@ -1586,7 +1588,8 @@ impl<'a> StrTextIon10Generator<'a> {
                             let decoded = decode_escape_sequences(&bytes[start..content_end])?;
                             let arc = Arc::from(decoded.as_str());
                             let idx = constant_pool.add(Constant::String(arc));
-                            destination.push(instr::FIELD_NAME_CP | idx);
+                            destination
+                                .push(Instruction::with_data_from(instr::FIELD_NAME_CP, idx).raw());
                         }
                     }
                     None => return IonResult::decoding_error("unterminated quoted field name"),
@@ -1605,8 +1608,9 @@ impl<'a> StrTextIon10Generator<'a> {
                         self.position = content_end + 1;
                         let length = (content_end - start) as u32;
                         debug_assert!(length <= 0x003F_FFFF);
-                        destination.push(instr::FIELD_NAME_REF | length);
-                        destination.push(start as u32);
+                        destination
+                            .push(Instruction::with_data_from(instr::FIELD_NAME_REF, length).raw());
+                        destination.push(start as Word);
                     } else {
                         // Has escapes — decode and emit FIELD_NAME_CP
                         let mut i = start;
@@ -1622,7 +1626,8 @@ impl<'a> StrTextIon10Generator<'a> {
                         let decoded = decode_escape_sequences(&bytes[start..content_end])?;
                         let arc = Arc::from(decoded.as_str());
                         let idx = constant_pool.add(Constant::String(arc));
-                        destination.push(instr::FIELD_NAME_CP | idx);
+                        destination
+                            .push(Instruction::with_data_from(instr::FIELD_NAME_CP, idx).raw());
                     }
                 }
                 None => return IonResult::decoding_error("unterminated double-quoted field name"),
@@ -1636,12 +1641,12 @@ impl<'a> StrTextIon10Generator<'a> {
             }
             let text = &self.source[start..self.position];
             if let Some(sid) = try_parse_sid_from_text(text) {
-                destination.push(instr::FIELD_NAME_SID | sid);
+                destination.push(Instruction::with_data_from(instr::FIELD_NAME_SID, sid).raw());
             } else {
                 let length = (self.position - start) as u32;
                 debug_assert!(length <= 0x003F_FFFF);
-                destination.push(instr::FIELD_NAME_REF | length);
-                destination.push(start as u32);
+                destination.push(Instruction::with_data_from(instr::FIELD_NAME_REF, length).raw());
+                destination.push(start as Word);
             }
         } else {
             return IonResult::decoding_error(format!(
@@ -1744,7 +1749,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_lob(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1785,11 +1790,11 @@ impl<'a> StrTextIon10Generator<'a> {
             if has_escapes {
                 let decoded_bytes = decode_clob_escape_sequences(&bytes[start..content_end])?;
                 let idx = constant_pool.add(Constant::Bytes(Arc::from(decoded_bytes)));
-                destination.push(instr::CLOB_CP | idx);
+                destination.push(Instruction::with_data_from(instr::CLOB_CP, idx).raw());
             } else {
                 let data = &bytes[start..content_end];
                 let idx = constant_pool.add(Constant::Bytes(Arc::from(data)));
-                destination.push(instr::CLOB_CP | idx);
+                destination.push(Instruction::with_data_from(instr::CLOB_CP, idx).raw());
             }
         } else if bytes[self.position] == b'\''
             && self.position + 2 < bytes.len()
@@ -1853,7 +1858,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 self.position += 2;
             }
             let idx = constant_pool.add(Constant::Bytes(Arc::from(result)));
-            destination.push(instr::CLOB_CP | idx);
+            destination.push(Instruction::with_data_from(instr::CLOB_CP, idx).raw());
         } else {
             // Blob (base64)
             let start = self.position;
@@ -1876,7 +1881,7 @@ impl<'a> StrTextIon10Generator<'a> {
                 .collect();
             let decoded = base64_decode(&b64_text)?;
             let idx = constant_pool.add(Constant::Bytes(Arc::from(decoded)));
-            destination.push(instr::BLOB_CP | idx);
+            destination.push(Instruction::with_data_from(instr::BLOB_CP, idx).raw());
         }
         Ok(())
     }
@@ -1885,7 +1890,7 @@ impl<'a> StrTextIon10Generator<'a> {
 
     fn parse_lst(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let bytes = self.source.as_bytes();
@@ -1958,7 +1963,7 @@ impl<'a> StrTextIon10Generator<'a> {
             match entry {
                 Some(text) => {
                     let idx = constant_pool.add(Constant::String(Arc::clone(text)));
-                    destination.push(instr::STRING_CP | idx);
+                    destination.push(Instruction::with_data_from(instr::STRING_CP, idx).raw());
                 }
                 None => {
                     destination.push(instr::SYMBOL_SID);
@@ -2151,7 +2156,7 @@ impl<'a> StrTextIon10Generator<'a> {
 impl<'a> BytecodeGenerator for StrTextIon10Generator<'a> {
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         if self.done {
@@ -2292,16 +2297,12 @@ fn is_operator_char(b: u8) -> bool {
 }
 
 /// Emits an i64 value as the appropriate int instruction.
-fn emit_i64_int(v: i64, destination: &mut Vec<u32>) {
-    if v >= i16::MIN as i64 && v <= i16::MAX as i64 {
-        destination.push(instr::INT_I16 | (v as i16 as u16 as u32));
-    } else if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
-        destination.push(instr::INT_I32);
-        destination.push(v as i32 as u32);
+fn emit_i64_int(v: i64, destination: &mut Vec<Word>) {
+    if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+        destination.push(Instruction::with_data_from(instr::INT_I32, v as i32 as u32).raw());
     } else {
         destination.push(instr::INT_I64);
-        destination.push((v >> 32) as u32);
-        destination.push(v as u32);
+        destination.push(v as Word);
     }
 }
 
@@ -2991,9 +2992,7 @@ fn parse_text_decimal(text: &str) -> IonResult<Decimal> {
     if int_digits.is_empty() && frac_part.is_empty() {
         return Ok(Decimal::new(0i32, total_exp));
     }
-    if is_negative
-        && int_digits.bytes().all(|b| b == b'0')
-        && frac_part.bytes().all(|b| b == b'0')
+    if is_negative && int_digits.bytes().all(|b| b == b'0') && frac_part.bytes().all(|b| b == b'0')
     {
         return Ok(Decimal::negative_zero_with_exponent(total_exp));
     }
@@ -3264,7 +3263,7 @@ mod tests {
     use crate::Element;
 
     /// Helper: generate all bytecode from text Ion input using the str generator.
-    fn generate_all(text: &str) -> (Vec<u32>, ConstantPool) {
+    fn generate_all(text: &str) -> (Vec<Word>, ConstantPool) {
         let mut gen = StrTextIon10Generator::new(text);
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -3331,23 +3330,23 @@ mod tests {
     fn integers() {
         let (dest, _cp) = generate_all("0");
         let instr_val = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_val.operation(), op::INT_I16);
+        assert_eq!(instr_val.operation(), op::INT_I32);
         assert_eq!(instr_val.data_as_i16(), 0);
 
         let (dest, _cp) = generate_all("42");
         let instr_val = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_val.operation(), op::INT_I16);
+        assert_eq!(instr_val.operation(), op::INT_I32);
         assert_eq!(instr_val.data_as_i16(), 42);
 
         let (dest, _cp) = generate_all("-7");
         let instr_val = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_val.operation(), op::INT_I16);
+        assert_eq!(instr_val.operation(), op::INT_I32);
         assert_eq!(instr_val.data_as_i16(), -7);
 
         let (dest, _cp) = generate_all("100000");
         let instr_val = Instruction::from_raw(dest[0]);
         assert_eq!(instr_val.operation(), op::INT_I32);
-        assert_eq!(dest[1] as i32, 100000);
+        assert_eq!(instr_val.data_as_i32(), 100000);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::ConstantPool;
+use crate::bytecode::instruction::Word;
 use crate::{Decimal, Int, IonResult, Timestamp};
 
 /// A source of bytecode instructions for the reader.
@@ -25,7 +26,7 @@ pub trait BytecodeGenerator {
     /// not be read (I/O error) or contains malformed data (decoding error).
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()>;
 
@@ -55,7 +56,7 @@ pub trait BytecodeGenerator {
 impl BytecodeGenerator for Box<dyn BytecodeGenerator> {
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         (**self).refill(destination, constant_pool)

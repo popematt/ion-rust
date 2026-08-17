@@ -4,13 +4,12 @@
 //! bytecode reader. Handles the Ion 1.0 type descriptor format, VarUInt
 //! encoding, and sign/magnitude integer representation.
 
-use std::ops::Neg;
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::filter_policy::{FilterPolicy, NoFilter};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::instr;
+use crate::bytecode::instruction::{instr, Instruction, Word};
 use crate::result::{DecodingError, IonFailure};
 use crate::{Decimal, Int, IonError, IonResult, Timestamp, UInt};
 
@@ -231,7 +230,11 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     /// Emits bytecode for a single value at the current position.
     /// Returns `true` if the value was a system value (LST) that should
     /// trigger a REFILL boundary.
-    fn emit_value(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) -> bool {
+    fn emit_value(
+        &mut self,
+        destination: &mut Vec<Word>,
+        constant_pool: &mut ConstantPool,
+    ) -> bool {
         let (tc, length) = self.read_type_descriptor();
         self.emit_value_body(tc, length, destination, constant_pool)
     }
@@ -242,7 +245,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         &mut self,
         tc: u8,
         length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         // Check for null (NULL_SENTINEL returned by read_type_descriptor
@@ -307,7 +310,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     }
 
     /// Emits a typed null instruction.
-    fn emit_null(&self, tc: u8, destination: &mut Vec<u32>) {
+    fn emit_null(&self, tc: u8, destination: &mut Vec<Word>) {
         let null_instr = match tc {
             type_code::BOOL => instr::NULL_BOOL,
             type_code::POS_INT | type_code::NEG_INT => instr::NULL_INT,
@@ -327,8 +330,8 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     }
 
     /// Emits a boolean value. Low nibble: 0=false, 1=true.
-    fn emit_bool(&self, low_nibble: usize, destination: &mut Vec<u32>) {
-        let value = if low_nibble == 0 { 0u32 } else { 1u32 };
+    fn emit_bool(&self, low_nibble: usize, destination: &mut Vec<Word>) {
+        let value = if low_nibble == 0 { 0 } else { 1 };
         destination.push(instr::BOOL | value);
     }
 
@@ -337,12 +340,12 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         &mut self,
         tc: u8,
         length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if length == 0 {
             // int 0
-            destination.push(instr::INT_I16);
+            destination.push(instr::INT_I32);
             return;
         }
 
@@ -363,7 +366,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         &self,
         magnitude: u64,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         // For positive values, the magnitude is the value directly.
@@ -371,40 +374,35 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         // magnitude exceeds i64::MAX.
         if !is_negative {
             // Positive: magnitude fits in u64
-            if magnitude <= i16::MAX as u64 {
-                destination.push(instr::INT_I16 | magnitude as u32);
-            } else if magnitude <= i32::MAX as u64 {
-                destination.push(instr::INT_I32);
-                destination.push(magnitude as u32);
+            if magnitude <= i32::MAX as u64 {
+                destination
+                    .push(Instruction::with_data_from(instr::INT_I32, magnitude as u32).raw());
             } else if magnitude <= i64::MAX as u64 {
                 let v = magnitude as i64;
                 destination.push(instr::INT_I64);
-                destination.push((v >> 32) as u32);
-                destination.push(v as u32);
+                destination.push(v as Word);
             } else {
                 // magnitude > i64::MAX, need constant pool
                 let value = Int::from(magnitude as i128);
                 let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-                destination.push(instr::INT_CP | idx);
+                destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
             }
         } else {
             // Negative: negate the magnitude
             let neg_value = -(magnitude as i128);
-            if neg_value >= i16::MIN as i128 {
-                destination.push(instr::INT_I16 | (neg_value as i16 as u16 as u32));
-            } else if neg_value >= i32::MIN as i128 {
-                destination.push(instr::INT_I32);
-                destination.push(neg_value as i32 as u32);
+            if neg_value >= i32::MIN as i128 {
+                destination.push(
+                    Instruction::with_data_from(instr::INT_I32, neg_value as i32 as u32).raw(),
+                );
             } else if neg_value >= i64::MIN as i128 {
                 let v = neg_value as i64;
                 destination.push(instr::INT_I64);
-                destination.push((v >> 32) as u32);
-                destination.push(v as u32);
+                destination.push(v as Word);
             } else {
                 // Doesn't fit in i64 — use constant pool
                 let value = Int::from(neg_value);
                 let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-                destination.push(instr::INT_CP | idx);
+                destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
             }
         }
     }
@@ -415,7 +413,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         &mut self,
         length: usize,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let bytes = &self.source()[self.position..self.position + length];
@@ -427,27 +425,24 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         };
         self.position += length;
         let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-        destination.push(instr::INT_CP | idx);
+        destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
     }
 
     /// Emits a float value.
-    fn emit_float(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_float(&mut self, length: usize, destination: &mut Vec<Word>) {
         match length {
             0 => {
                 // Float zero (0e0) — emit as f32 with zero bits
                 destination.push(instr::FLOAT_F32);
-                destination.push(0u32);
             }
             4 => {
                 let bits = self.read_uint(4) as u32;
-                destination.push(instr::FLOAT_F32);
-                destination.push(bits);
+                destination.push(Instruction::with_data_from(instr::FLOAT_F32, bits).raw());
             }
             8 => {
                 let bits = self.read_uint(8);
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             }
             _ => {
                 // Invalid float length — skip
@@ -457,84 +452,78 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     }
 
     /// Emits a decimal value as DECIMAL_REF pointing to the source bytes.
-    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<Word>) {
         if length == 0 {
             // Decimal with length 0 is 0d0 — still emit as REF with length 0.
             // The read_decimal_ref method handles this case.
             destination.push(instr::DECIMAL_REF);
-            destination.push(self.position as u32);
+            destination.push(self.position as Word);
             return;
         }
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "decimal length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "decimal length exceeds 32-bit data field"
         );
-        // Mask to 22 bits to prevent corrupt opcodes in release builds.
-        destination.push(instr::DECIMAL_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::DECIMAL_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a timestamp value as TIMESTAMP_REF pointing to the source bytes.
-    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "timestamp length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "timestamp length exceeds 32-bit data field"
         );
-        // Mask to 22 bits to prevent corrupt opcodes in release builds.
-        destination.push(instr::TIMESTAMP_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::TIMESTAMP_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a symbol value as SYMBOL_SID.
-    fn emit_symbol(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_symbol(&mut self, length: usize, destination: &mut Vec<Word>) {
         if length == 0 {
             // Symbol with SID 0 ($0)
             destination.push(instr::SYMBOL_SID);
             return;
         }
         let sid = self.read_uint(length) as u32;
-        debug_assert!(sid <= 0x003F_FFFF, "SID exceeds 22-bit data field");
-        // Mask to 22 bits to prevent corrupt opcodes in release builds.
-        destination.push(instr::SYMBOL_SID | (sid & 0x003F_FFFF));
+        destination.push(Instruction::with_data_from(instr::SYMBOL_SID, sid).raw());
     }
 
     /// Emits a string as STRING_REF pointing to the source bytes.
-    fn emit_string(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_string(&mut self, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "string length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "string length exceeds 32-bit data field"
         );
-        // Mask to 22 bits to prevent corrupt opcodes in release builds.
-        destination.push(instr::STRING_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::STRING_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a lob (blob or clob) as a REF instruction pointing to source bytes.
-    fn emit_lob_ref(&mut self, instr_base: u32, length: usize, destination: &mut Vec<u32>) {
+    fn emit_lob_ref(&mut self, instr_base: Word, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
         debug_assert!(
-            length as u32 <= 0x003F_FFFF,
-            "lob length exceeds 22-bit data field"
+            u32::try_from(length).is_ok(),
+            "lob length exceeds 32-bit data field"
         );
-        // Mask to 22 bits to prevent corrupt opcodes in release builds.
-        destination.push(instr_base | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr_base, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     /// Emits a container (list, sexp, or struct) with reserve/backpatch.
     fn emit_container(
         &mut self,
-        start_instr: u32,
+        start_instr: Word,
         content_length: usize,
         is_struct: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let start_index = destination.len();
@@ -553,10 +542,11 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
         debug_assert!(
-            bytecode_length <= 0x003F_FFFF,
-            "container bytecode length exceeds 22-bit data field"
+            u32::try_from(bytecode_length).is_ok(),
+            "container bytecode length exceeds 32-bit data field"
         );
-        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(start_instr, bytecode_length as u32).raw();
     }
 
     /// Emits struct fields with prefetched type descriptors to expose
@@ -566,7 +556,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     fn emit_struct_fields(
         &mut self,
         end_position: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if self.position >= end_position {
@@ -592,29 +582,36 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
             }
 
             // Emit field name
-            destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+            destination.push(Instruction::with_data_from(instr::FIELD_NAME_SID, field_sid).raw());
 
             // Determine where this value ends (for scalars with known
             // length, we can prefetch next field's header).
+            let source_value_length = match tc {
+                // For bool, `length` is the encoded value nibble, not a
+                // byte count in the source stream.
+                type_code::BOOL => 0,
+                _ => length,
+            };
             let value_end_known = match tc {
                 // Containers and annotations have their own sub-loops;
                 // we can't prefetch past them.
-                type_code::LIST | type_code::SEXP | type_code::STRUCT
-                | type_code::ANNOTATION => false,
+                type_code::LIST | type_code::SEXP | type_code::STRUCT | type_code::ANNOTATION => {
+                    false
+                }
                 _ => length != NULL_SENTINEL,
             };
 
-            if value_end_known && (self.position + length) < end_position {
+            if value_end_known && (self.position + source_value_length) < end_position {
                 // We know where this scalar ends. Read the NEXT field's
                 // SID and TD now — these loads are independent of the
                 // current value's bytecode emission and can execute in
                 // parallel on an OoO core.
-                let next_field_start = self.position + length;
+                let next_field_start = self.position + source_value_length;
                 let source = self.source();
                 let next_sid = read_var_uint_inline(source, next_field_start);
                 let next_sid_len = var_uint_len(source, next_field_start);
                 let next_td_pos = next_field_start + next_sid_len;
-                let next_td = source[next_td_pos];
+                let _next_td = source[next_td_pos];
 
                 // Emit current value's bytecode
                 self.emit_value_body(tc, length, destination, constant_pool);
@@ -645,7 +642,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     fn emit_annotation_wrapper(
         &mut self,
         wrapper_length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         let wrapper_end = self.position + wrapper_length;
@@ -679,12 +676,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         // Not an LST — emit as normal annotated value.
         // Re-emit the annotation SIDs we already read.
         for sid in annotation_sids {
-            debug_assert!(
-                sid <= 0x003F_FFFF,
-                "annotation SID exceeds 22-bit data field"
-            );
-            // Mask to 22 bits to prevent corrupt opcodes in release builds.
-            destination.push(instr::ANNOTATION_SID | (sid & 0x003F_FFFF));
+            destination.push(Instruction::with_data_from(instr::ANNOTATION_SID, sid).raw());
         }
 
         // Emit the annotated value (remaining bytes in wrapper)
@@ -714,7 +706,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
     /// - Ignores the `imports` field
     /// - Always treats LSTs as "set" (replace), not "append"
     /// - Only handles the `symbols` field (SID 7) containing a list
-    fn parse_local_symbol_table(&mut self, wrapper_end: usize, destination: &mut Vec<u32>) {
+    fn parse_local_symbol_table(&mut self, wrapper_end: usize, destination: &mut Vec<Word>) {
         // Read the struct type descriptor to get its content length
         let (tc, struct_length) = self.read_type_descriptor();
         debug_assert_eq!(tc, type_code::STRUCT);
@@ -762,8 +754,9 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         for entry in &new_symbols {
             match entry {
                 Some((offset, length)) => {
-                    destination.push(instr::STRING_REF | *length as u32);
-                    destination.push(*offset as u32);
+                    destination
+                        .push(Instruction::with_data_from(instr::STRING_REF, *length as u32).raw());
+                    destination.push(*offset as Word);
                 }
                 None => {
                     // Unknown/null text: emit SYMBOL_SID 0
@@ -813,12 +806,10 @@ fn read_var_uint_inline(source: &[u8], pos: usize) -> u32 {
     }
     let b1 = source[pos + 1];
     if b1 & VARINT_STOP_BIT != 0 {
-        return ((b0 & VARUINT_DATA_MASK) as u32) << 7
-            | (b1 & VARUINT_DATA_MASK) as u32;
+        return ((b0 & VARUINT_DATA_MASK) as u32) << 7 | (b1 & VARUINT_DATA_MASK) as u32;
     }
     // 3+ byte VarUInt — rare for SIDs, fall back to loop
-    let mut result = ((b0 & VARUINT_DATA_MASK) as u32) << 7
-        | (b1 & VARUINT_DATA_MASK) as u32;
+    let mut result = ((b0 & VARUINT_DATA_MASK) as u32) << 7 | (b1 & VARUINT_DATA_MASK) as u32;
     let mut i = pos + 2;
     loop {
         let b = source[i];
@@ -904,7 +895,7 @@ fn read_var_int_from_slice(bytes: &[u8], pos: &mut usize) -> IonResult<i64> {
 impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator<S, P> {
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         if self.is_exhausted() {
@@ -926,7 +917,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator
                 // Encode major=1, minor=0 in the data field
                 // Encode major=1 in bits 8-15, minor=0 in bits 0-7
                 let version_data = 1u32 << 8;
-                destination.push(instr::IVM | version_data);
+                destination.push(instr::IVM | version_data as Word);
                 // Stop after IVM — system value boundary
                 destination.push(instr::REFILL);
                 return Ok(());
@@ -1227,7 +1218,7 @@ mod tests {
     use crate::bytecode::instruction::{op, Instruction};
 
     /// Helper: generate bytecode from Ion 1.0 binary bytes.
-    fn generate(source: Vec<u8>) -> (Vec<u32>, ConstantPool) {
+    fn generate(source: Vec<u8>) -> (Vec<Word>, ConstantPool) {
         let mut gen = BinaryIon10Generator::new(source);
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -1236,7 +1227,7 @@ mod tests {
     }
 
     /// Helper: generate bytecode, consuming all refills until END_OF_INPUT.
-    fn generate_all(source: Vec<u8>) -> (Vec<u32>, ConstantPool) {
+    fn generate_all(source: Vec<u8>) -> (Vec<Word>, ConstantPool) {
         let mut gen = BinaryIon10Generator::new(source);
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -1270,15 +1261,15 @@ mod tests {
         let (dest, _cp) = generate_all(source);
 
         // First refill: IVM + REFILL
-        // Second refill: INT_I16(1) + END_OF_INPUT
+        // Second refill: INT_I32(1) + END_OF_INPUT
         let ivm = Instruction::from_raw(dest[0]);
         assert_eq!(ivm.operation(), op::IVM);
 
-        // Find the INT_I16 instruction
+        // Find the INT_I32 instruction
         let int_idx = dest
             .iter()
-            .position(|&w| Instruction::from_raw(w).operation() == op::INT_I16)
-            .expect("should have INT_I16");
+            .position(|&w| Instruction::from_raw(w).operation() == op::INT_I32)
+            .expect("should have INT_I32");
         let int_instr = Instruction::from_raw(dest[int_idx]);
         assert_eq!(int_instr.data_as_i16(), 1);
     }
@@ -1290,7 +1281,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 0);
     }
 
@@ -1301,7 +1292,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 5);
     }
 
@@ -1312,7 +1303,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 256);
     }
 
@@ -1324,8 +1315,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::INT_I32);
-        let operand = dest[1] as i32;
-        assert_eq!(operand, 65536);
+        assert_eq!(instr_word.data_as_i32(), 65536);
     }
 
     #[test]
@@ -1335,7 +1325,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), -5);
     }
 
@@ -1349,10 +1339,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::INT_I64);
-        let hi = dest[1] as i64;
-        let lo = dest[2] as u32 as i64;
-        let value = (hi << 32) | lo;
-        assert_eq!(value, -4294967297i64);
+        assert_eq!(dest[1] as i64, -4294967297i64);
     }
 
     #[test]
@@ -1364,14 +1351,11 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::INT_I64);
-        let hi = dest[1];
-        let lo = dest[2];
-        let value = ((hi as u64) << 32) | lo as u64;
-        assert_eq!(value as i64, i64::MAX);
+        assert_eq!(dest[1] as i64, i64::MAX);
     }
 
     #[test]
-    fn int_needs_constant_pool() {
+    fn int_needsconstant_pool() {
         // Positive int, 9 bytes — exceeds i64, goes to constant pool
         let mut source = vec![0x29]; // type 2, length 9
         source.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
@@ -1391,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn int_negative_needs_constant_pool() {
+    fn int_negative_needsconstant_pool() {
         // Negative int, 9 bytes — exceeds i64, goes to constant pool
         let mut source = vec![0x39]; // type 3 (neg), length 9
         source.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
@@ -1411,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn int_negative_large_magnitude_constant_pool() {
+    fn int_negative_large_magnitudeconstant_pool() {
         // Negative int with magnitude > i64::MAX but <= 8 bytes
         // This exercises the emit_int_from_magnitude path for magnitude > i64::MAX
         // magnitude = 0x8000000000000000 (2^63), which is i64::MIN in abs value
@@ -1423,10 +1407,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::INT_I64);
-        let hi = dest[1];
-        let lo = dest[2];
-        let value = ((hi as u64) << 32) | lo as u64;
-        assert_eq!(value as i64, i64::MIN);
+        assert_eq!(dest[1] as i64, i64::MIN);
     }
 
     #[test]
@@ -1521,7 +1502,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::FLOAT_F32);
-        assert_eq!(dest[1], 0); // zero bits
+        assert_eq!(instr_word.data(), 0); // zero bits
     }
 
     #[test]
@@ -1534,7 +1515,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::FLOAT_F32);
-        let bits = dest[1];
+        let bits = instr_word.data();
         assert_eq!(f32::from_bits(bits), value);
     }
 
@@ -1548,10 +1529,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::FLOAT_F64);
-        let hi = dest[1] as u64;
-        let lo = dest[2] as u64;
-        let bits = (hi << 32) | lo;
-        assert_eq!(f64::from_bits(bits), value);
+        assert_eq!(f64::from_bits(dest[1]), value);
     }
 
     #[test]
@@ -1610,13 +1588,13 @@ mod tests {
         let list_start = Instruction::from_raw(dest[0]);
         assert_eq!(list_start.operation(), op::LIST_START);
 
-        // Children: INT_I16(1), INT_I16(2), END_CONTAINER
+        // Children: INT_I32(1), INT_I32(2), END_CONTAINER
         let child1 = Instruction::from_raw(dest[1]);
-        assert_eq!(child1.operation(), op::INT_I16);
+        assert_eq!(child1.operation(), op::INT_I32);
         assert_eq!(child1.data_as_i16(), 1);
 
         let child2 = Instruction::from_raw(dest[2]);
-        assert_eq!(child2.operation(), op::INT_I16);
+        assert_eq!(child2.operation(), op::INT_I32);
         assert_eq!(child2.data_as_i16(), 2);
 
         let end = Instruction::from_raw(dest[3]);
@@ -1655,22 +1633,22 @@ mod tests {
         let struct_start = Instruction::from_raw(dest[0]);
         assert_eq!(struct_start.operation(), op::STRUCT_START);
 
-        // Field 1: FIELD_NAME_SID(4), INT_I16(1)
+        // Field 1: FIELD_NAME_SID(4), INT_I32(1)
         let field1_name = Instruction::from_raw(dest[1]);
         assert_eq!(field1_name.operation(), op::FIELD_NAME_SID);
         assert_eq!(field1_name.data(), 4);
 
         let field1_value = Instruction::from_raw(dest[2]);
-        assert_eq!(field1_value.operation(), op::INT_I16);
+        assert_eq!(field1_value.operation(), op::INT_I32);
         assert_eq!(field1_value.data_as_i16(), 1);
 
-        // Field 2: FIELD_NAME_SID(5), INT_I16(2)
+        // Field 2: FIELD_NAME_SID(5), INT_I32(2)
         let field2_name = Instruction::from_raw(dest[3]);
         assert_eq!(field2_name.operation(), op::FIELD_NAME_SID);
         assert_eq!(field2_name.data(), 5);
 
         let field2_value = Instruction::from_raw(dest[4]);
-        assert_eq!(field2_value.operation(), op::INT_I16);
+        assert_eq!(field2_value.operation(), op::INT_I32);
         assert_eq!(field2_value.data_as_i16(), 2);
 
         let end = Instruction::from_raw(dest[5]);
@@ -1724,7 +1702,7 @@ mod tests {
         assert_eq!(annot2.data(), 5);
 
         let value = Instruction::from_raw(dest[2]);
-        assert_eq!(value.operation(), op::INT_I16);
+        assert_eq!(value.operation(), op::INT_I32);
         assert_eq!(value.data_as_i16(), 42);
     }
 
@@ -1737,7 +1715,7 @@ mod tests {
 
         // NOP is skipped; first instruction should be the int
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 1);
     }
 
@@ -1762,7 +1740,7 @@ mod tests {
 
         // NOP is skipped; first instruction should be the int
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), 1);
     }
 
@@ -1851,7 +1829,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let i1 = Instruction::from_raw(dest[0]);
-        assert_eq!(i1.operation(), op::INT_I16);
+        assert_eq!(i1.operation(), op::INT_I32);
         assert_eq!(i1.data_as_i16(), 1);
 
         let b = Instruction::from_raw(dest[1]);
@@ -1859,7 +1837,7 @@ mod tests {
         assert_eq!(b.data() & 1, 1);
 
         let i2 = Instruction::from_raw(dest[2]);
-        assert_eq!(i2.operation(), op::INT_I16);
+        assert_eq!(i2.operation(), op::INT_I32);
         assert_eq!(i2.data_as_i16(), 2);
 
         assert_eq!(dest[3], instr::END_OF_INPUT);
@@ -1873,7 +1851,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), i16::MAX);
     }
 
@@ -1885,7 +1863,7 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::INT_I32);
-        assert_eq!(dest[1] as i32, 32768);
+        assert_eq!(instr_word.data_as_i32(), 32768);
     }
 
     #[test]
@@ -1896,7 +1874,7 @@ mod tests {
         let (dest, _cp) = generate(source);
 
         let instr_word = Instruction::from_raw(dest[0]);
-        assert_eq!(instr_word.operation(), op::INT_I16);
+        assert_eq!(instr_word.operation(), op::INT_I32);
         assert_eq!(instr_word.data_as_i16(), i16::MIN);
     }
 
@@ -1908,14 +1886,14 @@ mod tests {
 
         let instr_word = Instruction::from_raw(dest[0]);
         assert_eq!(instr_word.operation(), op::INT_I32);
-        assert_eq!(dest[1] as i32, -32769);
+        assert_eq!(instr_word.data_as_i32(), -32769);
     }
 
     /// Helper: generate bytecode, consuming all refills, returning the
     /// generator for inspection of symbol table state.
     fn generate_all_with_gen(
         source: Vec<u8>,
-    ) -> (Vec<u32>, ConstantPool, BinaryIon10Generator<Vec<u8>>) {
+    ) -> (Vec<Word>, ConstantPool, BinaryIon10Generator<Vec<u8>>) {
         let mut gen = BinaryIon10Generator::new(source);
         let mut dest = Vec::new();
         let mut cp = ConstantPool::new();
@@ -2289,7 +2267,7 @@ mod tests {
         assert_eq!(instr_word.operation(), op::DECIMAL_REF);
 
         let length = instr_word.data();
-        let position = dest[1];
+        let position = dest[1] as u32;
         let gen = BinaryIon10Generator::new(source);
         let decimal = gen.read_decimal_ref(position, length).unwrap();
         assert_eq!(decimal, expected);
@@ -2321,7 +2299,7 @@ mod tests {
                 });
             let dec_instr = Instruction::from_raw(dest[dec_idx]);
             let length = dec_instr.data();
-            let position = dest[dec_idx + 1];
+            let position = dest[dec_idx + 1] as u32;
 
             // Read and verify
             let gen = BinaryIon10Generator::new(binary);
@@ -2335,8 +2313,9 @@ mod tests {
     }
 
     #[test]
-    fn decimal_coefficient_overflow_17_bytes() {
-        // Construct a decimal whose coefficient is 17 bytes (exceeds 16-byte limit).
+    fn decimal_coefficient_larger_than_i128_uses_big_int() {
+        // Construct a decimal whose coefficient is 17 bytes, forcing the
+        // arbitrary-precision decode path.
         // VarInt exponent = 0: byte 0x80
         // Coefficient: 17 bytes, sign bit 0 (positive), rest are 0xFF.
         // Total body length = 1 (exponent) + 17 (coefficient) = 18
@@ -2355,13 +2334,15 @@ mod tests {
         assert_eq!(instr_word.operation(), op::DECIMAL_REF);
 
         let length = instr_word.data();
-        let position = dest[1];
+        let position = dest[1] as u32;
         let gen = BinaryIon10Generator::new(source);
-        let result = gen.read_decimal_ref(position, length);
-        assert!(
-            result.is_err(),
-            "17-byte coefficient should produce an error"
-        );
+        let decimal = gen.read_decimal_ref(position, length).unwrap();
+
+        let mut coefficient_bytes = vec![0x7F];
+        coefficient_bytes.extend(std::iter::repeat_n(0xFF, 16));
+        let expected = Decimal::new(Int::from(UInt::from_be_bytes(&coefficient_bytes)), 0i64);
+
+        assert_eq!(decimal, expected);
     }
 
     #[test]
@@ -2392,7 +2373,7 @@ mod tests {
         assert_eq!(instr_word.operation(), op::DECIMAL_REF);
 
         let length = instr_word.data();
-        let position = dest[1];
+        let position = dest[1] as u32;
         let gen = BinaryIon10Generator::new(source);
         let result = gen.read_decimal_ref(position, length);
         assert!(
@@ -2424,7 +2405,7 @@ mod tests {
         assert_eq!(instr_word.operation(), op::DECIMAL_REF);
 
         let length = instr_word.data();
-        let position = dest[1];
+        let position = dest[1] as u32;
         let gen = BinaryIon10Generator::new(source);
         let decimal = gen.read_decimal_ref(position, length).unwrap();
         assert_eq!(decimal, Decimal::new(1i64, 200i64));
@@ -2491,7 +2472,7 @@ mod tests {
         assert_eq!(instr_word.operation(), op::TIMESTAMP_REF);
 
         let length = instr_word.data();
-        let position = dest[1];
+        let position = dest[1] as u32;
         let gen = BinaryIon10Generator::new(source);
         let decoded = gen.read_timestamp_ref(position, length).unwrap();
         assert_eq!(decoded, expected);
@@ -2529,7 +2510,7 @@ mod tests {
             .unwrap_or_else(|| panic!("expected TIMESTAMP_REF for input '{text}', got: {dest:?}"));
         let ts_instr = Instruction::from_raw(dest[ts_idx]);
         let length = ts_instr.data();
-        let position = dest[ts_idx + 1];
+        let position = dest[ts_idx + 1] as u32;
 
         // Read and verify
         let gen = BinaryIon10Generator::new(binary);
@@ -2572,7 +2553,7 @@ mod tests {
         assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
 
         let gen = BinaryIon10Generator::new(source);
-        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        let result = gen.read_timestamp_ref(dest[1] as u32, ts_instr.data());
         assert!(
             result.is_err(),
             "VarInt offset with >9 bytes should produce an error"
@@ -2602,7 +2583,7 @@ mod tests {
         assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
 
         let gen = BinaryIon10Generator::new(source);
-        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        let result = gen.read_timestamp_ref(dest[1] as u32, ts_instr.data());
         assert!(
             result.is_err(),
             "VarUInt year with >5 bytes should produce an error"
@@ -2633,7 +2614,7 @@ mod tests {
         assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
 
         let gen = BinaryIon10Generator::new(source);
-        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        let result = gen.read_timestamp_ref(dest[1] as u32, ts_instr.data());
         assert!(
             result.is_err(),
             "offset >1440 minutes should produce an error"
@@ -2683,7 +2664,7 @@ mod tests {
         assert_eq!(ts_instr.operation(), op::TIMESTAMP_REF);
 
         let gen = BinaryIon10Generator::new(source);
-        let result = gen.read_timestamp_ref(dest[1], ts_instr.data());
+        let result = gen.read_timestamp_ref(dest[1] as u32, ts_instr.data());
         assert!(
             result.is_err(),
             "fractional coefficient >16 bytes should produce an error"

@@ -2,87 +2,87 @@
 //!
 //! # Instruction Format
 //!
-//! Each instruction is a packed 32-bit integer:
+//! Each instruction is a packed 64-bit integer:
 //!
 //! ```text
 //!      ┌─ Kind (5 bits)
 //!      │    ┌─ Variant (3 bits)
 //!      │    │    ┌─ Operand Count (2 bits)
-//!      │    │    │         ┌─ Data (22 bits)
-//!      │    │    │         │
-//!   ┌──┴──┐┌┴┐   ├┐ ┌──────┴──────────────────┐
-//!    00000 000   00 000000  00000000  00000000
+//!      │    │    │  ┌─ Reserved (22 bits) ┌─ Data (32 bits)
+//!      │    │    │  │                     │
+//!   ┌──┴──┐┌┴┐   ├┐ ┌─────────────────────┴────────────────────────┐
+//!    00000 000   00 0000000000000000000000 00000000 00000000 00000000 00000000
 //! ```
 //!
-//! - **Kind** (5 bits): General category. Kinds 1–13 map to IonType.
+//! - **Kind** (5 bits): General category. Kinds 1-13 map to IonType.
 //! - **Variant** (3 bits): Specific representation. Variant 7 = typed null.
-//! - **Operand Count** (2 bits): 0–2 = literal count of following u32 words.
+//! - **Operand Count** (2 bits): 0-2 = literal count of following `u64` words.
 //!   3 = data field holds the count (for containers).
-//! - **Data** (22 bits): Operation-specific payload.
+//! - **Data** (32 bits): Operation-specific payload.
 //!
 //! # Operation Reference
 //!
 //! | Operation             | Code   | Kind      | V | OC | Data              | Operand(s) |
 //! |-----------------------|--------|-----------|---|----|-------------------|------------|
-//! | `NULL_NULL`           | `0x0F` | Null      | 7 | 0  | —                 | —          |
-//! | `BOOL`                | `0x10` | Bool      | 0 | 0  | 0=false, 1=true   | —          |
-//! | `NULL_BOOL`           | `0x17` | Bool      | 7 | 0  | —                 | —          |
-//! | `INT_I16`             | `0x18` | Int       | 0 | 0  | i16 value         | —          |
-//! | `INT_I32`             | `0x19` | Int       | 1 | 1  | —                 | i32        |
-//! | `INT_I64`             | `0x1A` | Int       | 2 | 2  | —                 | i64 (hi, lo) |
-//! | `INT_CP`              | `0x1B` | Int       | 3 | 0  | CP index          | —          |
+//! | `NULL_NULL`           | `0x0F` | Null      | 7 | 0  | -                 | -          |
+//! | `BOOL`                | `0x10` | Bool      | 0 | 0  | 0=false, 1=true   | -          |
+//! | `NULL_BOOL`           | `0x17` | Bool      | 7 | 0  | -                 | -          |
+//! | `INT_I16`             | `0x18` | Int       | 0 | 0  | i16 value         | -          |
+//! | `INT_I32`             | `0x19` | Int       | 1 | 0  | i32 bits          | -          |
+//! | `INT_I64`             | `0x1A` | Int       | 2 | 1  | -                 | i64 bits   |
+//! | `INT_CP`              | `0x1B` | Int       | 3 | 0  | CP index          | -          |
 //! | `INT_REF`             | `0x1C` | Int       | 4 | 1  | length            | offset     |
-//! | `NULL_INT`            | `0x1F` | Int       | 7 | 0  | —                 | —          |
-//! | `FLOAT_F32`           | `0x20` | Float     | 0 | 1  | —                 | f32 bits   |
-//! | `FLOAT_F64`           | `0x21` | Float     | 1 | 2  | —                 | f64 (hi, lo) |
-//! | `NULL_FLOAT`          | `0x27` | Float     | 7 | 0  | —                 | —          |
-//! | `DECIMAL_CP`          | `0x28` | Decimal   | 0 | 0  | CP index          | —          |
+//! | `NULL_INT`            | `0x1F` | Int       | 7 | 0  | -                 | -          |
+//! | `FLOAT_F32`           | `0x20` | Float     | 0 | 0  | f32 bits          | -          |
+//! | `FLOAT_F64`           | `0x21` | Float     | 1 | 1  | -                 | f64 bits   |
+//! | `NULL_FLOAT`          | `0x27` | Float     | 7 | 0  | -                 | -          |
+//! | `DECIMAL_CP`          | `0x28` | Decimal   | 0 | 0  | CP index          | -          |
 //! | `DECIMAL_REF`         | `0x29` | Decimal   | 1 | 1  | length            | offset     |
-//! | `NULL_DECIMAL`        | `0x2F` | Decimal   | 7 | 0  | —                 | —          |
-//! | `TIMESTAMP_CP`        | `0x30` | Timestamp | 0 | 0  | CP index          | —          |
+//! | `NULL_DECIMAL`        | `0x2F` | Decimal   | 7 | 0  | -                 | -          |
+//! | `TIMESTAMP_CP`        | `0x30` | Timestamp | 0 | 0  | CP index          | -          |
 //! | `SHORT_TIMESTAMP_REF` | `0x31` | Timestamp | 1 | 1  | opcode            | offset     |
 //! | `TIMESTAMP_REF`       | `0x32` | Timestamp | 2 | 1  | length            | offset     |
-//! | `NULL_TIMESTAMP`      | `0x37` | Timestamp | 7 | 0  | —                 | —          |
-//! | `STRING_CP`           | `0x38` | String    | 0 | 0  | CP index          | —          |
+//! | `NULL_TIMESTAMP`      | `0x37` | Timestamp | 7 | 0  | -                 | -          |
+//! | `STRING_CP`           | `0x38` | String    | 0 | 0  | CP index          | -          |
 //! | `STRING_REF`          | `0x39` | String    | 1 | 1  | length            | offset     |
-//! | `NULL_STRING`         | `0x3F` | String    | 7 | 0  | —                 | —          |
-//! | `SYMBOL_CP`           | `0x40` | Symbol    | 0 | 0  | CP index          | —          |
+//! | `NULL_STRING`         | `0x3F` | String    | 7 | 0  | -                 | -          |
+//! | `SYMBOL_CP`           | `0x40` | Symbol    | 0 | 0  | CP index          | -          |
 //! | `SYMBOL_REF`          | `0x41` | Symbol    | 1 | 1  | length            | offset     |
-//! | `SYMBOL_SID`          | `0x42` | Symbol    | 2 | 0  | SID               | —          |
-//! | `SYMBOL_CHAR`         | `0x43` | Symbol    | 3 | 0  | char code         | —          |
-//! | `NULL_SYMBOL`         | `0x47` | Symbol    | 7 | 0  | —                 | —          |
-//! | `CLOB_CP`             | `0x48` | Clob      | 0 | 0  | CP index          | —          |
+//! | `SYMBOL_SID`          | `0x42` | Symbol    | 2 | 0  | SID               | -          |
+//! | `SYMBOL_CHAR`         | `0x43` | Symbol    | 3 | 0  | char code         | -          |
+//! | `NULL_SYMBOL`         | `0x47` | Symbol    | 7 | 0  | -                 | -          |
+//! | `CLOB_CP`             | `0x48` | Clob      | 0 | 0  | CP index          | -          |
 //! | `CLOB_REF`            | `0x49` | Clob      | 1 | 1  | length            | offset     |
-//! | `NULL_CLOB`           | `0x4F` | Clob      | 7 | 0  | —                 | —          |
-//! | `BLOB_CP`             | `0x50` | Blob      | 0 | 0  | CP index          | —          |
+//! | `NULL_CLOB`           | `0x4F` | Clob      | 7 | 0  | -                 | -          |
+//! | `BLOB_CP`             | `0x50` | Blob      | 0 | 0  | CP index          | -          |
 //! | `BLOB_REF`            | `0x51` | Blob      | 1 | 1  | length            | offset     |
-//! | `NULL_BLOB`           | `0x57` | Blob      | 7 | 0  | —                 | —          |
-//! | `LIST_START`          | `0x58` | List      | 0 | 3  | bytecode length   | —          |
-//! | `NULL_LIST`           | `0x5F` | List      | 7 | 0  | —                 | —          |
-//! | `SEXP_START`          | `0x60` | SExp      | 0 | 3  | bytecode length   | —          |
-//! | `NULL_SEXP`           | `0x67` | SExp      | 7 | 0  | —                 | —          |
-//! | `STRUCT_START`        | `0x68` | Struct    | 0 | 3  | bytecode length   | —          |
-//! | `NULL_STRUCT`         | `0x6F` | Struct    | 7 | 0  | —                 | —          |
-//! | `ANNOTATION_CP`       | `0x70` | Annot.    | 0 | 0  | CP index          | —          |
+//! | `NULL_BLOB`           | `0x57` | Blob      | 7 | 0  | -                 | -          |
+//! | `LIST_START`          | `0x58` | List      | 0 | 3  | bytecode length   | -          |
+//! | `NULL_LIST`           | `0x5F` | List      | 7 | 0  | -                 | -          |
+//! | `SEXP_START`          | `0x60` | SExp      | 0 | 3  | bytecode length   | -          |
+//! | `NULL_SEXP`           | `0x67` | SExp      | 7 | 0  | -                 | -          |
+//! | `STRUCT_START`        | `0x68` | Struct    | 0 | 3  | bytecode length   | -          |
+//! | `NULL_STRUCT`         | `0x6F` | Struct    | 7 | 0  | -                 | -          |
+//! | `ANNOTATION_CP`       | `0x70` | Annot.    | 0 | 0  | CP index          | -          |
 //! | `ANNOTATION_REF`      | `0x71` | Annot.    | 1 | 1  | length            | offset     |
-//! | `ANNOTATION_SID`      | `0x72` | Annot.    | 2 | 0  | SID               | —          |
-//! | `FIELD_NAME_CP`       | `0x78` | Field     | 0 | 0  | CP index          | —          |
+//! | `ANNOTATION_SID`      | `0x72` | Annot.    | 2 | 0  | SID               | -          |
+//! | `FIELD_NAME_CP`       | `0x78` | Field     | 0 | 0  | CP index          | -          |
 //! | `FIELD_NAME_REF`      | `0x79` | Field     | 1 | 1  | length            | offset     |
-//! | `FIELD_NAME_SID`      | `0x7A` | Field     | 2 | 0  | SID               | —          |
-//! | `IVM`                 | `0x80` | IVM       | 0 | 0  | major, minor (u8) | —          |
-//! | `DIRECTIVE_SET_SYMBOLS`| `0x88`| Directive | 0 | 0  | —                 | —          |
-//! | `DIRECTIVE_ADD_SYMBOLS`| `0x89`| Directive | 1 | 0  | —                 | —          |
-//! | `DIRECTIVE_SET_MACROS`| `0x8A` | Directive | 2 | 0  | —                 | —          |
-//! | `DIRECTIVE_ADD_MACROS`| `0x8B` | Directive | 3 | 0  | —                 | —          |
-//! | `DIRECTIVE_USE`       | `0x8C` | Directive | 4 | 0  | —                 | —          |
-//! | `PLACEHOLDER_TAGGED`  | `0x90` | Placeholder| 0| 3  | bytecode length   | —          |
-//! | `PLACEHOLDER_TAGLESS` | `0x91` | Placeholder| 1| 0  | opcode            | —          |
-//! | `ARGUMENT_NONE`       | `0x98` | Argument  | 0 | 0  | —                 | —          |
-//! | `INVOKE`              | `0xA0` | Invoke    | 0 | 0  | macro ID          | —          |
-//! | `REFILL`              | `0xA8` | Refill    | 0 | 0  | —                 | —          |
-//! | `END_TEMPLATE`        | `0xB0` | End       | 0 | 0  | —                 | —          |
-//! | `END_OF_INPUT`        | `0xB1` | End       | 1 | 0  | —                 | —          |
-//! | `END_CONTAINER`       | `0xB2` | End       | 2 | 0  | —                 | —          |
+//! | `FIELD_NAME_SID`      | `0x7A` | Field     | 2 | 0  | SID               | -          |
+//! | `IVM`                 | `0x80` | IVM       | 0 | 0  | major, minor (u8) | -          |
+//! | `DIRECTIVE_SET_SYMBOLS`| `0x88`| Directive | 0 | 0  | -                 | -          |
+//! | `DIRECTIVE_ADD_SYMBOLS`| `0x89`| Directive | 1 | 0  | -                 | -          |
+//! | `DIRECTIVE_SET_MACROS`| `0x8A` | Directive | 2 | 0  | -                 | -          |
+//! | `DIRECTIVE_ADD_MACROS`| `0x8B` | Directive | 3 | 0  | -                 | -          |
+//! | `DIRECTIVE_USE`       | `0x8C` | Directive | 4 | 0  | -                 | -          |
+//! | `PLACEHOLDER_TAGGED`  | `0x90` | Placeholder| 0| 3  | bytecode length   | -          |
+//! | `PLACEHOLDER_TAGLESS` | `0x91` | Placeholder| 1| 0  | opcode            | -          |
+//! | `ARGUMENT_NONE`       | `0x98` | Argument  | 0 | 0  | -                 | -          |
+//! | `INVOKE`              | `0xA0` | Invoke    | 0 | 0  | macro ID          | -          |
+//! | `REFILL`              | `0xA8` | Refill    | 0 | 0  | -                 | -          |
+//! | `END_TEMPLATE`        | `0xB0` | End       | 0 | 0  | -                 | -          |
+//! | `END_OF_INPUT`        | `0xB1` | End       | 1 | 0  | -                 | -          |
+//! | `END_CONTAINER`       | `0xB2` | End       | 2 | 0  | -                 | -          |
 //! | `META_OFFSET`         | `0xB8` | Metadata  | 0 | 1  | high bits (u16)   | low bits (u32) |
 //! | `META_ROWCOL`         | `0xB9` | Metadata  | 1 | 1  | column            | row        |
 //! | `META_COMMENT`        | `0xBA` | Metadata  | 2 | 1  | length            | offset     |
@@ -90,7 +90,7 @@
 //! # Containers
 //!
 //! Container instructions (`LIST_START`, `SEXP_START`, `STRUCT_START`) use
-//! operand count 3, meaning the data field holds the **bytecode length** —
+//! operand count 3, meaning the data field holds the **bytecode length** -
 //! the number of instruction/operand words that follow, including the
 //! `END_CONTAINER` delimiter. This enables O(1) skipping.
 //!
@@ -101,96 +101,85 @@
 
 use std::fmt;
 
+pub type Word = u64;
+
+#[cfg(test)]
 use crate::IonType;
 
-/// A single bytecode instruction, packed into a 32-bit integer.
-///
-/// Layout:
-/// ```text
-///      ┌─ Type (5 bits)
-///      │    ┌─ Variant (3 bits)
-///      │    │    ┌─ Operand Count (2 bits)
-///      │    │    │         ┌─ Data (22 bits)
-///      │    │    │         │
-///   ┌──┴──┐ ┌┴┐ ├┐ ┌──────┴──────────────────┐
-///   00000  000  00  0000000000000000000000
-/// ```
+/// A single bytecode instruction, packed into a 64-bit integer.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct Instruction(u32);
+pub struct Instruction(Word);
 
 impl Instruction {
-    /// Constructs an instruction from a raw packed u32.
-    pub const fn from_raw(raw: u32) -> Self {
+    const OPERATION_SHIFT: u32 = 56;
+    const OPERAND_COUNT_SHIFT: u32 = 54;
+    const DATA_MASK: Word = u32::MAX as Word;
+
+    /// Constructs an instruction from a raw packed word.
+    pub const fn from_raw(raw: Word) -> Self {
         Self(raw)
     }
 
-    /// Returns the raw packed u32 value.
-    pub const fn raw(self) -> u32 {
+    /// Returns the raw packed word.
+    pub const fn raw(self) -> Word {
         self.0
     }
 
-    /// The 5-bit operation kind (bits 27–31). Maps directly to IonType
-    /// for data model types (kinds 1–13).
+    /// The 5-bit operation kind (bits 59-63).
     pub const fn operation_kind(self) -> u8 {
-        (self.0 >> 27) as u8
+        (self.0 >> (Self::OPERATION_SHIFT + 3)) as u8
     }
 
-    /// The 3-bit variant (bits 24–26). Selects the encoding
-    /// representation within an operation kind. Variant 7 indicates a
-    /// typed null.
+    /// The 3-bit variant (bits 56-58).
     pub const fn variant(self) -> u8 {
-        ((self.0 >> 24) & 0x7) as u8
+        ((self.0 >> Self::OPERATION_SHIFT) & 0x7) as u8
     }
 
-    /// The full 8-bit operation (bits 24–31): kind and variant combined.
+    /// The full 8-bit operation (bits 56-63).
     pub const fn operation(self) -> u8 {
-        (self.0 >> 24) as u8
+        (self.0 >> Self::OPERATION_SHIFT) as u8
     }
 
-    /// Returns true if this instruction represents a typed null
-    /// (variant == 0b111).
+    /// Returns true if this instruction represents a typed null.
     pub const fn is_null(self) -> bool {
         self.variant() == 7
     }
 
-    /// The 2-bit operand count field (bits 22–23). Values 0–2 are
-    /// literal counts of following operand words. Value 3 means the data
-    /// field holds the count (used for containers).
+    /// The 2-bit operand count field (bits 54-55).
     pub const fn operand_count_bits(self) -> u8 {
-        ((self.0 >> 22) & 0x3) as u8
+        ((self.0 >> Self::OPERAND_COUNT_SHIFT) & 0x3) as u8
     }
 
-    /// The 22-bit data field (bits 0–21). Interpretation is
-    /// operation-specific.
+    /// The low 32-bit data field.
     pub const fn data(self) -> u32 {
-        self.0 & 0x003F_FFFF
+        self.0 as u32
     }
 
-    /// The data field truncated to a signed 16-bit integer. Only
-    /// meaningful for `INT_I16` instructions where the generator stored
-    /// a sign-extended i16 value.
+    /// The data field truncated to a signed 32-bit integer.
+    pub const fn data_as_i32(self) -> i32 {
+        self.data() as i32
+    }
+
+    /// The data field truncated to a signed 16-bit integer.
     pub const fn data_as_i16(self) -> i16 {
         self.data() as i16
     }
 
-    /// Returns a new instruction with the data field replaced. The
-    /// operation and operand count bits are preserved.
+    /// Returns a new instruction with the data field replaced.
     pub const fn with_data(self, data: u32) -> Self {
-        Self((self.0 & !0x003F_FFFF) | (data & 0x003F_FFFF))
+        Self((self.0 & !Self::DATA_MASK) | data as Word)
     }
 
-    /// Constructs an instruction from a pre-computed base constant
-    /// (which has operation and operand count set) combined with a data
-    /// value. The data is masked to 22 bits.
-    pub const fn with_data_from(base: u32, data: u32) -> Self {
-        Self(base | (data & 0x003F_FFFF))
+    /// Constructs an instruction from a base constant plus a data payload.
+    pub const fn with_data_from(base: Word, data: u32) -> Self {
+        Self(base | data as Word)
     }
 }
 
 impl fmt::Debug for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Instruction({:#010X})", self.0)
+        write!(f, "Instruction({:#018X})", self.0)
     }
 }
 
@@ -203,12 +192,10 @@ impl fmt::Display for Instruction {
         match self.operation() {
             op::BOOL => write!(f, "{name} {}", data & 1 == 1),
             op::INT_I16 => write!(f, "{name} {}", self.data_as_i16()),
-            op::INT_I32 | op::INT_I64 | op::INT_CP | op::INT_REF => {
-                write!(f, "{name} (data={data})")
-            }
-            op::FLOAT_F32 | op::FLOAT_F64 => {
-                write!(f, "{name} (data={data})")
-            }
+            op::INT_I32 => write!(f, "{name} {}", self.data_as_i32()),
+            op::INT_I64 | op::INT_CP | op::INT_REF => write!(f, "{name} (data={data})"),
+            op::FLOAT_F32 => write!(f, "{name} {}", f32::from_bits(data)),
+            op::FLOAT_F64 => write!(f, "{name} (data={data})"),
             op::SYMBOL_SID | op::ANNOTATION_SID | op::FIELD_NAME_SID => {
                 write!(f, "{name} ${data}")
             }
@@ -241,57 +228,33 @@ pub(crate) fn render_bytecode(bytecode: &[Instruction]) -> String {
             out.push_str("  ");
         }
 
-        // Render the instruction with operand values when present
         match oc {
             1 => {
                 let operand = bytecode[i + 1].raw();
                 match instr.operation() {
-                    op::INT_I32 => {
-                        let value = operand as i32;
-                        write!(out, "INT_I32 {value}").unwrap();
-                    }
-                    op::FLOAT_F32 => {
-                        let value = f32::from_bits(operand);
-                        write!(out, "FLOAT_F32 {value}").unwrap();
-                    }
-                    _ => {
-                        write!(out, "{instr} @{operand:#010X}").unwrap();
-                    }
+                    op::INT_I64 => write!(out, "INT_I64 {}", operand as i64).unwrap(),
+                    op::FLOAT_F64 => write!(out, "FLOAT_F64 {}", f64::from_bits(operand)).unwrap(),
+                    _ => write!(out, "{instr} @{operand:#018X}").unwrap(),
                 }
                 i += 2;
             }
             2 => {
                 let hi = bytecode[i + 1].raw();
                 let lo = bytecode[i + 2].raw();
-                match instr.operation() {
-                    op::INT_I64 => {
-                        let value = ((hi as u64) << 32) | (lo as u64);
-                        write!(out, "INT_I64 {}", value as i64).unwrap();
-                    }
-                    op::FLOAT_F64 => {
-                        let bits = ((hi as u64) << 32) | (lo as u64);
-                        let value = f64::from_bits(bits);
-                        write!(out, "FLOAT_F64 {value}").unwrap();
-                    }
-                    _ => {
-                        write!(out, "{instr} @{hi:#010X}:{lo:#010X}").unwrap();
-                    }
-                }
+                write!(out, "{instr} @{hi:#018X}:{lo:#018X}").unwrap();
                 i += 3;
             }
             _ => {
-                // oc == 0 or oc == 3 (container start / variable-length)
                 write!(out, "{instr}").unwrap();
                 i += 1;
             }
         }
         out.push('\n');
 
-        let is_container_start = matches!(
+        if matches!(
             instr.operation(),
             op::LIST_START | op::SEXP_START | op::STRUCT_START
-        );
-        if is_container_start {
+        ) {
             indent += 1;
         }
     }
@@ -452,10 +415,10 @@ pub mod op {
 }
 
 pub mod instr {
-    use super::op;
+    use super::{op, Word};
 
-    const fn make(operation: u8, operand_count: u8) -> u32 {
-        ((operation as u32) << 24) | ((operand_count as u32) << 22)
+    const fn make(operation: u8, operand_count: u8) -> Word {
+        ((operation as Word) << 56) | ((operand_count as Word) << 54)
     }
 
     const O0: u8 = 0;
@@ -463,68 +426,68 @@ pub mod instr {
     const O2: u8 = 2;
     const ON: u8 = 3;
 
-    pub const NULL_NULL: u32 = make(op::NULL_NULL, O0);
-    pub const BOOL: u32 = make(op::BOOL, O0);
-    pub const NULL_BOOL: u32 = make(op::NULL_BOOL, O0);
-    pub const INT_I16: u32 = make(op::INT_I16, O0);
-    pub const INT_I32: u32 = make(op::INT_I32, O1);
-    pub const INT_I64: u32 = make(op::INT_I64, O2);
-    pub const INT_CP: u32 = make(op::INT_CP, O0);
-    pub const INT_REF: u32 = make(op::INT_REF, O1);
-    pub const NULL_INT: u32 = make(op::NULL_INT, O0);
-    pub const FLOAT_F32: u32 = make(op::FLOAT_F32, O1);
-    pub const FLOAT_F64: u32 = make(op::FLOAT_F64, O2);
-    pub const NULL_FLOAT: u32 = make(op::NULL_FLOAT, O0);
-    pub const DECIMAL_CP: u32 = make(op::DECIMAL_CP, O0);
-    pub const DECIMAL_REF: u32 = make(op::DECIMAL_REF, O1);
-    pub const NULL_DECIMAL: u32 = make(op::NULL_DECIMAL, O0);
-    pub const TIMESTAMP_CP: u32 = make(op::TIMESTAMP_CP, O0);
-    pub const SHORT_TIMESTAMP_REF: u32 = make(op::SHORT_TIMESTAMP_REF, O1);
-    pub const TIMESTAMP_REF: u32 = make(op::TIMESTAMP_REF, O1);
-    pub const NULL_TIMESTAMP: u32 = make(op::NULL_TIMESTAMP, O0);
-    pub const STRING_CP: u32 = make(op::STRING_CP, O0);
-    pub const STRING_REF: u32 = make(op::STRING_REF, O1);
-    pub const NULL_STRING: u32 = make(op::NULL_STRING, O0);
-    pub const SYMBOL_CP: u32 = make(op::SYMBOL_CP, O0);
-    pub const SYMBOL_REF: u32 = make(op::SYMBOL_REF, O1);
-    pub const SYMBOL_SID: u32 = make(op::SYMBOL_SID, O0);
-    pub const SYMBOL_CHAR: u32 = make(op::SYMBOL_CHAR, O0);
-    pub const NULL_SYMBOL: u32 = make(op::NULL_SYMBOL, O0);
-    pub const CLOB_CP: u32 = make(op::CLOB_CP, O0);
-    pub const CLOB_REF: u32 = make(op::CLOB_REF, O1);
-    pub const NULL_CLOB: u32 = make(op::NULL_CLOB, O0);
-    pub const BLOB_CP: u32 = make(op::BLOB_CP, O0);
-    pub const BLOB_REF: u32 = make(op::BLOB_REF, O1);
-    pub const NULL_BLOB: u32 = make(op::NULL_BLOB, O0);
-    pub const LIST_START: u32 = make(op::LIST_START, ON);
-    pub const NULL_LIST: u32 = make(op::NULL_LIST, O0);
-    pub const SEXP_START: u32 = make(op::SEXP_START, ON);
-    pub const NULL_SEXP: u32 = make(op::NULL_SEXP, O0);
-    pub const STRUCT_START: u32 = make(op::STRUCT_START, ON);
-    pub const NULL_STRUCT: u32 = make(op::NULL_STRUCT, O0);
-    pub const ANNOTATION_CP: u32 = make(op::ANNOTATION_CP, O0);
-    pub const ANNOTATION_REF: u32 = make(op::ANNOTATION_REF, O1);
-    pub const ANNOTATION_SID: u32 = make(op::ANNOTATION_SID, O0);
-    pub const FIELD_NAME_CP: u32 = make(op::FIELD_NAME_CP, O0);
-    pub const FIELD_NAME_REF: u32 = make(op::FIELD_NAME_REF, O1);
-    pub const FIELD_NAME_SID: u32 = make(op::FIELD_NAME_SID, O0);
-    pub const IVM: u32 = make(op::IVM, O0);
-    pub const DIRECTIVE_SET_SYMBOLS: u32 = make(op::DIRECTIVE_SET_SYMBOLS, O0);
-    pub const DIRECTIVE_ADD_SYMBOLS: u32 = make(op::DIRECTIVE_ADD_SYMBOLS, O0);
-    pub const DIRECTIVE_SET_MACROS: u32 = make(op::DIRECTIVE_SET_MACROS, O0);
-    pub const DIRECTIVE_ADD_MACROS: u32 = make(op::DIRECTIVE_ADD_MACROS, O0);
-    pub const DIRECTIVE_USE: u32 = make(op::DIRECTIVE_USE, O0);
-    pub const PLACEHOLDER_TAGGED: u32 = make(op::PLACEHOLDER_TAGGED, ON);
-    pub const PLACEHOLDER_TAGLESS: u32 = make(op::PLACEHOLDER_TAGLESS, O0);
-    pub const ARGUMENT_NONE: u32 = make(op::ARGUMENT_NONE, O0);
-    pub const INVOKE: u32 = make(op::INVOKE, O0);
-    pub const REFILL: u32 = make(op::REFILL, O0);
-    pub const END_TEMPLATE: u32 = make(op::END_TEMPLATE, O0);
-    pub const END_OF_INPUT: u32 = make(op::END_OF_INPUT, O0);
-    pub const END_CONTAINER: u32 = make(op::END_CONTAINER, O0);
-    pub const META_OFFSET: u32 = make(op::META_OFFSET, O1);
-    pub const META_ROWCOL: u32 = make(op::META_ROWCOL, O1);
-    pub const META_COMMENT: u32 = make(op::META_COMMENT, O1);
+    pub const NULL_NULL: Word = make(op::NULL_NULL, O0);
+    pub const BOOL: Word = make(op::BOOL, O0);
+    pub const NULL_BOOL: Word = make(op::NULL_BOOL, O0);
+    pub const INT_I16: Word = make(op::INT_I16, O0);
+    pub const INT_I32: Word = make(op::INT_I32, O0);
+    pub const INT_I64: Word = make(op::INT_I64, O1);
+    pub const INT_CP: Word = make(op::INT_CP, O0);
+    pub const INT_REF: Word = make(op::INT_REF, O1);
+    pub const NULL_INT: Word = make(op::NULL_INT, O0);
+    pub const FLOAT_F32: Word = make(op::FLOAT_F32, O0);
+    pub const FLOAT_F64: Word = make(op::FLOAT_F64, O1);
+    pub const NULL_FLOAT: Word = make(op::NULL_FLOAT, O0);
+    pub const DECIMAL_CP: Word = make(op::DECIMAL_CP, O0);
+    pub const DECIMAL_REF: Word = make(op::DECIMAL_REF, O1);
+    pub const NULL_DECIMAL: Word = make(op::NULL_DECIMAL, O0);
+    pub const TIMESTAMP_CP: Word = make(op::TIMESTAMP_CP, O0);
+    pub const SHORT_TIMESTAMP_REF: Word = make(op::SHORT_TIMESTAMP_REF, O1);
+    pub const TIMESTAMP_REF: Word = make(op::TIMESTAMP_REF, O1);
+    pub const NULL_TIMESTAMP: Word = make(op::NULL_TIMESTAMP, O0);
+    pub const STRING_CP: Word = make(op::STRING_CP, O0);
+    pub const STRING_REF: Word = make(op::STRING_REF, O1);
+    pub const NULL_STRING: Word = make(op::NULL_STRING, O0);
+    pub const SYMBOL_CP: Word = make(op::SYMBOL_CP, O0);
+    pub const SYMBOL_REF: Word = make(op::SYMBOL_REF, O1);
+    pub const SYMBOL_SID: Word = make(op::SYMBOL_SID, O0);
+    pub const SYMBOL_CHAR: Word = make(op::SYMBOL_CHAR, O0);
+    pub const NULL_SYMBOL: Word = make(op::NULL_SYMBOL, O0);
+    pub const CLOB_CP: Word = make(op::CLOB_CP, O0);
+    pub const CLOB_REF: Word = make(op::CLOB_REF, O1);
+    pub const NULL_CLOB: Word = make(op::NULL_CLOB, O0);
+    pub const BLOB_CP: Word = make(op::BLOB_CP, O0);
+    pub const BLOB_REF: Word = make(op::BLOB_REF, O1);
+    pub const NULL_BLOB: Word = make(op::NULL_BLOB, O0);
+    pub const LIST_START: Word = make(op::LIST_START, ON);
+    pub const NULL_LIST: Word = make(op::NULL_LIST, O0);
+    pub const SEXP_START: Word = make(op::SEXP_START, ON);
+    pub const NULL_SEXP: Word = make(op::NULL_SEXP, O0);
+    pub const STRUCT_START: Word = make(op::STRUCT_START, ON);
+    pub const NULL_STRUCT: Word = make(op::NULL_STRUCT, O0);
+    pub const ANNOTATION_CP: Word = make(op::ANNOTATION_CP, O0);
+    pub const ANNOTATION_REF: Word = make(op::ANNOTATION_REF, O1);
+    pub const ANNOTATION_SID: Word = make(op::ANNOTATION_SID, O0);
+    pub const FIELD_NAME_CP: Word = make(op::FIELD_NAME_CP, O0);
+    pub const FIELD_NAME_REF: Word = make(op::FIELD_NAME_REF, O1);
+    pub const FIELD_NAME_SID: Word = make(op::FIELD_NAME_SID, O0);
+    pub const IVM: Word = make(op::IVM, O0);
+    pub const DIRECTIVE_SET_SYMBOLS: Word = make(op::DIRECTIVE_SET_SYMBOLS, O0);
+    pub const DIRECTIVE_ADD_SYMBOLS: Word = make(op::DIRECTIVE_ADD_SYMBOLS, O0);
+    pub const DIRECTIVE_SET_MACROS: Word = make(op::DIRECTIVE_SET_MACROS, O0);
+    pub const DIRECTIVE_ADD_MACROS: Word = make(op::DIRECTIVE_ADD_MACROS, O0);
+    pub const DIRECTIVE_USE: Word = make(op::DIRECTIVE_USE, O0);
+    pub const PLACEHOLDER_TAGGED: Word = make(op::PLACEHOLDER_TAGGED, ON);
+    pub const PLACEHOLDER_TAGLESS: Word = make(op::PLACEHOLDER_TAGLESS, O0);
+    pub const ARGUMENT_NONE: Word = make(op::ARGUMENT_NONE, O0);
+    pub const INVOKE: Word = make(op::INVOKE, O0);
+    pub const REFILL: Word = make(op::REFILL, O0);
+    pub const END_TEMPLATE: Word = make(op::END_TEMPLATE, O0);
+    pub const END_OF_INPUT: Word = make(op::END_OF_INPUT, O0);
+    pub const END_CONTAINER: Word = make(op::END_CONTAINER, O0);
+    pub const META_OFFSET: Word = make(op::META_OFFSET, O1);
+    pub const META_ROWCOL: Word = make(op::META_ROWCOL, O1);
+    pub const META_COMMENT: Word = make(op::META_COMMENT, O1);
 }
 
 fn op_name(operation: u8) -> &'static str {
@@ -614,8 +577,14 @@ mod tests {
 
     #[test]
     fn instruction_negative_i16() {
-        let i = Instruction::from_raw(instr::INT_I16 | (-7i16 as u16 as u32));
+        let i = Instruction::from_raw(instr::INT_I16 | (-7i16 as u16 as Word));
         assert_eq!(i.data_as_i16(), -7);
+    }
+
+    #[test]
+    fn instruction_inline_i32() {
+        let i = Instruction::from_raw(instr::INT_I32).with_data((-7i32) as u32);
+        assert_eq!(i.data_as_i32(), -7);
     }
 
     #[test]
@@ -634,14 +603,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case(instr::INT_I32, 1)]
-    #[case(instr::INT_I64, 2)]
-    #[case(instr::FLOAT_F32, 1)]
-    #[case(instr::FLOAT_F64, 2)]
+    #[case(instr::INT_I32, 0)]
+    #[case(instr::INT_I64, 1)]
+    #[case(instr::FLOAT_F32, 0)]
+    #[case(instr::FLOAT_F64, 1)]
     #[case(instr::BOOL, 0)]
     #[case(instr::SYMBOL_SID, 0)]
     #[case(instr::LIST_START, 3)]
-    fn operand_count(#[case] raw: u32, #[case] expected: u8) {
+    fn operand_count(#[case] raw: Word, #[case] expected: u8) {
         let i = Instruction::from_raw(raw);
         assert_eq!(i.operand_count_bits(), expected);
     }
@@ -660,7 +629,7 @@ mod tests {
     #[case(instr::NULL_LIST)]
     #[case(instr::NULL_SEXP)]
     #[case(instr::NULL_STRUCT)]
-    fn null_operations_are_null(#[case] raw: u32) {
+    fn null_operations_are_null(#[case] raw: Word) {
         assert!(Instruction::from_raw(raw).is_null());
     }
 
@@ -678,7 +647,7 @@ mod tests {
     #[case(instr::STRING_REF)]
     #[case(instr::END_CONTAINER)]
     #[case(instr::REFILL)]
-    fn non_null_operations_are_not_null(#[case] raw: u32) {
+    fn non_null_operations_are_not_null(#[case] raw: Word) {
         assert!(!Instruction::from_raw(raw).is_null());
     }
 
@@ -715,21 +684,22 @@ mod tests {
 
     #[test]
     fn with_data_from_works() {
-        let i = Instruction::with_data_from(instr::INT_I16, 0x003F_FFFF);
+        let i = Instruction::with_data_from(instr::INT_I16, 0xFFFF_FFFF);
         assert_eq!(i.operation(), op::INT_I16);
-        assert_eq!(i.data(), 0x003F_FFFF);
+        assert_eq!(i.data(), 0xFFFF_FFFF);
     }
 
     #[rstest]
     #[case(instr::BOOL | 1, "BOOL true")]
     #[case(instr::BOOL, "BOOL false")]
-    #[case(instr::INT_I16 | (-3i16 as u16 as u32), "INT_I16 -3")]
+    #[case(instr::INT_I16 | (-3i16 as u16 as Word), "INT_I16 -3")]
+    #[case(Instruction::with_data_from(instr::INT_I32, (-3i32) as u32).raw(), "INT_I32 -3")]
     #[case(instr::LIST_START | 5, "LIST_START (len=5)")]
     #[case(instr::SYMBOL_SID | 7, "SYMBOL_SID $7")]
-    #[case(instr::SYMBOL_CHAR | ('A' as u32), "SYMBOL_CHAR 'A'")]
+    #[case(instr::SYMBOL_CHAR | ('A' as Word), "SYMBOL_CHAR 'A'")]
     #[case(instr::END_CONTAINER, "END_CONTAINER")]
     #[case(instr::NULL_INT, "NULL_INT")]
-    fn display_formatting(#[case] raw: u32, #[case] expected: &str) {
+    fn display_formatting(#[case] raw: Word, #[case] expected: &str) {
         assert_eq!(format!("{}", Instruction::from_raw(raw)), expected);
     }
 

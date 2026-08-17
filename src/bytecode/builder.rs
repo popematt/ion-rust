@@ -1,4 +1,4 @@
-use super::instruction::{instr, Instruction};
+use super::instruction::{instr, Instruction, Word};
 
 pub(crate) struct BytecodeBuilder {
     buffer: Vec<Instruction>,
@@ -81,28 +81,23 @@ impl BytecodeBuilder {
 
     pub fn bool(mut self, value: bool) -> Self {
         self.buffer
-            .push(Instruction::from_raw(instr::BOOL | value as u32));
+            .push(Instruction::from_raw(instr::BOOL | value as Word));
         self
     }
 
     pub fn int_i16(mut self, value: i16) -> Self {
-        self.buffer.push(Instruction::from_raw(
-            instr::INT_I16 | (value as u16 as u32),
-        ));
-        self
+        self.int_i32(value as i32)
     }
 
     pub fn int_i32(mut self, value: i32) -> Self {
-        self.buffer.push(Instruction::from_raw(instr::INT_I32));
-        self.buffer.push(Instruction::from_raw(value as u32));
+        self.buffer
+            .push(Instruction::with_data_from(instr::INT_I32, value as u32));
         self
     }
 
     pub fn int_i64(mut self, value: i64) -> Self {
         self.buffer.push(Instruction::from_raw(instr::INT_I64));
-        self.buffer
-            .push(Instruction::from_raw((value >> 32) as u32));
-        self.buffer.push(Instruction::from_raw(value as u32));
+        self.buffer.push(Instruction::from_raw(value as Word));
         self
     }
 
@@ -154,16 +149,16 @@ impl BytecodeBuilder {
     }
 
     pub fn float_f32(mut self, value: f32) -> Self {
-        self.buffer.push(Instruction::from_raw(instr::FLOAT_F32));
-        self.buffer.push(Instruction::from_raw(value.to_bits()));
+        self.buffer.push(Instruction::with_data_from(
+            instr::FLOAT_F32,
+            value.to_bits(),
+        ));
         self
     }
 
     pub fn float_f64(mut self, value: f64) -> Self {
         self.buffer.push(Instruction::from_raw(instr::FLOAT_F64));
-        let bits = value.to_bits();
-        self.buffer.push(Instruction::from_raw((bits >> 32) as u32));
-        self.buffer.push(Instruction::from_raw(bits as u32));
+        self.buffer.push(Instruction::from_raw(value.to_bits()));
         self
     }
 
@@ -219,7 +214,7 @@ impl BytecodeBuilder {
         self.container(instr::STRUCT_START, children)
     }
 
-    fn container(mut self, start_instr: u32, children: impl FnOnce(Self) -> Self) -> Self {
+    fn container(mut self, start_instr: Word, children: impl FnOnce(Self) -> Self) -> Self {
         let start = self.buffer.len();
         self.buffer.push(Instruction::from_raw(0));
         self = children(self);
@@ -227,10 +222,10 @@ impl BytecodeBuilder {
             .push(Instruction::from_raw(instr::END_CONTAINER));
         let len = self.buffer.len() - start - 1;
         debug_assert!(
-            len <= 0x003F_FFFF,
-            "container bytecode length exceeds 22-bit data field"
+            u32::try_from(len).is_ok(),
+            "container bytecode length exceeds 32-bit data field"
         );
-        self.buffer[start] = Instruction::from_raw(start_instr | len as u32);
+        self.buffer[start] = Instruction::with_data_from(start_instr, len as u32);
         self
     }
 
@@ -260,14 +255,15 @@ mod tests {
             .end_of_input()
             .build();
 
-        assert_eq!(bytecode.len(), 8);
+        assert_eq!(bytecode.len(), 6);
         assert_eq!(bytecode[0].operation(), op::BOOL);
         assert_eq!(bytecode[0].data() & 1, 1);
-        assert_eq!(bytecode[1].operation(), op::INT_I16);
-        assert_eq!(bytecode[1].data_as_i16(), 42);
+        assert_eq!(bytecode[1].operation(), op::INT_I32);
+        assert_eq!(bytecode[1].data_as_i32(), 42);
         assert_eq!(bytecode[2].operation(), op::INT_I32);
-        assert_eq!(bytecode[3].raw(), 100_000u32);
-        assert_eq!(bytecode[4].operation(), op::FLOAT_F64);
+        assert_eq!(bytecode[2].data_as_i32(), 100_000);
+        assert_eq!(bytecode[3].operation(), op::FLOAT_F64);
+        assert_eq!(bytecode[4].raw(), 3.14f64.to_bits());
     }
 
     #[test]
@@ -277,7 +273,7 @@ mod tests {
             .end_of_input()
             .build();
 
-        // LIST_START, 3x INT_I16, END_CONTAINER, END_OF_INPUT
+        // LIST_START, 3x INT_I32, END_CONTAINER, END_OF_INPUT
         assert_eq!(bytecode.len(), 6);
         assert_eq!(bytecode[0].operation(), op::LIST_START);
         assert_eq!(bytecode[0].data(), 4); // 3 children + END_CONTAINER
@@ -294,10 +290,10 @@ mod tests {
         // Structure:
         //   [0] LIST_START (len=6)  -- outer
         //   [1]   LIST_START (len=3)  -- inner
-        //   [2]     INT_I16 1
-        //   [3]     INT_I16 2
+        //   [2]     INT_I32 1
+        //   [3]     INT_I32 2
         //   [4]   END_CONTAINER       -- inner end
-        //   [5]   INT_I16 3
+        //   [5]   INT_I32 3
         //   [6] END_CONTAINER         -- outer end
         //   [7] END_OF_INPUT
         assert_eq!(bytecode.len(), 8);
@@ -320,7 +316,7 @@ mod tests {
         assert_eq!(bytecode[0].operation(), op::STRUCT_START);
         assert_eq!(bytecode[1].operation(), op::FIELD_NAME_SID);
         assert_eq!(bytecode[1].data(), 4);
-        assert_eq!(bytecode[2].operation(), op::INT_I16);
+        assert_eq!(bytecode[2].operation(), op::INT_I32);
         assert_eq!(bytecode[3].operation(), op::FIELD_NAME_SID);
         assert_eq!(bytecode[3].data(), 5);
         assert_eq!(bytecode[4].operation(), op::BOOL);
@@ -335,7 +331,7 @@ mod tests {
 
         let rendered = render_bytecode(&bytecode);
         assert!(rendered.contains("LIST_START"));
-        assert!(rendered.contains("INT_I16 1"));
+        assert!(rendered.contains("INT_I32 1"));
         assert!(rendered.contains("BOOL true"));
         assert!(rendered.contains("END_CONTAINER"));
     }

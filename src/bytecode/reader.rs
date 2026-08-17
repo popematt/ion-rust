@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::{instr, op, operation_kind, Instruction};
+use crate::bytecode::instruction::{instr, op, operation_kind, Instruction, Word};
 use crate::result::IonFailure;
 use crate::{Decimal, Int, IonResult, IonType, Timestamp};
 
@@ -38,7 +38,7 @@ pub(crate) struct ContainerInfo {
 }
 
 pub struct BytecodeReader<G: BytecodeGenerator = Box<dyn BytecodeGenerator>> {
-    bytecode: Vec<u32>,
+    bytecode: Vec<Word>,
     i: usize,
     instruction: Instruction,
     field_name_index: i32,
@@ -64,7 +64,7 @@ impl BytecodeReader<Box<dyn BytecodeGenerator>> {
     ///
     /// Encountering a REFILL instruction will panic. This constructor is
     /// intended for tests that supply complete bytecode sequences.
-    pub fn new(bytecode: Vec<u32>) -> Self {
+    pub fn new(bytecode: Vec<Word>) -> Self {
         let symbol_table = SYSTEM_SYMBOLS.iter().map(|s| Some(Arc::from(*s))).collect();
         Self {
             bytecode,
@@ -236,12 +236,8 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
         let i = self.i;
         match instruction.operation() {
             op::INT_I16 => Ok(instruction.data_as_i16() as i64),
-            op::INT_I32 => Ok(self.bytecode[i] as i32 as i64),
-            op::INT_I64 => {
-                let hi = self.bytecode[i] as u64;
-                let lo = self.bytecode[i + 1] as u64;
-                Ok(((hi << 32) | lo) as i64)
-            }
+            op::INT_I32 => Ok(instruction.data_as_i32() as i64),
+            op::INT_I64 => Ok(self.bytecode[i] as i64),
             op::INT_CP => {
                 let index = instruction.data();
                 match self.constant_pool.get(index) {
@@ -254,7 +250,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             }
             op::INT_REF => {
                 let length = instruction.data();
-                let position = self.bytecode[i];
+                let position = self.bytecode[i] as u32;
                 let int_value = self.generator()?.read_int_ref(position, length)?;
                 int_value.expect_i64()
             }
@@ -271,12 +267,8 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
         let i = self.i;
         match instruction.operation() {
             op::INT_I16 => Ok(Int::from(instruction.data_as_i16() as i64)),
-            op::INT_I32 => Ok(Int::from(self.bytecode[i] as i32 as i64)),
-            op::INT_I64 => {
-                let hi = self.bytecode[i] as u64;
-                let lo = self.bytecode[i + 1] as u64;
-                Ok(Int::from(((hi << 32) | lo) as i64))
-            }
+            op::INT_I32 => Ok(Int::from(instruction.data_as_i32() as i64)),
+            op::INT_I64 => Ok(Int::from(self.bytecode[i] as i64)),
             op::INT_CP => {
                 let index = instruction.data();
                 match self.constant_pool.get(index) {
@@ -286,7 +278,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             }
             op::INT_REF => {
                 let length = instruction.data();
-                let position = self.bytecode[i];
+                let position = self.bytecode[i] as u32;
                 self.generator()?.read_int_ref(position, length)
             }
             _ => IonResult::decoding_error("not positioned on an integer"),
@@ -306,7 +298,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             }
             op::DECIMAL_REF => {
                 let length = instruction.data();
-                let position = self.bytecode[self.i];
+                let position = self.bytecode[self.i] as u32;
                 self.generator()?.read_decimal_ref(position, length)
             }
             _ => IonResult::decoding_error("not positioned on a decimal"),
@@ -326,7 +318,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             }
             op::SHORT_TIMESTAMP_REF | op::TIMESTAMP_REF => {
                 let length = instruction.data();
-                let position = self.bytecode[self.i];
+                let position = self.bytecode[self.i] as u32;
                 self.generator()?.read_timestamp_ref(position, length)
             }
             _ => IonResult::decoding_error("not positioned on a timestamp"),
@@ -346,7 +338,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             }
             op::STRING_REF => {
                 let length = instruction.data();
-                let position = self.bytecode[self.i];
+                let position = self.bytecode[self.i] as u32;
                 let text: &str = self.generator()?.read_text_ref(position, length)?;
                 Ok(Arc::from(text))
             }
@@ -367,7 +359,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             }
             op::BLOB_REF | op::CLOB_REF => {
                 let length = instruction.data();
-                let position = self.bytecode[self.i];
+                let position = self.bytecode[self.i] as u32;
                 let bytes: &[u8] = self.generator()?.read_bytes_ref(position, length)?;
                 Ok(Arc::from(bytes))
             }
@@ -399,15 +391,8 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
         let instruction = self.instruction;
         let i = self.i;
         match instruction.operation() {
-            op::FLOAT_F32 => {
-                let bits = self.bytecode[i];
-                Ok(f32::from_bits(bits) as f64)
-            }
-            op::FLOAT_F64 => {
-                let hi = self.bytecode[i] as u64;
-                let lo = self.bytecode[i + 1] as u64;
-                Ok(f64::from_bits((hi << 32) | lo))
-            }
+            op::FLOAT_F32 => Ok(f32::from_bits(instruction.data()) as f64),
+            op::FLOAT_F64 => Ok(f64::from_bits(self.bytecode[i])),
             _ => IonResult::decoding_error("not positioned on a float"),
         }
     }
@@ -511,7 +496,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             },
             op::FIELD_NAME_REF => {
                 let length = data;
-                let position = self.bytecode[idx as usize + 1];
+                let position = self.bytecode[idx as usize + 1] as u32;
                 let text: &str = self.generator()?.read_text_ref(position, length)?;
                 Ok(Some(SymbolToken::Text(Arc::from(text))))
             }
@@ -602,7 +587,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
                         op::END_CONTAINER => break,
                         op::STRING_REF => {
                             let length = instr.data();
-                            let position = self.bytecode[i];
+                            let position = self.bytecode[i] as u32;
                             i += 1;
                             // Resolve text from the generator
                             if let Some(gen) = &self.generator {
@@ -669,7 +654,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
 /// Created by [`BytecodeReader::annotations()`]. Yields one
 /// `SymbolToken` per annotation.
 pub(crate) struct AnnotationIterator<'a> {
-    bytecode: &'a [u32],
+    bytecode: &'a [Word],
     constant_pool: &'a ConstantPool,
     index: usize,
     remaining: u8,
@@ -724,7 +709,7 @@ mod tests {
     use crate::IonType;
 
     fn reader_from(builder: BytecodeBuilder) -> BytecodeReader {
-        let bytecode: Vec<u32> = builder.build().iter().map(|i| i.raw()).collect();
+        let bytecode: Vec<Word> = builder.build().iter().map(|i| i.raw()).collect();
         BytecodeReader::new(bytecode)
     }
 
@@ -822,7 +807,7 @@ mod tests {
     #[test]
     fn end_container_returns_none_repeatedly() -> IonResult<()> {
         // Test END_CONTAINER directly (step-in not available until pt003)
-        let inner: Vec<u32> = vec![instr::INT_I16 | 1, instr::END_CONTAINER];
+        let inner: Vec<Word> = vec![instr::INT_I16 | 1, instr::END_CONTAINER];
         let mut reader = BytecodeReader::new(inner);
 
         assert_eq!(reader.next()?, Some(IonType::Int));
@@ -851,7 +836,7 @@ mod tests {
 
     #[test]
     fn annotation_tracking() -> IonResult<()> {
-        let bytecode: Vec<u32> = vec![
+        let bytecode: Vec<Word> = vec![
             instr::ANNOTATION_SID | 4, // annotation $4
             instr::ANNOTATION_SID | 5, // annotation $5
             instr::INT_I16 | 42,       // value
@@ -868,7 +853,7 @@ mod tests {
 
     #[test]
     fn field_name_tracking() -> IonResult<()> {
-        let bytecode: Vec<u32> = vec![
+        let bytecode: Vec<Word> = vec![
             instr::FIELD_NAME_SID | 4, // field name $4
             instr::INT_I16 | 99,       // value
             instr::END_OF_INPUT,
@@ -883,7 +868,7 @@ mod tests {
 
     #[test]
     fn metadata_tracking() -> IonResult<()> {
-        let bytecode: Vec<u32> = vec![
+        let bytecode: Vec<Word> = vec![
             instr::META_OFFSET,
             42, // operand: offset value
             instr::INT_I16 | 7,
@@ -1684,7 +1669,7 @@ mod tests {
         // Construct a reader without a generator that has a STRING_REF
         // instruction. Attempting to read the value should return an error
         // (not panic).
-        let bytecode: Vec<u32> = vec![
+        let bytecode: Vec<Word> = vec![
             instr::STRING_REF | 10, // length=10
             0x0000_1000,            // position operand
             instr::END_OF_INPUT,
@@ -1708,13 +1693,13 @@ mod tests {
     /// batches, one per refill call.
     struct MockGenerator {
         /// Each entry is a batch of raw u32 instructions to emit on refill.
-        batches: Vec<Vec<u32>>,
+        batches: Vec<Vec<Word>>,
         /// Tracks how many times refill has been called.
         call_count: usize,
     }
 
     impl MockGenerator {
-        fn new(batches: Vec<Vec<u32>>) -> Self {
+        fn new(batches: Vec<Vec<Word>>) -> Self {
             Self {
                 batches,
                 call_count: 0,
@@ -1725,7 +1710,7 @@ mod tests {
     impl BytecodeGenerator for MockGenerator {
         fn refill(
             &mut self,
-            destination: &mut Vec<u32>,
+            destination: &mut Vec<Word>,
             _constant_pool: &mut ConstantPool,
         ) -> IonResult<()> {
             let idx = self.call_count;
@@ -1813,7 +1798,7 @@ mod tests {
         impl BytecodeGenerator for ConstantAddingGenerator {
             fn refill(
                 &mut self,
-                destination: &mut Vec<u32>,
+                destination: &mut Vec<Word>,
                 constant_pool: &mut ConstantPool,
             ) -> IonResult<()> {
                 self.call_count += 1;
@@ -1821,14 +1806,14 @@ mod tests {
                     1 => {
                         // First refill: add a user constant and reference it.
                         let idx = constant_pool.add(Constant::BigInt(Arc::new(Int::from(999))));
-                        destination.push(instr::INT_CP | idx);
+                        destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
                         destination.push(instr::REFILL);
                     }
                     2 => {
                         // Second refill: the previous user constant should
                         // have been truncated. Add a new one.
                         let idx = constant_pool.add(Constant::BigInt(Arc::new(Int::from(777))));
-                        destination.push(instr::INT_CP | idx);
+                        destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
                         destination.push(instr::END_OF_INPUT);
                     }
                     _ => {

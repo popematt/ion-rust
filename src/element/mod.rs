@@ -707,7 +707,8 @@ impl Element {
                 }
                 SymbolText::Static(static_str) => Ok((*static_str).to_string()),
                 SymbolText::ArenaBorrowed(ptr) => {
-                    // SAFETY: The pointer is valid while we hold this Element.
+                    // SAFETY: `ArenaBorrowed` may only be constructed
+                    // when pointed-to `Arc<str>` outlives observable use.
                     Ok(unsafe { ptr.text() }.to_string())
                 }
                 SymbolText::SourceSlice(substr) => Ok(substr.as_str().to_string()),
@@ -1074,8 +1075,11 @@ mod tests {
 
     /// Makes a timestamp from an RFC-3339 string and panics if it can't
     fn make_timestamp<T: AsRef<str>>(text: T) -> Timestamp {
-        let dt = DateTime::parse_from_rfc3339(text.as_ref()).unwrap();
-        Timestamp::from_fixed_offset_datetime(dt)
+        Element::read_one(text.as_ref())
+            .unwrap()
+            .expect_timestamp()
+            .unwrap()
+            .clone()
     }
 
     struct CaseAnnotations {

@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::{op, operation_kind, Instruction};
+use crate::bytecode::instruction::{op, operation_kind, Instruction, Word};
 use crate::bytecode::ion10::BinaryIon10Generator;
 use crate::bytecode::materialize::SYSTEM_SYMBOLS;
 use crate::element::Annotations;
@@ -48,7 +48,7 @@ pub fn read_all_v3_parallel(data: &[u8]) -> IonResult<Sequence> {
 
     // Phase 1: Generate all bytecode sequentially.
     let mut generator = BinaryIon10Generator::new(data);
-    let mut bytecode: Vec<u32> = Vec::new();
+    let mut bytecode: Vec<Word> = Vec::new();
     let mut constant_pool = ConstantPool::new();
 
     // We do NOT truncate the constant pool between refills so that all CP
@@ -126,7 +126,7 @@ struct TlvSegment {
 /// Scans the bytecode buffer to find TLV boundaries, processing IVM and
 /// DIRECTIVE instructions along the way to maintain symbol table state.
 fn scan_segments<S: AsRef<[u8]>>(
-    bytecode: &[u32],
+    bytecode: &[Word],
     generator: &BinaryIon10Generator<S>,
     constant_pool: &ConstantPool,
 ) -> IonResult<Vec<TlvSegment>> {
@@ -201,7 +201,7 @@ fn scan_segments<S: AsRef<[u8]>>(
 
 /// Processes a DIRECTIVE instruction, updating the symbol table.
 fn process_directive<S: AsRef<[u8]>>(
-    bytecode: &[u32],
+    bytecode: &[Word],
     pos: &mut usize,
     instr: Instruction,
     symbol_table: &mut Vec<Option<Arc<str>>>,
@@ -223,7 +223,7 @@ fn process_directive<S: AsRef<[u8]>>(
                     op::END_CONTAINER => break,
                     op::STRING_REF => {
                         let length = dir_instr.data();
-                        let position = bytecode[*pos];
+                        let position = bytecode[*pos] as u32;
                         *pos += 1;
                         match generator.read_text_ref(position, length) {
                             Ok(text) => {
@@ -279,7 +279,7 @@ fn process_directive<S: AsRef<[u8]>>(
 
 /// Skips a top-level value (including any preceding annotations or metadata)
 /// and returns the position immediately after it.
-fn skip_top_level_value(bytecode: &[u32], mut pos: usize) -> usize {
+fn skip_top_level_value(bytecode: &[Word], mut pos: usize) -> usize {
     // Skip leading annotations and metadata
     loop {
         let instr = Instruction::from_raw(bytecode[pos]);
@@ -301,7 +301,7 @@ fn skip_top_level_value(bytecode: &[u32], mut pos: usize) -> usize {
 
 /// Skips a single value instruction (and its children if container) and
 /// returns the position immediately after.
-fn skip_value(bytecode: &[u32], pos: usize) -> usize {
+fn skip_value(bytecode: &[Word], pos: usize) -> usize {
     let instr = Instruction::from_raw(bytecode[pos]);
     let oc = instr.operand_count_bits();
     if oc == 3 {
@@ -318,7 +318,7 @@ fn skip_value(bytecode: &[u32], pos: usize) -> usize {
 /// A materializer that walks a bytecode slice and produces an `Element`.
 /// Designed to be called from parallel tasks -- holds only shared references.
 struct TlvMaterializer<'a> {
-    bytecode: &'a [u32],
+    bytecode: &'a [Word],
     pos: usize,
     source: &'a [u8],
     symbol_table: &'a [Option<Arc<str>>],
@@ -336,7 +336,7 @@ impl<'a> TlvMaterializer<'a> {
 
     /// Reads the raw u32 at the current position and advances pos.
     #[inline(always)]
-    fn consume_raw(&mut self) -> u32 {
+    fn consume_raw(&mut self) -> Word {
         let raw = self.bytecode[self.pos];
         self.pos += 1;
         raw
@@ -411,7 +411,7 @@ impl<'a> TlvMaterializer<'a> {
                     _ => return IonResult::decoding_error("annotation CP entry is not a string"),
                 },
                 op::ANNOTATION_REF => {
-                    let position = self.bytecode[p];
+                    let position = self.bytecode[p] as u32;
                     p += 1;
                     let text = self.read_text_ref(position, data)?;
                     Symbol::from(text)
@@ -430,34 +430,20 @@ impl<'a> TlvMaterializer<'a> {
             op::NULL_BOOL => Ok(Value::Null(IonType::Bool)),
 
             op::INT_I16 => Ok(Value::Int(Int::from(instr.data_as_i16() as i64))),
-            op::INT_I32 => {
-                let v = self.consume_raw() as i32;
-                Ok(Value::Int(Int::from(v as i64)))
-            }
-            op::INT_I64 => {
-                let hi = self.consume_raw() as u64;
-                let lo = self.consume_raw() as u64;
-                Ok(Value::Int(Int::from(((hi << 32) | lo) as i64)))
-            }
+            op::INT_I32 => Ok(Value::Int(Int::from(instr.data_as_i32() as i64))),
+            op::INT_I64 => Ok(Value::Int(Int::from(self.consume_raw() as i64))),
             op::INT_CP => match self.constant_pool.get(instr.data()) {
                 Constant::BigInt(arc) => Ok(Value::Int(arc.as_ref().clone())),
                 _ => IonResult::decoding_error("CP entry is not BigInt"),
             },
             op::INT_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 Ok(Value::Int(self.read_int_ref(position, instr.data())?))
             }
             op::NULL_INT => Ok(Value::Null(IonType::Int)),
 
-            op::FLOAT_F32 => {
-                let bits = self.consume_raw();
-                Ok(Value::Float(f32::from_bits(bits) as f64))
-            }
-            op::FLOAT_F64 => {
-                let hi = self.consume_raw() as u64;
-                let lo = self.consume_raw() as u64;
-                Ok(Value::Float(f64::from_bits((hi << 32) | lo)))
-            }
+            op::FLOAT_F32 => Ok(Value::Float(f32::from_bits(instr.data()) as f64)),
+            op::FLOAT_F64 => Ok(Value::Float(f64::from_bits(self.consume_raw()))),
             op::NULL_FLOAT => Ok(Value::Null(IonType::Float)),
 
             op::DECIMAL_CP => match self.constant_pool.get(instr.data()) {
@@ -465,7 +451,7 @@ impl<'a> TlvMaterializer<'a> {
                 _ => IonResult::decoding_error("CP entry is not Decimal"),
             },
             op::DECIMAL_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 Ok(Value::Decimal(
                     self.read_decimal_ref(position, instr.data())?,
                 ))
@@ -477,7 +463,7 @@ impl<'a> TlvMaterializer<'a> {
                 _ => IonResult::decoding_error("CP entry is not Timestamp"),
             },
             op::SHORT_TIMESTAMP_REF | op::TIMESTAMP_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 Ok(Value::Timestamp(
                     self.read_timestamp_ref(position, instr.data())?,
                 ))
@@ -489,7 +475,7 @@ impl<'a> TlvMaterializer<'a> {
                 _ => IonResult::decoding_error("CP entry is not String"),
             },
             op::STRING_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let text = self.read_text_ref(position, instr.data())?;
                 Ok(Value::String(Str::from(text)))
             }
@@ -512,7 +498,7 @@ impl<'a> TlvMaterializer<'a> {
                 Ok(Value::Symbol(Symbol::from(&*s)))
             }
             op::SYMBOL_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let text = self.read_text_ref(position, instr.data())?;
                 Ok(Value::Symbol(Symbol::from(text)))
             }
@@ -523,7 +509,7 @@ impl<'a> TlvMaterializer<'a> {
                 _ => IonResult::decoding_error("CP entry is not Bytes"),
             },
             op::BLOB_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let bytes = self.read_bytes_ref(position, instr.data())?;
                 Ok(Value::Blob(Bytes::from(bytes)))
             }
@@ -534,7 +520,7 @@ impl<'a> TlvMaterializer<'a> {
                 _ => IonResult::decoding_error("CP entry is not Bytes"),
             },
             op::CLOB_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let bytes = self.read_bytes_ref(position, instr.data())?;
                 Ok(Value::Clob(Bytes::from(bytes)))
             }
@@ -599,7 +585,7 @@ impl<'a> TlvMaterializer<'a> {
                 _ => IonResult::decoding_error("field name CP entry is not a string"),
             },
             op::FIELD_NAME_REF => {
-                let position = self.consume_raw();
+                let position = self.consume_raw() as u32;
                 let text = self.read_text_ref(position, data)?;
                 Ok(Symbol::from(text))
             }

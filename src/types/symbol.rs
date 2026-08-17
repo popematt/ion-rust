@@ -8,73 +8,59 @@ use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// A raw pointer to an `Arc<str>` in the symbol table.
+/// A raw pointer to an `Arc<str>` held elsewhere (for example: arena
+/// reader symbol table or constant pool).
 ///
 /// # Safety
 ///
-/// This type may ONLY be constructed by the arena reader module.
-/// The pointer is valid as long as:
-/// 1. The symbol table Vec has not reallocated (guaranteed because
-///    symbol table changes only happen inside `next()`, after the
-///    arena reset invalidates all `&Element` borrows)
-/// 2. The symbol table entry has not been replaced (guaranteed by
-///    the same reasoning -- the table is stable during
-///    materialization)
-///
-/// Skipping Drop is harmless -- this type owns nothing.
-/// Clone produces `SymbolText::Shared(Arc::clone(&*ptr))` --
-/// a fully independent owned Symbol via refcount increment.
+/// This pointer may only be constructed when the pointed-to `Arc<str>`
+/// will remain at a stable address and live for the entire duration that
+/// safe code can observe any `ArenaBorrowed` symbol using it.
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct SymbolTableRef(*const Arc<str>);
+pub(crate) struct ArcStrRef(*const Arc<str>);
 
-// SAFETY: The pointer's target (an Arc<str> in the symbol table) is
-// Send+Sync because Arc<str> is. The pointer itself is valid for
-// the duration of any accessible reference (enforced by the arena
-// reader's borrow discipline).
-unsafe impl Send for SymbolTableRef {}
-unsafe impl Sync for SymbolTableRef {}
+// SAFETY: `Arc<str>` is Send + Sync, and this wrapper only forwards
+// shared access to the pointed-to value.
+unsafe impl Send for ArcStrRef {}
+unsafe impl Sync for ArcStrRef {}
 
-impl PartialEq for SymbolTableRef {
+impl PartialEq for ArcStrRef {
     fn eq(&self, other: &Self) -> bool {
-        // SAFETY: Both pointers must be valid when this is called (guaranteed
-        // by the arena reader's borrow discipline).
+        // SAFETY: Constructor invariants guarantee both pointers remain
+        // valid while safe code can access them.
         unsafe { *self.0 == *other.0 }
     }
 }
 
-impl Eq for SymbolTableRef {}
+impl Eq for ArcStrRef {}
 
-impl SymbolTableRef {
-    /// Creates a new `SymbolTableRef` from a pointer to an `Arc<str>`.
+impl ArcStrRef {
+    /// Creates a new `ArcStrRef`.
     ///
     /// # Safety
     ///
-    /// The pointer must point to a valid `Arc<str>` that remains at a
-    /// stable address and is not dropped for the entire duration that
-    /// this `SymbolTableRef` is dereferenceable through safe code.
+    /// `ptr` must point to a valid `Arc<str>` that remains at a stable
+    /// address for the entire duration that this reference may be
+    /// dereferenced through safe code.
     pub(crate) unsafe fn new(ptr: *const Arc<str>) -> Self {
         Self(ptr)
     }
 
-    /// Returns the text content of the referenced symbol.
+    /// Returns the referenced text.
     ///
     /// # Safety
     ///
-    /// The caller must ensure the pointer is still valid (i.e., the
-    /// symbol table has not been reallocated or the entry dropped).
+    /// Caller must ensure pointer remains valid.
     pub(crate) unsafe fn text(&self) -> &str {
-        // SAFETY: Caller guarantees the pointer is valid.
         &**self.0
     }
 
-    /// Clones the `Arc<str>` that the pointer references, producing
-    /// an independently owned `Arc<str>`.
+    /// Clones the referenced `Arc<str>`.
     ///
     /// # Safety
     ///
-    /// The caller must ensure the pointer is still valid.
+    /// Caller must ensure pointer remains valid.
     pub(crate) unsafe fn to_arc(&self) -> Arc<str> {
-        // SAFETY: Caller guarantees the pointer is valid.
         Arc::clone(&*self.0)
     }
 }
@@ -91,9 +77,8 @@ pub(crate) enum SymbolText {
     Owned(String),
     // This symbol has text that is statically defined (e.g. system symbol table text)
     Static(&'static str),
-    // This Symbol borrows from an arena reader's symbol table via raw pointer.
-    // The pointer targets an `Arc<str>` entry that is stable during materialization.
-    ArenaBorrowed(SymbolTableRef),
+    // This Symbol borrows an existing `Arc<str>` slot via raw pointer.
+    ArenaBorrowed(ArcStrRef),
     // This Symbol is a zero-copy sub-slice of a source buffer via Arc.
     SourceSlice(ArcSubstr),
     // This Symbol is equivalent to SID zero (`$0`)
@@ -106,8 +91,8 @@ impl SymbolText {
             SymbolText::Shared(s) => s.as_ref(),
             SymbolText::Owned(s) => s.as_str(),
             SymbolText::Static(s) => s,
-            // SAFETY: When this variant exists, the arena reader guarantees
-            // the pointer is valid for the lifetime of any accessible reference.
+            // SAFETY: Constructor invariants guarantee pointer validity
+            // for the duration of any observable borrow.
             SymbolText::ArenaBorrowed(ptr) => unsafe { ptr.text() },
             SymbolText::SourceSlice(s) => s.as_str(),
             SymbolText::Unknown => return None,
@@ -130,9 +115,8 @@ impl Clone for SymbolText {
             SymbolText::Shared(text) => SymbolText::Shared(Arc::clone(text)),
             SymbolText::Static(text) => SymbolText::Static(text),
             SymbolText::ArenaBorrowed(ptr) => {
-                // SAFETY: When this variant exists, the arena reader guarantees
-                // the pointer is valid for the lifetime of any accessible reference.
-                // Cloning upgrades to a fully independent `Shared(Arc<str>)`.
+                // SAFETY: Same lifetime invariant as above. Cloning
+                // upgrades to independently owned `Arc<str>`.
                 SymbolText::Shared(unsafe { ptr.to_arc() })
             }
             SymbolText::SourceSlice(s) => SymbolText::SourceSlice(s.clone()),
@@ -202,6 +186,18 @@ impl Symbol {
     pub(crate) fn source_slice(substr: ArcSubstr) -> Symbol {
         Symbol {
             text: SymbolText::SourceSlice(substr),
+        }
+    }
+
+    /// Creates a symbol that borrows an existing `Arc<str>` slot.
+    ///
+    /// # Safety
+    ///
+    /// `arc` must remain at a stable address and live for the entire
+    /// duration that any safe code can observe the returned symbol.
+    pub(crate) unsafe fn arena_borrowed(arc: &Arc<str>) -> Symbol {
+        Symbol {
+            text: SymbolText::ArenaBorrowed(unsafe { ArcStrRef::new(arc as *const Arc<str>) }),
         }
     }
 

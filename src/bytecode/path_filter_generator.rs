@@ -5,12 +5,11 @@
 //! Non-matching values are skipped at the source level in O(1) via Ion 1.0
 //! length prefixes.
 
-use std::ops::Neg;
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::instr;
+use crate::bytecode::instruction::{instr, Instruction, Word};
 #[allow(deprecated)]
 use crate::bytecode::path_filter::{FilterFsm, PathFilter, PathQuery, Predicate};
 use crate::result::IonFailure;
@@ -251,7 +250,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
     /// Emits a complete value (scalar or container) without filtering.
     /// Used when the FSM has reached a terminal state.
-    fn emit_value_full(&mut self, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
+    fn emit_value_full(&mut self, destination: &mut Vec<Word>, constant_pool: &mut ConstantPool) {
         let (tc, length) = self.read_type_descriptor();
         self.emit_value_body_full(tc, length, destination, constant_pool);
     }
@@ -260,7 +259,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         &mut self,
         tc: u8,
         length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if length == NULL_SENTINEL && tc <= type_code::STRUCT {
@@ -331,7 +330,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         }
     }
 
-    fn emit_null(&self, tc: u8, destination: &mut Vec<u32>) {
+    fn emit_null(&self, tc: u8, destination: &mut Vec<Word>) {
         let null_instr = match tc {
             type_code::BOOL => instr::NULL_BOOL,
             type_code::POS_INT | type_code::NEG_INT => instr::NULL_INT,
@@ -350,8 +349,8 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         destination.push(null_instr);
     }
 
-    fn emit_bool(&self, low_nibble: usize, destination: &mut Vec<u32>) {
-        let value = if low_nibble == 0 { 0u32 } else { 1u32 };
+    fn emit_bool(&self, low_nibble: usize, destination: &mut Vec<Word>) {
+        let value = if low_nibble == 0 { 0 } else { 1 };
         destination.push(instr::BOOL | value);
     }
 
@@ -359,11 +358,11 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         &mut self,
         tc: u8,
         length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if length == 0 {
-            destination.push(instr::INT_I16);
+            destination.push(instr::INT_I32);
             return;
         }
 
@@ -381,41 +380,36 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         &self,
         magnitude: u64,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         if !is_negative {
-            if magnitude <= i16::MAX as u64 {
-                destination.push(instr::INT_I16 | magnitude as u32);
-            } else if magnitude <= i32::MAX as u64 {
-                destination.push(instr::INT_I32);
-                destination.push(magnitude as u32);
+            if magnitude <= i32::MAX as u64 {
+                destination
+                    .push(Instruction::with_data_from(instr::INT_I32, magnitude as u32).raw());
             } else if magnitude <= i64::MAX as u64 {
                 let v = magnitude as i64;
                 destination.push(instr::INT_I64);
-                destination.push((v >> 32) as u32);
-                destination.push(v as u32);
+                destination.push(v as Word);
             } else {
                 let value = Int::from(magnitude as i128);
                 let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-                destination.push(instr::INT_CP | idx);
+                destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
             }
         } else {
             let neg_value = -(magnitude as i128);
-            if neg_value >= i16::MIN as i128 {
-                destination.push(instr::INT_I16 | (neg_value as i16 as u16 as u32));
-            } else if neg_value >= i32::MIN as i128 {
-                destination.push(instr::INT_I32);
-                destination.push(neg_value as i32 as u32);
+            if neg_value >= i32::MIN as i128 {
+                destination.push(
+                    Instruction::with_data_from(instr::INT_I32, neg_value as i32 as u32).raw(),
+                );
             } else if neg_value >= i64::MIN as i128 {
                 let v = neg_value as i64;
                 destination.push(instr::INT_I64);
-                destination.push((v >> 32) as u32);
-                destination.push(v as u32);
+                destination.push(v as Word);
             } else {
                 let value = Int::from(neg_value);
                 let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-                destination.push(instr::INT_CP | idx);
+                destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
             }
         }
     }
@@ -424,7 +418,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         &mut self,
         length: usize,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let bytes = &self.source()[self.position..self.position + length];
@@ -436,25 +430,22 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         };
         self.position += length;
         let idx = constant_pool.add(Constant::BigInt(Arc::new(value)));
-        destination.push(instr::INT_CP | idx);
+        destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
     }
 
-    fn emit_float(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_float(&mut self, length: usize, destination: &mut Vec<Word>) {
         match length {
             0 => {
                 destination.push(instr::FLOAT_F32);
-                destination.push(0u32);
             }
             4 => {
                 let bits = self.read_uint(4) as u32;
-                destination.push(instr::FLOAT_F32);
-                destination.push(bits);
+                destination.push(Instruction::with_data_from(instr::FLOAT_F32, bits).raw());
             }
             8 => {
                 let bits = self.read_uint(8);
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             }
             _ => {
                 self.position += length;
@@ -462,54 +453,54 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         }
     }
 
-    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_decimal(&mut self, length: usize, destination: &mut Vec<Word>) {
         if length == 0 {
             destination.push(instr::DECIMAL_REF);
-            destination.push(self.position as u32);
+            destination.push(self.position as Word);
             return;
         }
         let offset = self.position as u32;
-        destination.push(instr::DECIMAL_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::DECIMAL_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
-    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_timestamp_ref(&mut self, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
-        destination.push(instr::TIMESTAMP_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::TIMESTAMP_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
-    fn emit_symbol(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_symbol(&mut self, length: usize, destination: &mut Vec<Word>) {
         if length == 0 {
             destination.push(instr::SYMBOL_SID);
             return;
         }
         let sid = self.read_uint(length) as u32;
-        destination.push(instr::SYMBOL_SID | (sid & 0x003F_FFFF));
+        destination.push(Instruction::with_data_from(instr::SYMBOL_SID, sid).raw());
     }
 
-    fn emit_string(&mut self, length: usize, destination: &mut Vec<u32>) {
+    fn emit_string(&mut self, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
-        destination.push(instr::STRING_REF | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr::STRING_REF, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
-    fn emit_lob_ref(&mut self, instr_base: u32, length: usize, destination: &mut Vec<u32>) {
+    fn emit_lob_ref(&mut self, instr_base: Word, length: usize, destination: &mut Vec<Word>) {
         let offset = self.position as u32;
-        destination.push(instr_base | (length as u32 & 0x003F_FFFF));
-        destination.push(offset);
+        destination.push(Instruction::with_data_from(instr_base, length as u32).raw());
+        destination.push(offset as Word);
         self.position += length;
     }
 
     fn emit_container_full(
         &mut self,
-        start_instr: u32,
+        start_instr: Word,
         content_length: usize,
         is_struct: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let start_index = destination.len();
@@ -530,20 +521,22 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
                     continue;
                 }
 
-                destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+                destination
+                    .push(Instruction::with_data_from(instr::FIELD_NAME_SID, field_sid).raw());
             }
             self.emit_value_full(destination, constant_pool);
         }
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(start_instr, bytecode_length as u32).raw();
     }
 
     fn emit_annotation_wrapper_full(
         &mut self,
         wrapper_length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) {
         let wrapper_end = self.position + wrapper_length;
@@ -553,7 +546,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
         while self.position < annot_end {
             let sid = self.read_var_uint() as u32;
-            destination.push(instr::ANNOTATION_SID | (sid & 0x003F_FFFF));
+            destination.push(Instruction::with_data_from(instr::ANNOTATION_SID, sid).raw());
         }
 
         self.emit_value_full(destination, constant_pool);
@@ -567,7 +560,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
     fn process_annotation_wrapper(
         &mut self,
         wrapper_length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         let wrapper_end = self.position + wrapper_length;
@@ -601,7 +594,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
         // Emit annotation SIDs
         for sid in &annotation_sids {
-            destination.push(instr::ANNOTATION_SID | (*sid & 0x003F_FFFF));
+            destination.push(Instruction::with_data_from(instr::ANNOTATION_SID, *sid).raw());
         }
 
         // Now process the wrapped value with filtering at root FSM node.
@@ -622,7 +615,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         &mut self,
         fsm_node: usize,
         annotation_sids: &[u32],
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         let (tc, length) = self.read_type_descriptor();
@@ -694,7 +687,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         &mut self,
         fsm_node: usize,
         wrapper_length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         let wrapper_end = self.position + wrapper_length;
@@ -713,7 +706,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
         // Emit annotations speculatively
         for sid in &annotation_sids {
-            destination.push(instr::ANNOTATION_SID | (*sid & 0x003F_FFFF));
+            destination.push(Instruction::with_data_from(instr::ANNOTATION_SID, *sid).raw());
         }
 
         // Process the inner value at the same FSM node, passing
@@ -737,7 +730,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         fsm_node: usize,
         tc: u8,
         content_length: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> bool {
         let is_struct = tc == type_code::STRUCT;
@@ -800,7 +793,9 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
                         let field_rewind = destination.len();
                         if !child_is_intermediate {
-                            destination.push(instr::FIELD_NAME_SID | (field_sid & 0x003F_FFFF));
+                            destination.push(
+                                Instruction::with_data_from(instr::FIELD_NAME_SID, field_sid).raw(),
+                            );
                         }
 
                         let emitted = self.process_value_filtered(
@@ -845,7 +840,8 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
             if !suppress_container {
                 destination.push(instr::END_CONTAINER);
                 let bytecode_length = destination.len() - start_index - 1;
-                destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+                destination[start_index] =
+                    Instruction::with_data_from(start_instr, bytecode_length as u32).raw();
             }
             true
         } else {
@@ -885,7 +881,7 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
 
     // ─── LST parsing ──────────────────────────────────────────────────
 
-    fn parse_local_symbol_table(&mut self, wrapper_end: usize, destination: &mut Vec<u32>) {
+    fn parse_local_symbol_table(&mut self, wrapper_end: usize, destination: &mut Vec<Word>) {
         let (tc, struct_length) = self.read_type_descriptor();
         debug_assert_eq!(tc, type_code::STRUCT);
         let struct_end = self.position + struct_length;
@@ -935,8 +931,9 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         for entry in &new_symbols {
             match entry {
                 Some((offset, length)) => {
-                    destination.push(instr::STRING_REF | *length as u32);
-                    destination.push(*offset as u32);
+                    destination
+                        .push(Instruction::with_data_from(instr::STRING_REF, *length as u32).raw());
+                    destination.push(*offset as Word);
                 }
                 None => {
                     destination.push(instr::SYMBOL_SID);
@@ -977,7 +974,7 @@ fn is_container(tc: u8) -> bool {
 impl<S: AsRef<[u8]>> BytecodeGenerator for PathFilterGenerator<S> {
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         if self.is_exhausted() {
@@ -995,7 +992,7 @@ impl<S: AsRef<[u8]>> BytecodeGenerator for PathFilterGenerator<S> {
             if self.is_at_ivm() {
                 self.position += 4;
                 let version_data = 1u32 << 8;
-                destination.push(instr::IVM | version_data);
+                destination.push(instr::IVM | version_data as Word);
 
                 // Reset symbol table on IVM
                 self.symbols = SYSTEM_SYMBOLS.iter().map(|s| Some(s.to_string())).collect();

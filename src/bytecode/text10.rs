@@ -14,7 +14,7 @@ use memchr::memchr2;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
 use crate::bytecode::generator::BytecodeGenerator;
-use crate::bytecode::instruction::instr;
+use crate::bytecode::instruction::{instr, Instruction, Word};
 use crate::result::IonFailure;
 use crate::{Decimal, Int, IonResult, Timestamp};
 
@@ -783,7 +783,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn emit_top_level_value(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<bool> {
         // Collect annotations
@@ -809,7 +809,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             if value_slice == b"$ion_1_0" {
                 self.position = end;
                 let version_data = 1u32 << 8;
-                destination.push(instr::IVM | version_data);
+                destination.push(instr::IVM | version_data as Word);
                 return Ok(true);
             }
         }
@@ -827,7 +827,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         // Emit annotations
         for ann in &annotations {
             let idx = constant_pool.add(Constant::String(Arc::clone(ann)));
-            destination.push(instr::ANNOTATION_CP | idx);
+            destination.push(Instruction::with_data_from(instr::ANNOTATION_CP, idx).raw());
         }
 
         // Parse the value
@@ -969,7 +969,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn emit_value(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.skip_ws_in_region(end);
@@ -1000,7 +1000,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_null_or_identifier(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Read the identifier
@@ -1052,8 +1052,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             self.position = i;
             let bits = f64::NAN.to_bits();
             destination.push(instr::FLOAT_F64);
-            destination.push((bits >> 32) as u32);
-            destination.push(bits as u32);
+            destination.push(bits);
             Ok(())
         } else {
             // It's an identifier (symbol value)
@@ -1062,7 +1061,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                 crate::IonError::decoding_error(format!("invalid UTF-8 in identifier: {e}"))
             })?;
             let idx = constant_pool.add(Constant::String(Arc::from(text)));
-            destination.push(instr::SYMBOL_CP | idx);
+            destination.push(Instruction::with_data_from(instr::SYMBOL_CP, idx).raw());
             Ok(())
         }
     }
@@ -1070,7 +1069,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_true(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let start = self.position;
@@ -1092,7 +1091,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_false(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let start = self.position;
@@ -1114,7 +1113,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_symbol_value(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let start = self.position;
@@ -1129,14 +1128,14 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             crate::IonError::decoding_error(format!("invalid UTF-8 in symbol: {e}"))
         })?;
         let idx = constant_pool.add(Constant::String(Arc::from(text)));
-        destination.push(instr::SYMBOL_CP | idx);
+        destination.push(Instruction::with_data_from(instr::SYMBOL_CP, idx).raw());
         Ok(())
     }
 
     fn parse_string(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // self.position is at opening "
@@ -1170,13 +1169,13 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         if has_escapes {
             let decoded = decode_escape_sequences(&self.buffer[start..content_end])?;
             let idx = constant_pool.add(Constant::String(Arc::from(decoded.as_str())));
-            destination.push(instr::STRING_CP | idx);
+            destination.push(Instruction::with_data_from(instr::STRING_CP, idx).raw());
         } else {
             // No escapes — emit STRING_REF pointing to buffer
             let length = content_end - start;
             let offset = start as u32;
-            destination.push(instr::STRING_REF | (length as u32 & 0x003F_FFFF));
-            destination.push(offset);
+            destination.push(Instruction::with_data_from(instr::STRING_REF, length as u32).raw());
+            destination.push(offset as Word);
         }
         Ok(())
     }
@@ -1184,7 +1183,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_quoted_symbol_or_long_string(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         if self.position + 2 < end
@@ -1212,13 +1211,13 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             if has_escapes {
                 let decoded = decode_escape_sequences(&self.buffer[start..content_end])?;
                 let idx = constant_pool.add(Constant::String(Arc::from(decoded.as_str())));
-                destination.push(instr::SYMBOL_CP | idx);
+                destination.push(Instruction::with_data_from(instr::SYMBOL_CP, idx).raw());
             } else {
                 let text = std::str::from_utf8(&self.buffer[start..content_end]).map_err(|e| {
                     crate::IonError::decoding_error(format!("invalid UTF-8 in quoted symbol: {e}"))
                 })?;
                 let idx = constant_pool.add(Constant::String(Arc::from(text)));
-                destination.push(instr::SYMBOL_CP | idx);
+                destination.push(Instruction::with_data_from(instr::SYMBOL_CP, idx).raw());
             }
             Ok(())
         }
@@ -1227,7 +1226,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_long_string(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Long strings always go through CP because they may have
@@ -1277,14 +1276,14 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         }
 
         let idx = constant_pool.add(Constant::String(Arc::from(result.as_str())));
-        destination.push(instr::STRING_CP | idx);
+        destination.push(Instruction::with_data_from(instr::STRING_CP, idx).raw());
         Ok(())
     }
 
     fn parse_signed_number(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let sign_byte = self.buffer[self.position];
@@ -1303,8 +1302,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                     self.position = after;
                     let bits = value.to_bits();
                     destination.push(instr::FLOAT_F64);
-                    destination.push((bits >> 32) as u32);
-                    destination.push(bits as u32);
+                    destination.push(bits);
                     return Ok(());
                 }
             }
@@ -1318,7 +1316,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_number(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.parse_number_with_sign(end, false, destination, constant_pool)
@@ -1328,7 +1326,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         &mut self,
         end: usize,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         let start = self.position;
@@ -1435,7 +1433,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             self.position = ts_end;
             let ts = parse_timestamp_direct(ts_bytes)?;
             let idx = constant_pool.add(Constant::Timestamp(Arc::new(ts)));
-            destination.push(instr::TIMESTAMP_CP | idx);
+            destination.push(Instruction::with_data_from(instr::TIMESTAMP_CP, idx).raw());
             return Ok(());
         }
 
@@ -1461,8 +1459,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                 };
                 let bits = value.to_bits();
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             } else {
                 let text = self.collect_number_text(start, i, is_negative);
                 let value: f64 = text
@@ -1470,8 +1467,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                     .map_err(|e| crate::IonError::decoding_error(format!("invalid float: {e}")))?;
                 let bits = value.to_bits();
                 destination.push(instr::FLOAT_F64);
-                destination.push((bits >> 32) as u32);
-                destination.push(bits as u32);
+                destination.push(bits);
             }
         } else if has_dot || has_d_exp {
             // Decimal
@@ -1490,12 +1486,12 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                     parse_text_decimal(slice)?
                 };
                 let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
-                destination.push(instr::DECIMAL_CP | idx);
+                destination.push(Instruction::with_data_from(instr::DECIMAL_CP, idx).raw());
             } else {
                 let text = self.collect_number_text(start, i, is_negative);
                 let dec = parse_text_decimal(&text)?;
                 let idx = constant_pool.add(Constant::Decimal(Arc::new(dec)));
-                destination.push(instr::DECIMAL_CP | idx);
+                destination.push(Instruction::with_data_from(instr::DECIMAL_CP, idx).raw());
             }
         } else {
             // Integer
@@ -1569,7 +1565,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         &mut self,
         end: usize,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.position += 2; // skip 0x
@@ -1598,7 +1594,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         &mut self,
         end: usize,
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.position += 2; // skip 0b
@@ -1636,7 +1632,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
         &self,
         raw: &[u8],
         is_negative: bool,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Try to parse as i64 using manual accumulation to avoid allocation
@@ -1665,7 +1661,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn emit_parsed_int(
         &self,
         text: &str,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Try i64 first
@@ -1684,7 +1680,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_list(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.position += 1; // skip '['
@@ -1710,14 +1706,15 @@ impl<R: Read> StreamingTextIon10Generator<R> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(instr::LIST_START, bytecode_length as u32).raw();
         Ok(())
     }
 
     fn parse_sexp(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.position += 1; // skip '('
@@ -1738,14 +1735,15 @@ impl<R: Read> StreamingTextIon10Generator<R> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(instr::SEXP_START, bytecode_length as u32).raw();
         Ok(())
     }
 
     fn parse_struct_or_lob(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Check for {{ (lob)
@@ -1758,7 +1756,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_struct(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.position += 1; // skip '{'
@@ -1783,7 +1781,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             // Parse field name
             let field_name = self.parse_field_name(end)?;
             let idx = constant_pool.add(Constant::String(field_name));
-            destination.push(instr::FIELD_NAME_CP | idx);
+            destination.push(Instruction::with_data_from(instr::FIELD_NAME_CP, idx).raw());
 
             // Skip colon
             self.skip_ws_in_region(end);
@@ -1798,7 +1796,8 @@ impl<R: Read> StreamingTextIon10Generator<R> {
 
         destination.push(instr::END_CONTAINER);
         let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::STRUCT_START | (bytecode_length as u32 & 0x003F_FFFF);
+        destination[start_index] =
+            Instruction::with_data_from(instr::STRUCT_START, bytecode_length as u32).raw();
         Ok(())
     }
 
@@ -1881,7 +1880,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_lob(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         self.position += 2; // skip {{
@@ -1919,11 +1918,11 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             if has_escapes {
                 let decoded_bytes = decode_clob_escape_sequences(&self.buffer[start..content_end])?;
                 let idx = constant_pool.add(Constant::Bytes(Arc::from(decoded_bytes)));
-                destination.push(instr::CLOB_CP | idx);
+                destination.push(Instruction::with_data_from(instr::CLOB_CP, idx).raw());
             } else {
                 let bytes = &self.buffer[start..content_end];
                 let idx = constant_pool.add(Constant::Bytes(Arc::from(bytes)));
-                destination.push(instr::CLOB_CP | idx);
+                destination.push(Instruction::with_data_from(instr::CLOB_CP, idx).raw());
             }
         } else {
             // Blob (base64)
@@ -1948,7 +1947,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
                 .collect();
             let decoded = base64_decode(&b64_text)?;
             let idx = constant_pool.add(Constant::Bytes(Arc::from(decoded)));
-            destination.push(instr::BLOB_CP | idx);
+            destination.push(Instruction::with_data_from(instr::BLOB_CP, idx).raw());
         }
         Ok(())
     }
@@ -1957,7 +1956,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn emit_annotated_value(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Collect annotations
@@ -1968,7 +1967,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             }
             if let Some((text, after)) = self.try_parse_annotation(end)? {
                 let idx = constant_pool.add(Constant::String(text));
-                destination.push(instr::ANNOTATION_CP | idx);
+                destination.push(Instruction::with_data_from(instr::ANNOTATION_CP, idx).raw());
                 self.position = after;
             } else {
                 break;
@@ -1981,7 +1980,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
     fn parse_lst(
         &mut self,
         end: usize,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // The struct has already been identified as $ion_symbol_table::{...}
@@ -2058,7 +2057,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
             match entry {
                 Some(text) => {
                     let idx = constant_pool.add(Constant::String(Arc::clone(text)));
-                    destination.push(instr::STRING_CP | idx);
+                    destination.push(Instruction::with_data_from(instr::STRING_CP, idx).raw());
                 }
                 None => {
                     // Unknown/null text: emit SYMBOL_SID 0
@@ -2250,7 +2249,7 @@ impl<R: Read> StreamingTextIon10Generator<R> {
 impl<R: Read> BytecodeGenerator for StreamingTextIon10Generator<R> {
     fn refill(
         &mut self,
-        destination: &mut Vec<u32>,
+        destination: &mut Vec<Word>,
         constant_pool: &mut ConstantPool,
     ) -> IonResult<()> {
         // Compact previously consumed data once at the start of refill.
@@ -2377,27 +2376,23 @@ fn is_identifier_continue(b: u8) -> bool {
 }
 
 /// Emits an i64 value as the appropriate int instruction.
-fn emit_i64_int(v: i64, destination: &mut Vec<u32>) {
-    if v >= i16::MIN as i64 && v <= i16::MAX as i64 {
-        destination.push(instr::INT_I16 | (v as i16 as u16 as u32));
-    } else if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
-        destination.push(instr::INT_I32);
-        destination.push(v as i32 as u32);
+fn emit_i64_int(v: i64, destination: &mut Vec<Word>) {
+    if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+        destination.push(Instruction::with_data_from(instr::INT_I32, v as i32 as u32).raw());
     } else {
         destination.push(instr::INT_I64);
-        destination.push((v >> 32) as u32);
-        destination.push(v as u32);
+        destination.push(v as Word);
     }
 }
 
 /// Emits an i128 value as the appropriate int instruction.
-fn emit_i128_int(v: i128, destination: &mut Vec<u32>, constant_pool: &mut ConstantPool) {
+fn emit_i128_int(v: i128, destination: &mut Vec<Word>, constant_pool: &mut ConstantPool) {
     if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
         emit_i64_int(v as i64, destination);
     } else {
         let int_value = Int::from(v);
         let idx = constant_pool.add(Constant::BigInt(Arc::new(int_value)));
-        destination.push(instr::INT_CP | idx);
+        destination.push(Instruction::with_data_from(instr::INT_CP, idx).raw());
     }
 }
 
@@ -3036,7 +3031,7 @@ mod tests {
     use std::io::Cursor;
 
     /// Helper: generate all bytecode from text Ion input.
-    fn generate_all(text: &str) -> (Vec<u32>, ConstantPool) {
+    fn generate_all(text: &str) -> (Vec<Word>, ConstantPool) {
         let cursor = Cursor::new(text.as_bytes().to_vec());
         let mut gen = StreamingTextIon10Generator::new(cursor);
         let mut dest = Vec::new();
@@ -3113,7 +3108,7 @@ mod tests {
     fn integer_zero() {
         let (dest, _cp) = generate_all("0");
         let instr = Instruction::from_raw(dest[0]);
-        assert_eq!(instr.operation(), op::INT_I16);
+        assert_eq!(instr.operation(), op::INT_I32);
         assert_eq!(instr.data_as_i16(), 0);
     }
 
@@ -3121,7 +3116,7 @@ mod tests {
     fn integer_positive() {
         let (dest, _cp) = generate_all("42");
         let instr = Instruction::from_raw(dest[0]);
-        assert_eq!(instr.operation(), op::INT_I16);
+        assert_eq!(instr.operation(), op::INT_I32);
         assert_eq!(instr.data_as_i16(), 42);
     }
 
@@ -3129,7 +3124,7 @@ mod tests {
     fn integer_negative() {
         let (dest, _cp) = generate_all("-7");
         let instr = Instruction::from_raw(dest[0]);
-        assert_eq!(instr.operation(), op::INT_I16);
+        assert_eq!(instr.operation(), op::INT_I32);
         assert_eq!(instr.data_as_i16(), -7);
     }
 
@@ -3138,7 +3133,7 @@ mod tests {
         let (dest, _cp) = generate_all("100000");
         let instr = Instruction::from_raw(dest[0]);
         assert_eq!(instr.operation(), op::INT_I32);
-        assert_eq!(dest[1] as i32, 100000);
+        assert_eq!(instr.data_as_i32(), 100000);
     }
 
     #[test]
@@ -3195,7 +3190,7 @@ mod tests {
         // Find the int
         let int_idx = dest
             .iter()
-            .position(|&w| Instruction::from_raw(w).operation() == op::INT_I16)
+            .position(|&w| Instruction::from_raw(w).operation() == op::INT_I32)
             .unwrap();
         let int_instr = Instruction::from_raw(dest[int_idx]);
         assert_eq!(int_instr.data_as_i16(), 42);
@@ -3206,10 +3201,7 @@ mod tests {
         let (dest, _cp) = generate_all("+inf");
         let instr = Instruction::from_raw(dest[0]);
         assert_eq!(instr.operation(), op::FLOAT_F64);
-        let hi = dest[1] as u64;
-        let lo = dest[2] as u64;
-        let bits = (hi << 32) | lo;
-        assert_eq!(f64::from_bits(bits), f64::INFINITY);
+        assert_eq!(f64::from_bits(dest[1]), f64::INFINITY);
     }
 
     #[test]
@@ -3217,10 +3209,7 @@ mod tests {
         let (dest, _cp) = generate_all("-inf");
         let instr = Instruction::from_raw(dest[0]);
         assert_eq!(instr.operation(), op::FLOAT_F64);
-        let hi = dest[1] as u64;
-        let lo = dest[2] as u64;
-        let bits = (hi << 32) | lo;
-        assert_eq!(f64::from_bits(bits), f64::NEG_INFINITY);
+        assert_eq!(f64::from_bits(dest[1]), f64::NEG_INFINITY);
     }
 
     #[test]
@@ -3228,10 +3217,7 @@ mod tests {
         let (dest, _cp) = generate_all("nan");
         let instr = Instruction::from_raw(dest[0]);
         assert_eq!(instr.operation(), op::FLOAT_F64);
-        let hi = dest[1] as u64;
-        let lo = dest[2] as u64;
-        let bits = (hi << 32) | lo;
-        assert!(f64::from_bits(bits).is_nan());
+        assert!(f64::from_bits(dest[1]).is_nan());
     }
 
     #[test]
@@ -3244,7 +3230,7 @@ mod tests {
             .map(|&w| Instruction::from_raw(w).operation())
             .filter(|&o| o != op::REFILL && o != op::END_OF_INPUT)
             .collect();
-        assert_eq!(ops, vec![op::INT_I16, op::BOOL, op::NULL_NULL]);
+        assert_eq!(ops, vec![op::INT_I32, op::BOOL, op::NULL_NULL]);
     }
 
     #[test]
@@ -3255,7 +3241,7 @@ mod tests {
             .map(|&w| Instruction::from_raw(w).operation())
             .filter(|&o| o != op::REFILL && o != op::END_OF_INPUT)
             .collect();
-        assert_eq!(ops, vec![op::INT_I16]);
+        assert_eq!(ops, vec![op::INT_I32]);
         let int_instr = Instruction::from_raw(dest[0]);
         assert_eq!(int_instr.data_as_i16(), 42);
     }
