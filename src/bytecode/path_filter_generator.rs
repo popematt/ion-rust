@@ -513,7 +513,8 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         constant_pool: &mut ConstantPool,
     ) {
         let start_index = destination.len();
-        destination.push(0); // placeholder
+        destination.push(start_instr);
+        destination.push(0);
 
         let end_position = self.position + content_length;
         while self.position < end_position {
@@ -536,8 +537,8 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         }
 
         destination.push(instr::END_CONTAINER);
-        let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+        let bytecode_length = destination.len() - start_index - 2;
+        destination[start_index + 1] = bytecode_length as u32;
     }
 
     fn emit_annotation_wrapper_full(
@@ -757,7 +758,8 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         let rewind_point = destination.len();
         let start_index = destination.len();
         if !suppress_container {
-            destination.push(0); // placeholder for container start
+            destination.push(start_instr);
+            destination.push(0);
         }
 
         let end_position = self.position + content_length;
@@ -844,8 +846,8 @@ impl<S: AsRef<[u8]>> PathFilterGenerator<S> {
         if any_emitted {
             if !suppress_container {
                 destination.push(instr::END_CONTAINER);
-                let bytecode_length = destination.len() - start_index - 1;
-                destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+                let bytecode_length = destination.len() - start_index - 2;
+                destination[start_index + 1] = bytecode_length as u32;
             }
             true
         } else {

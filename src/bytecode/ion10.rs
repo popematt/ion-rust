@@ -538,7 +538,8 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         constant_pool: &mut ConstantPool,
     ) {
         let start_index = destination.len();
-        destination.push(0); // placeholder for start instruction
+        destination.push(start_instr);
+        destination.push(0);
 
         let end_position = self.position + content_length;
 
@@ -551,12 +552,8 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
         }
 
         destination.push(instr::END_CONTAINER);
-        let bytecode_length = destination.len() - start_index - 1;
-        debug_assert!(
-            bytecode_length <= 0x003F_FFFF,
-            "container bytecode length exceeds 22-bit data field"
-        );
-        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+        let bytecode_length = destination.len() - start_index - 2;
+        destination[start_index + 1] = bytecode_length as u32;
     }
 
     /// Emits struct fields with prefetched type descriptors to expose
@@ -604,12 +601,24 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BinaryIon10Generator<S, P> {
                 _ => length != NULL_SENTINEL,
             };
 
-            if value_end_known && (self.position + length) < end_position {
+            let can_prefetch_next_field = if value_end_known {
+                let next_value_start = self.position + length;
+                next_value_start < end_position
+                    // Structs may contain NOP padding between fields. If the next
+                    // byte is padding, it is not a field SID and cannot be
+                    // prefetched as one.
+                    && (self.source()[next_value_start] >> 4) != type_code::NOP
+            } else {
+                false
+            };
+
+            if can_prefetch_next_field {
                 // We know where this scalar ends. Read the NEXT field's
                 // SID and TD now — these loads are independent of the
                 // current value's bytecode emission and can execute in
                 // parallel on an OoO core.
-                let next_field_start = self.position + length;
+                let next_value_start = self.position + length;
+                let next_field_start = next_value_start;
                 let source = self.source();
                 let next_sid = read_var_uint_inline(source, next_field_start);
                 let next_sid_len = var_uint_len(source, next_field_start);
@@ -1224,7 +1233,7 @@ impl<S: AsRef<[u8]>, P: FilterPolicy> BytecodeGenerator for BinaryIon10Generator
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::instruction::{op, Instruction};
+    use crate::bytecode::instruction::{op, render_bytecode, Instruction};
 
     /// Helper: generate bytecode from Ion 1.0 binary bytes.
     fn generate(source: Vec<u8>) -> (Vec<u32>, ConstantPool) {
@@ -1609,21 +1618,19 @@ mod tests {
 
         let list_start = Instruction::from_raw(dest[0]);
         assert_eq!(list_start.operation(), op::LIST_START);
+        assert_eq!(dest[1], 3);
 
         // Children: INT_I16(1), INT_I16(2), END_CONTAINER
-        let child1 = Instruction::from_raw(dest[1]);
+        let child1 = Instruction::from_raw(dest[2]);
         assert_eq!(child1.operation(), op::INT_I16);
         assert_eq!(child1.data_as_i16(), 1);
 
-        let child2 = Instruction::from_raw(dest[2]);
+        let child2 = Instruction::from_raw(dest[3]);
         assert_eq!(child2.operation(), op::INT_I16);
         assert_eq!(child2.data_as_i16(), 2);
 
-        let end = Instruction::from_raw(dest[3]);
+        let end = Instruction::from_raw(dest[4]);
         assert_eq!(end.operation(), op::END_CONTAINER);
-
-        // Bytecode length = 3 (two ints + END_CONTAINER)
-        assert_eq!(list_start.data(), 3);
     }
 
     #[test]
@@ -1636,7 +1643,7 @@ mod tests {
 
         let sexp_start = Instruction::from_raw(dest[0]);
         assert_eq!(sexp_start.operation(), op::SEXP_START);
-        assert_eq!(sexp_start.data(), 3); // 2 values + END
+        assert_eq!(dest[1], 3); // 2 values + END
     }
 
     #[test]
@@ -1654,30 +1661,28 @@ mod tests {
 
         let struct_start = Instruction::from_raw(dest[0]);
         assert_eq!(struct_start.operation(), op::STRUCT_START);
+        assert_eq!(dest[1], 5);
 
         // Field 1: FIELD_NAME_SID(4), INT_I16(1)
-        let field1_name = Instruction::from_raw(dest[1]);
+        let field1_name = Instruction::from_raw(dest[2]);
         assert_eq!(field1_name.operation(), op::FIELD_NAME_SID);
         assert_eq!(field1_name.data(), 4);
 
-        let field1_value = Instruction::from_raw(dest[2]);
+        let field1_value = Instruction::from_raw(dest[3]);
         assert_eq!(field1_value.operation(), op::INT_I16);
         assert_eq!(field1_value.data_as_i16(), 1);
 
         // Field 2: FIELD_NAME_SID(5), INT_I16(2)
-        let field2_name = Instruction::from_raw(dest[3]);
+        let field2_name = Instruction::from_raw(dest[4]);
         assert_eq!(field2_name.operation(), op::FIELD_NAME_SID);
         assert_eq!(field2_name.data(), 5);
 
-        let field2_value = Instruction::from_raw(dest[4]);
+        let field2_value = Instruction::from_raw(dest[5]);
         assert_eq!(field2_value.operation(), op::INT_I16);
         assert_eq!(field2_value.data_as_i16(), 2);
 
-        let end = Instruction::from_raw(dest[5]);
+        let end = Instruction::from_raw(dest[6]);
         assert_eq!(end.operation(), op::END_CONTAINER);
-
-        // Bytecode length = 5 (2 field names + 2 values + END)
-        assert_eq!(struct_start.data(), 5);
     }
 
     #[test]
@@ -1767,6 +1772,30 @@ mod tests {
     }
 
     #[test]
+    fn struct_field_prefetch_skips_inter_field_nop_padding() {
+        // ion-tests/iontestdata/good/equivs/nopPadNonEmptyStruct.10n
+        // Encodes an s-expression containing two equivalent structs; the
+        // second struct includes NOP padding between fields.
+        let source = vec![
+            0xE0, 0x01, 0x00, 0xEA, 0xCD, 0xD2, 0x84, 0x11, 0xD4, 0x84, 0x11, 0x80, 0x00,
+            0xD4, 0x80, 0x00, 0x84, 0x11,
+        ];
+
+        let (dest, _cp) = generate_all(source);
+        let rendered = render_bytecode(
+            &dest.iter()
+                .copied()
+                .map(Instruction::from_raw)
+                .collect::<Vec<_>>(),
+        );
+
+        assert!(rendered.contains("STRUCT_START"), "{rendered}");
+        assert!(rendered.matches("FIELD_NAME_SID $4").count() >= 2, "{rendered}");
+        assert!(!rendered.contains("FIELD_NAME_SID $84"), "{rendered}");
+        assert!(!rendered.contains("STRING_REF"), "{rendered}");
+    }
+
+    #[test]
     fn varuint_length_string() {
         // String with VarUInt length. In Ion 1.0, L=14 (0xE) means
         // VarUInt length follows (L=15 means null.string).
@@ -1809,30 +1838,27 @@ mod tests {
 
         let outer = Instruction::from_raw(dest[0]);
         assert_eq!(outer.operation(), op::LIST_START);
+        assert_eq!(dest[1], 7);
 
         // Inner list
-        let inner = Instruction::from_raw(dest[1]);
+        let inner = Instruction::from_raw(dest[2]);
         assert_eq!(inner.operation(), op::LIST_START);
-        assert_eq!(inner.data(), 3); // 2 ints + END
+        assert_eq!(dest[3], 3); // 2 ints + END
 
-        let i1 = Instruction::from_raw(dest[2]);
+        let i1 = Instruction::from_raw(dest[4]);
         assert_eq!(i1.data_as_i16(), 1);
-        let i2 = Instruction::from_raw(dest[3]);
+        let i2 = Instruction::from_raw(dest[5]);
         assert_eq!(i2.data_as_i16(), 2);
-        let inner_end = Instruction::from_raw(dest[4]);
+        let inner_end = Instruction::from_raw(dest[6]);
         assert_eq!(inner_end.operation(), op::END_CONTAINER);
 
         // Int 3
-        let i3 = Instruction::from_raw(dest[5]);
+        let i3 = Instruction::from_raw(dest[7]);
         assert_eq!(i3.data_as_i16(), 3);
 
         // Outer END
-        let outer_end = Instruction::from_raw(dest[6]);
+        let outer_end = Instruction::from_raw(dest[8]);
         assert_eq!(outer_end.operation(), op::END_CONTAINER);
-
-        // Outer bytecode length: inner_start + 2ints + inner_end +
-        // int3 + outer_end = 6
-        assert_eq!(outer.data(), 6);
     }
 
     #[test]
@@ -2335,8 +2361,10 @@ mod tests {
     }
 
     #[test]
-    fn decimal_coefficient_overflow_17_bytes() {
-        // Construct a decimal whose coefficient is 17 bytes (exceeds 16-byte limit).
+    fn decimal_coefficient_17_bytes_round_trips() {
+        // Construct a decimal whose coefficient is 17 bytes.
+        // The decoder now supports arbitrary-precision coefficients, so this
+        // should decode successfully instead of erroring.
         // VarInt exponent = 0: byte 0x80
         // Coefficient: 17 bytes, sign bit 0 (positive), rest are 0xFF.
         // Total body length = 1 (exponent) + 17 (coefficient) = 18
@@ -2357,11 +2385,13 @@ mod tests {
         let length = instr_word.data();
         let position = dest[1];
         let gen = BinaryIon10Generator::new(source);
-        let result = gen.read_decimal_ref(position, length);
-        assert!(
-            result.is_err(),
-            "17-byte coefficient should produce an error"
-        );
+        let decimal = gen.read_decimal_ref(position, length).unwrap();
+
+        let mut magnitude_bytes = vec![0x7F];
+        magnitude_bytes.extend(std::iter::repeat(0xFF).take(16));
+        let expected = Decimal::new(Int::from(UInt::from_be_bytes(&magnitude_bytes)), 0i64);
+
+        assert_eq!(decimal, expected);
     }
 
     #[test]

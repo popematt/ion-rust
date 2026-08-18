@@ -1257,7 +1257,8 @@ impl<'a> StrTextIon10Generator<'a> {
         let bytes = self.source.as_bytes();
         self.position += 1; // skip '['
         let start_index = destination.len();
-        destination.push(0); // placeholder for LIST_START
+        destination.push(instr::LIST_START);
+        destination.push(0);
 
         // Skip initial whitespace and any leading commas to find first value or ']'
         if !self.skip_list_separators(bytes) {
@@ -1268,8 +1269,8 @@ impl<'a> StrTextIon10Generator<'a> {
         if bytes[self.position] == b']' {
             self.position += 1;
             destination.push(instr::END_CONTAINER);
-            let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
+            let bytecode_length = destination.len() - start_index - 2;
+            destination[start_index + 1] = bytecode_length as u32;
             return Ok(());
         }
 
@@ -1292,8 +1293,8 @@ impl<'a> StrTextIon10Generator<'a> {
         }
 
         destination.push(instr::END_CONTAINER);
-        let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::LIST_START | (bytecode_length as u32 & 0x003F_FFFF);
+        let bytecode_length = destination.len() - start_index - 2;
+        destination[start_index + 1] = bytecode_length as u32;
         Ok(())
     }
 
@@ -1321,7 +1322,8 @@ impl<'a> StrTextIon10Generator<'a> {
         let bytes = self.source.as_bytes();
         self.position += 1; // skip '('
         let start_index = destination.len();
-        destination.push(0); // placeholder for SEXP_START
+        destination.push(instr::SEXP_START);
+        destination.push(0);
 
         // Skip initial whitespace once
         if !self.skip_whitespace_and_comments() {
@@ -1332,8 +1334,8 @@ impl<'a> StrTextIon10Generator<'a> {
         if bytes[self.position] == b')' {
             self.position += 1;
             destination.push(instr::END_CONTAINER);
-            let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+            let bytecode_length = destination.len() - start_index - 2;
+            destination[start_index + 1] = bytecode_length as u32;
             return Ok(());
         }
 
@@ -1356,8 +1358,8 @@ impl<'a> StrTextIon10Generator<'a> {
         }
 
         destination.push(instr::END_CONTAINER);
-        let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::SEXP_START | (bytecode_length as u32 & 0x003F_FFFF);
+        let bytecode_length = destination.len() - start_index - 2;
+        destination[start_index + 1] = bytecode_length as u32;
         Ok(())
     }
 
@@ -1464,7 +1466,8 @@ impl<'a> StrTextIon10Generator<'a> {
         let bytes = self.source.as_bytes();
         self.position += 1; // skip '{'
         let start_index = destination.len();
-        destination.push(0); // placeholder for STRUCT_START
+        destination.push(instr::STRUCT_START);
+        destination.push(0);
 
         // Skip initial whitespace and any leading commas
         if !self.skip_struct_separators(bytes) {
@@ -1475,8 +1478,8 @@ impl<'a> StrTextIon10Generator<'a> {
         if bytes[self.position] == b'}' {
             self.position += 1;
             destination.push(instr::END_CONTAINER);
-            let bytecode_length = destination.len() - start_index - 1;
-            destination[start_index] = instr::STRUCT_START | (bytecode_length as u32 & 0x003F_FFFF);
+            let bytecode_length = destination.len() - start_index - 2;
+            destination[start_index + 1] = bytecode_length as u32;
             return Ok(());
         }
 
@@ -1511,8 +1514,8 @@ impl<'a> StrTextIon10Generator<'a> {
         }
 
         destination.push(instr::END_CONTAINER);
-        let bytecode_length = destination.len() - start_index - 1;
-        destination[start_index] = instr::STRUCT_START | (bytecode_length as u32 & 0x003F_FFFF);
+        let bytecode_length = destination.len() - start_index - 2;
+        destination[start_index + 1] = bytecode_length as u32;
         Ok(())
     }
 

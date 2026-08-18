@@ -8,6 +8,39 @@ use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BorrowedSourceText {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: This pointer refers to immutable source bytes. ArenaReader's borrow
+// discipline guarantees the source outlives any accessible reference.
+unsafe impl Send for BorrowedSourceText {}
+unsafe impl Sync for BorrowedSourceText {}
+
+impl BorrowedSourceText {
+    /// # Safety
+    ///
+    /// `text` must point into source data that outlives any observable use of
+    /// the returned `Symbol`.
+    pub(crate) unsafe fn new(text: &str) -> Self {
+        Self {
+            ptr: text.as_ptr(),
+            len: text.len(),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        // SAFETY: `new()` only captures valid UTF-8 slices, and callers uphold
+        // the lifetime contract for the underlying source bytes.
+        unsafe {
+            let bytes = std::slice::from_raw_parts(self.ptr, self.len);
+            std::str::from_utf8_unchecked(bytes)
+        }
+    }
+}
+
 /// A raw pointer to an `Arc<str>` in the symbol table.
 ///
 /// # Safety
@@ -94,6 +127,8 @@ pub(crate) enum SymbolText {
     // This Symbol borrows from an arena reader's symbol table via raw pointer.
     // The pointer targets an `Arc<str>` entry that is stable during materialization.
     ArenaBorrowed(SymbolTableRef),
+    // This Symbol borrows text directly from the source buffer.
+    BorrowedSource(BorrowedSourceText),
     // This Symbol is a zero-copy sub-slice of a source buffer via Arc.
     SourceSlice(ArcSubstr),
     // This Symbol is equivalent to SID zero (`$0`)
@@ -109,6 +144,7 @@ impl SymbolText {
             // SAFETY: When this variant exists, the arena reader guarantees
             // the pointer is valid for the lifetime of any accessible reference.
             SymbolText::ArenaBorrowed(ptr) => unsafe { ptr.text() },
+            SymbolText::BorrowedSource(text) => text.as_str(),
             SymbolText::SourceSlice(s) => s.as_str(),
             SymbolText::Unknown => return None,
         };
@@ -135,6 +171,8 @@ impl Clone for SymbolText {
                 // Cloning upgrades to a fully independent `Shared(Arc<str>)`.
                 SymbolText::Shared(unsafe { ptr.to_arc() })
             }
+            // Cloning upgrades to owned so the clone is independent of the source lifetime.
+            SymbolText::BorrowedSource(text) => SymbolText::Owned(text.as_str().to_owned()),
             SymbolText::SourceSlice(s) => SymbolText::SourceSlice(s.clone()),
             SymbolText::Unknown => SymbolText::Unknown,
         }
@@ -202,6 +240,18 @@ impl Symbol {
     pub(crate) fn source_slice(substr: ArcSubstr) -> Symbol {
         Symbol {
             text: SymbolText::SourceSlice(substr),
+        }
+    }
+
+    /// Creates a symbol borrowing text directly from the source buffer.
+    ///
+    /// # Safety
+    ///
+    /// `text` must refer to source data that outlives any borrowed use of the
+    /// returned `Symbol`. Cloning this symbol upgrades it to owned text.
+    pub(crate) unsafe fn borrowed_source(text: &str) -> Symbol {
+        Symbol {
+            text: SymbolText::BorrowedSource(BorrowedSourceText::new(text)),
         }
     }
 

@@ -116,14 +116,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
         let mut label_index = self.label_index;
 
         loop {
-            let data = instruction.data();
-            // Branchless skip: when oc_bits < 3, (oc_bits - 3) wraps negative,
-            // arithmetic right-shift fills with 1s → use_oc = all-ones → selects
-            // oc_bits as the skip count. When oc_bits == 3, subtraction gives 0,
-            // shift gives 0 → !use_oc = all-ones → selects `data` (container length).
-            let oc_bits = instruction.operand_count_bits();
-            let use_oc = ((oc_bits as i32 - 3) >> 2) as u32;
-            i += ((oc_bits as u32 & use_oc) | (data & !use_oc)) as usize;
+            i += instruction.trailing_word_count(&self.bytecode, i);
 
             let raw = self.bytecode[i];
             i += 1;
@@ -422,13 +415,19 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
             return IonResult::decoding_error("cannot step into a non-container value");
         }
 
-        let bytecode_length = instruction.data() as usize;
+        let bytecode_length = instruction
+            .span_operand(&self.bytecode, self.i)
+            .ok_or_else(|| {
+                IonResult::<()>::decoding_error("container is missing its span operand")
+                    .unwrap_err()
+            })?;
 
         self.container_stack.push(ContainerInfo {
-            end_index: self.i + bytecode_length,
+            end_index: self.i + 1 + bytecode_length,
         });
+        self.i += 1;
 
-        // Reset instruction so the next() branchless skip starts at 0.
+        // Reset instruction so the next() scan starts from the first child.
         self.instruction = Instruction::from_raw(0);
 
         Ok(())
@@ -442,7 +441,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
         })?;
 
         self.i = info.end_index;
-        // Reset instruction so the next() branchless skip starts at 0.
+        // Reset instruction so the next() scan starts at the post-container position.
         self.instruction = Instruction::from_raw(0);
 
         Ok(())
@@ -631,11 +630,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
                         }
                         _ => {
                             // Skip unknown instructions within the directive.
-                            // Advance past operands based on operand count.
-                            let oc = instr.operand_count_bits();
-                            if oc < 3 {
-                                i += oc as usize;
-                            }
+                            i += instr.trailing_word_count(&self.bytecode, i);
                         }
                     }
                 }
@@ -653,10 +648,7 @@ impl<G: BytecodeGenerator> BytecodeReader<G> {
                     if instr.operation() == op::END_CONTAINER {
                         break;
                     }
-                    let oc = instr.operand_count_bits();
-                    if oc < 3 {
-                        i += oc as usize;
-                    }
+                    i += instr.trailing_word_count(&self.bytecode, i);
                 }
                 self.i = i;
             }
@@ -940,7 +932,7 @@ mod tests {
         reader.step_in()?;
 
         assert_eq!(reader.next()?, Some(IonType::Int));
-        assert_eq!(reader.field_name_index(), 1); // field_name at index 1 (after STRUCT_START)
+        assert_eq!(reader.field_name_index(), 2); // field name at first child slot after span
         assert_eq!(reader.i64_value()?, 10);
 
         assert_eq!(reader.next()?, Some(IonType::Bool));

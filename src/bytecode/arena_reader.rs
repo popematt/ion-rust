@@ -9,6 +9,8 @@
 //! this module.
 
 use std::mem;
+use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::bytecode::constant_pool::{Constant, ConstantPool};
@@ -26,6 +28,54 @@ use super::materialize::SYSTEM_SYMBOLS;
 /// Default initial chunk size (4 KB).
 const INITIAL_CHUNK_SIZE: usize = 4096;
 
+const fn max_usize(left: usize, right: usize) -> usize {
+    if left > right { left } else { right }
+}
+
+// Arena chunks must be aligned for every typed allocation this module places
+// into them. `Element` covers scalar payloads; the tuple covers struct slots.
+const ARENA_ALIGNMENT: usize = max_usize(
+    mem::align_of::<Element>(),
+    max_usize(
+        mem::align_of::<Symbol>(),
+        mem::align_of::<(Symbol, Element)>(),
+    ),
+);
+
+struct Chunk {
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+impl Chunk {
+    fn new(len: usize) -> Self {
+        let len = len.max(1);
+        let layout = Layout::from_size_align(len, ARENA_ALIGNMENT).unwrap();
+        // SAFETY: `layout` is non-zero sized and has a valid power-of-two alignment.
+        let ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        Self { ptr, len }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+}
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.len, ARENA_ALIGNMENT).unwrap();
+        // SAFETY: `ptr` was allocated with this exact layout in `Chunk::new`.
+        unsafe { dealloc(self.ptr.as_ptr(), layout) };
+    }
+}
+
 /// A chunk-based bump allocator.
 ///
 /// Allocations are O(1) pointer bumps within the current chunk. When a
@@ -39,7 +89,7 @@ const INITIAL_CHUNK_SIZE: usize = 4096;
 struct BumpArena {
     /// The chunks. Index 0 is the "primary" chunk reused across resets.
     /// Additional chunks are overflow allocations.
-    chunks: Vec<Vec<u8>>,
+    chunks: Vec<Chunk>,
     /// Current allocation offset within the active (last) chunk.
     offset: usize,
 }
@@ -87,7 +137,7 @@ impl BumpArena {
     fn alloc_bytes(&mut self, src: &[u8]) -> *mut u8 {
         let len = src.len();
         if len == 0 {
-            return std::ptr::NonNull::dangling().as_ptr();
+            return NonNull::dangling().as_ptr();
         }
         let ptr = self.alloc_raw(len, 1);
         // SAFETY: alloc_raw guarantees `ptr` has at least `len` bytes.
@@ -104,13 +154,10 @@ impl BumpArena {
     /// is called — the underlying chunk is never moved or freed.
     #[inline]
     fn alloc_raw(&mut self, size: usize, align: usize) -> *mut u8 {
+        debug_assert!(align <= ARENA_ALIGNMENT);
         if self.chunks.is_empty() {
             let cap = INITIAL_CHUNK_SIZE.max(size + align);
-            // SAFETY: All arena memory is written before being read
-            // (via ptr::write or copy_nonoverlapping). No zeroing needed.
-            let mut chunk = Vec::with_capacity(cap);
-            unsafe { chunk.set_len(cap); }
-            self.chunks.push(chunk);
+            self.chunks.push(Chunk::new(cap));
         }
 
         let chunk = self.chunks.last().unwrap();
@@ -131,14 +178,10 @@ impl BumpArena {
             // chunk or large enough for this allocation.
             let prev_cap = chunk_len;
             let new_cap = (prev_cap * 2).max(size + align);
-            // SAFETY: Same as above — all memory is written before read.
-            let mut chunk = Vec::with_capacity(new_cap);
-            unsafe { chunk.set_len(new_cap); }
-            self.chunks.push(chunk);
+            self.chunks.push(Chunk::new(new_cap));
             self.offset = size; // aligned offset is 0 for fresh chunk
-                                // SAFETY: The new chunk has capacity >= size, and offset 0
-                                // satisfies any alignment (system allocator returns
-                                // maximally-aligned memory).
+                                // SAFETY: Chunk allocations use `ARENA_ALIGNMENT`, which is
+                                // sufficient for every typed allocation in this module.
             self.chunks.last_mut().unwrap().as_mut_ptr()
         }
     }
@@ -161,28 +204,6 @@ fn arena_string(arena: &mut BumpArena, text: &str) -> String {
     unsafe { String::from_raw_parts(ptr, len, len) }
 }
 
-/// Creates a `String` pointing directly into the source data buffer
-/// without copying. The String's Drop will never run (arena doesn't
-/// run destructors), so the fact that we don't own this memory is safe.
-///
-/// # Safety
-/// - `text` must point into a buffer that outlives the ArenaReader
-///   (guaranteed because the generator borrows the source).
-/// - The returned String is only accessible as `&str` via `&Element`.
-#[inline]
-unsafe fn source_string(text: &str) -> String {
-    let len = text.len();
-    String::from_raw_parts(text.as_ptr() as *mut u8, len, len)
-}
-
-/// Creates a `Vec<u8>` pointing directly into the source data buffer
-/// without copying. Same safety invariants as `source_string`.
-#[inline]
-unsafe fn source_bytes(bytes: &[u8]) -> Vec<u8> {
-    let len = bytes.len();
-    Vec::from_raw_parts(bytes.as_ptr() as *mut u8, len, len)
-}
-
 /// Copies `bytes` into the arena and constructs a `Vec<u8>` backed by
 /// arena memory.
 #[inline]
@@ -202,11 +223,61 @@ fn arena_symbol_from_text(arena: &mut BumpArena, text: &str) -> Symbol {
     Symbol::owned(s)
 }
 
-/// Creates a Symbol pointing directly into source data without copying.
-/// Same safety invariants as `source_string`.
-#[inline]
-unsafe fn source_symbol(text: &str) -> Symbol {
-    Symbol::owned(source_string(text))
+fn clone_symbol_out_of_arena(symbol: &Symbol) -> Symbol {
+    match symbol.text() {
+        Some(text) => Symbol::owned(text),
+        None => Symbol::unknown_text(),
+    }
+}
+
+fn clone_annotations_out_of_arena(annotations: &Annotations) -> Annotations {
+    annotations
+        .iter()
+        .map(clone_symbol_out_of_arena)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn clone_sequence_out_of_arena(sequence: &Sequence) -> Sequence {
+    sequence
+        .elements()
+        .map(clone_element_out_of_arena)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn clone_struct_out_of_arena(struct_: &Struct) -> Struct {
+    let fields = struct_
+        .fields()
+        .map(|(name, value)| (clone_symbol_out_of_arena(name), clone_element_out_of_arena(value)))
+        .collect();
+    Struct::from_vec(fields)
+}
+
+fn clone_value_out_of_arena(value: &Value) -> Value {
+    match value {
+        Value::Null(ion_type) => Value::Null(*ion_type),
+        Value::Bool(value) => Value::Bool(*value),
+        Value::Int(value) => Value::Int(value.clone()),
+        Value::Float(value) => Value::Float(*value),
+        Value::Decimal(value) => Value::Decimal(value.clone()),
+        Value::Timestamp(value) => Value::Timestamp(value.clone()),
+        Value::Symbol(value) => Value::Symbol(clone_symbol_out_of_arena(value)),
+        Value::String(value) => Value::String(Str::from(value.text().to_owned())),
+        Value::Clob(value) => Value::Clob(Bytes::from(value.as_ref())),
+        Value::Blob(value) => Value::Blob(Bytes::from(value.as_ref())),
+        Value::List(value) => Value::List(clone_sequence_out_of_arena(value)),
+        Value::SExp(value) => Value::SExp(clone_sequence_out_of_arena(value)),
+        Value::Struct(value) => Value::Struct(clone_struct_out_of_arena(value)),
+    }
+}
+
+fn clone_element_out_of_arena(element: &Element) -> Element {
+    Element::new(
+        clone_annotations_out_of_arena(element.annotations()),
+        clone_value_out_of_arena(element.value()),
+    )
+    .with_location(*element.location())
 }
 
 // ─── ArenaReader ───────────────────────────────────────────────────────
@@ -417,12 +488,7 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                             self.symbol_table.push(None);
                         }
                         _ => {
-                            let oc = instr.operand_count_bits();
-                            if oc == 3 {
-                                self.pos += instr.data() as usize;
-                            } else {
-                                self.pos += oc as usize;
-                            }
+                            self.pos += instr.trailing_word_count(&self.bytecode, self.pos);
                         }
                     }
                 }
@@ -432,12 +498,7 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                 if instr.operation() == op::END_CONTAINER {
                     break;
                 }
-                let oc = instr.operand_count_bits();
-                if oc == 3 {
-                    self.pos += instr.data() as usize;
-                } else {
-                    self.pos += oc as usize;
-                }
+                self.pos += instr.trailing_word_count(&self.bytecode, self.pos);
             },
         }
         Ok(())
@@ -516,9 +577,8 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
                     let position = self.bytecode[p];
                     p += 1;
                     let text = self.generator.read_text_ref(position, data)?;
-                    // SAFETY: text points into the generator's source buffer
-                    // which outlives the ArenaReader. The String's Drop never runs.
-                    unsafe { source_symbol(text) }
+                    // SAFETY: the source buffer outlives the borrowed arena view.
+                    unsafe { Symbol::borrowed_source(text) }
                 }
                 _ => return IonResult::decoding_error("expected annotation instruction"),
             };
@@ -629,10 +689,8 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::STRING_REF => {
                 let position = self.consume_raw();
                 let text = self.generator.read_text_ref(position, instr.data())?;
-                // SAFETY: text points into the generator's source buffer which
-                // outlives the ArenaReader. The String's Drop never runs.
-                let s = unsafe { source_string(text) };
-                Ok(Value::String(Str::from(s)))
+                // SAFETY: the source buffer outlives the borrowed arena view.
+                Ok(Value::String(unsafe { Str::from_borrowed_source(text) }))
             }
             op::NULL_STRING => Ok(Value::Null(IonType::String)),
 
@@ -663,9 +721,8 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::SYMBOL_REF => {
                 let position = self.consume_raw();
                 let text = self.generator.read_text_ref(position, instr.data())?;
-                // SAFETY: text points into the generator's source buffer which
-                // outlives the ArenaReader. The String's Drop never runs.
-                Ok(Value::Symbol(unsafe { source_symbol(text) }))
+                // SAFETY: the source buffer outlives the borrowed arena view.
+                Ok(Value::Symbol(unsafe { Symbol::borrowed_source(text) }))
             }
             op::NULL_SYMBOL => Ok(Value::Null(IonType::Symbol)),
 
@@ -683,9 +740,7 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::BLOB_REF => {
                 let position = self.consume_raw();
                 let bytes = self.generator.read_bytes_ref(position, instr.data())?;
-                // SAFETY: bytes points into the generator's source buffer which
-                // outlives the ArenaReader. The Vec's Drop never runs.
-                let v = unsafe { source_bytes(bytes) };
+                let v = arena_bytes(&mut self.arena, bytes);
                 Ok(Value::Blob(Bytes::from(v)))
             }
             op::NULL_BLOB => Ok(Value::Null(IonType::Blob)),
@@ -704,20 +759,27 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::CLOB_REF => {
                 let position = self.consume_raw();
                 let bytes = self.generator.read_bytes_ref(position, instr.data())?;
-                // SAFETY: bytes points into the generator's source buffer which
-                // outlives the ArenaReader. The Vec's Drop never runs.
-                let v = unsafe { source_bytes(bytes) };
+                let v = arena_bytes(&mut self.arena, bytes);
                 Ok(Value::Clob(Bytes::from(v)))
             }
             op::NULL_CLOB => Ok(Value::Null(IonType::Clob)),
 
-            op::LIST_START => Ok(Value::List(self.read_sequence_arena()?)),
+            op::LIST_START => {
+                let _ = self.consume_raw();
+                Ok(Value::List(self.read_sequence_arena()?))
+            }
             op::NULL_LIST => Ok(Value::Null(IonType::List)),
 
-            op::SEXP_START => Ok(Value::SExp(self.read_sequence_arena()?)),
+            op::SEXP_START => {
+                let _ = self.consume_raw();
+                Ok(Value::SExp(self.read_sequence_arena()?))
+            }
             op::NULL_SEXP => Ok(Value::Null(IonType::SExp)),
 
-            op::STRUCT_START => Ok(Value::Struct(self.read_struct_arena()?)),
+            op::STRUCT_START => {
+                let _ = self.consume_raw();
+                Ok(Value::Struct(self.read_struct_arena()?))
+            }
             op::NULL_STRUCT => Ok(Value::Null(IonType::Struct)),
 
             op::NULL_NULL => Ok(Value::Null(IonType::Null)),
@@ -827,9 +889,8 @@ impl<G: BytecodeGenerator> ArenaReader<G> {
             op::FIELD_NAME_REF => {
                 let position = self.consume_raw();
                 let text = self.generator.read_text_ref(position, data)?;
-                // SAFETY: text points into the generator's source buffer which
-                // outlives the ArenaReader. The String's Drop never runs.
-                Ok(unsafe { source_symbol(text) })
+                // SAFETY: the source buffer outlives the borrowed arena view.
+                Ok(unsafe { Symbol::borrowed_source(text) })
             }
             _ => IonResult::decoding_error("expected field name instruction"),
         }
@@ -848,7 +909,7 @@ pub fn read_all_v3_arena(data: &[u8]) -> IonResult<Sequence> {
         let mut reader = ArenaReader::new(generator)?;
         let mut elements = Vec::new();
         while let Some(result) = reader.next() {
-            elements.push(result?.clone());
+            elements.push(clone_element_out_of_arena(result?));
         }
         Ok(elements.into())
     } else {
@@ -859,7 +920,7 @@ pub fn read_all_v3_arena(data: &[u8]) -> IonResult<Sequence> {
         let mut reader = ArenaReader::new(generator)?;
         let mut elements = Vec::new();
         while let Some(result) = reader.next() {
-            elements.push(result?.clone());
+            elements.push(clone_element_out_of_arena(result?));
         }
         Ok(elements.into())
     }

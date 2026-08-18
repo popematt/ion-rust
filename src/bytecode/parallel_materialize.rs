@@ -247,12 +247,7 @@ fn process_directive<S: AsRef<[u8]>>(
                     }
                     _ => {
                         // Skip unknown instructions within the directive.
-                        let oc = dir_instr.operand_count_bits();
-                        if oc == 3 {
-                            *pos += dir_instr.data() as usize;
-                        } else {
-                            *pos += oc as usize;
-                        }
+                        *pos += dir_instr.trailing_word_count(bytecode, *pos);
                     }
                 }
             }
@@ -265,12 +260,7 @@ fn process_directive<S: AsRef<[u8]>>(
                 if dir_instr.operation() == op::END_CONTAINER {
                     break;
                 }
-                let oc = dir_instr.operand_count_bits();
-                if oc == 3 {
-                    *pos += dir_instr.data() as usize;
-                } else {
-                    *pos += oc as usize;
-                }
+                *pos += dir_instr.trailing_word_count(bytecode, *pos);
             }
         }
     }
@@ -303,14 +293,7 @@ fn skip_top_level_value(bytecode: &[u32], mut pos: usize) -> usize {
 /// returns the position immediately after.
 fn skip_value(bytecode: &[u32], pos: usize) -> usize {
     let instr = Instruction::from_raw(bytecode[pos]);
-    let oc = instr.operand_count_bits();
-    if oc == 3 {
-        // Container: data field = bytecode length of children (including END_CONTAINER)
-        pos + 1 + instr.data() as usize
-    } else {
-        // Scalar: 1 instruction word + operand count words
-        pos + 1 + oc as usize
-    }
+    pos + 1 + instr.trailing_word_count(bytecode, pos + 1)
 }
 
 // ─── TLV Materializer ──────────────────────────────────────────────────
@@ -540,13 +523,22 @@ impl<'a> TlvMaterializer<'a> {
             }
             op::NULL_CLOB => Ok(Value::Null(IonType::Clob)),
 
-            op::LIST_START => Ok(Value::List(self.read_sequence()?)),
+            op::LIST_START => {
+                let _ = self.consume_raw();
+                Ok(Value::List(self.read_sequence()?))
+            }
             op::NULL_LIST => Ok(Value::Null(IonType::List)),
 
-            op::SEXP_START => Ok(Value::SExp(self.read_sequence()?)),
+            op::SEXP_START => {
+                let _ = self.consume_raw();
+                Ok(Value::SExp(self.read_sequence()?))
+            }
             op::NULL_SEXP => Ok(Value::Null(IonType::SExp)),
 
-            op::STRUCT_START => Ok(Value::Struct(self.read_struct()?)),
+            op::STRUCT_START => {
+                let _ = self.consume_raw();
+                Ok(Value::Struct(self.read_struct()?))
+            }
             op::NULL_STRUCT => Ok(Value::Null(IonType::Struct)),
 
             op::NULL_NULL => Ok(Value::Null(IonType::Null)),

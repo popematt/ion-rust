@@ -16,8 +16,7 @@
 //!
 //! - **Kind** (5 bits): General category. Kinds 1–13 map to IonType.
 //! - **Variant** (3 bits): Specific representation. Variant 7 = typed null.
-//! - **Operand Count** (2 bits): 0–2 = literal count of following u32 words.
-//!   3 = data field holds the count (for containers).
+//! - **Operand Count** (2 bits): Literal count of following u32 words.
 //! - **Data** (22 bits): Operation-specific payload.
 //!
 //! # Operation Reference
@@ -57,11 +56,11 @@
 //! | `BLOB_CP`             | `0x50` | Blob      | 0 | 0  | CP index          | —          |
 //! | `BLOB_REF`            | `0x51` | Blob      | 1 | 1  | length            | offset     |
 //! | `NULL_BLOB`           | `0x57` | Blob      | 7 | 0  | —                 | —          |
-//! | `LIST_START`          | `0x58` | List      | 0 | 3  | bytecode length   | —          |
+//! | `LIST_START`          | `0x58` | List      | 0 | 1  | —                 | bytecode length |
 //! | `NULL_LIST`           | `0x5F` | List      | 7 | 0  | —                 | —          |
-//! | `SEXP_START`          | `0x60` | SExp      | 0 | 3  | bytecode length   | —          |
+//! | `SEXP_START`          | `0x60` | SExp      | 0 | 1  | —                 | bytecode length |
 //! | `NULL_SEXP`           | `0x67` | SExp      | 7 | 0  | —                 | —          |
-//! | `STRUCT_START`        | `0x68` | Struct    | 0 | 3  | bytecode length   | —          |
+//! | `STRUCT_START`        | `0x68` | Struct    | 0 | 1  | —                 | bytecode length |
 //! | `NULL_STRUCT`         | `0x6F` | Struct    | 7 | 0  | —                 | —          |
 //! | `ANNOTATION_CP`       | `0x70` | Annot.    | 0 | 0  | CP index          | —          |
 //! | `ANNOTATION_REF`      | `0x71` | Annot.    | 1 | 1  | length            | offset     |
@@ -75,7 +74,7 @@
 //! | `DIRECTIVE_SET_MACROS`| `0x8A` | Directive | 2 | 0  | —                 | —          |
 //! | `DIRECTIVE_ADD_MACROS`| `0x8B` | Directive | 3 | 0  | —                 | —          |
 //! | `DIRECTIVE_USE`       | `0x8C` | Directive | 4 | 0  | —                 | —          |
-//! | `PLACEHOLDER_TAGGED`  | `0x90` | Placeholder| 0| 3  | bytecode length   | —          |
+//! | `PLACEHOLDER_TAGGED`  | `0x90` | Placeholder| 0| 1  | —                 | bytecode length |
 //! | `PLACEHOLDER_TAGLESS` | `0x91` | Placeholder| 1| 0  | opcode            | —          |
 //! | `ARGUMENT_NONE`       | `0x98` | Argument  | 0 | 0  | —                 | —          |
 //! | `INVOKE`              | `0xA0` | Invoke    | 0 | 0  | macro ID          | —          |
@@ -90,9 +89,10 @@
 //! # Containers
 //!
 //! Container instructions (`LIST_START`, `SEXP_START`, `STRUCT_START`) use
-//! operand count 3, meaning the data field holds the **bytecode length** —
-//! the number of instruction/operand words that follow, including the
-//! `END_CONTAINER` delimiter. This enables O(1) skipping.
+//! one operand word to store the **bytecode length** — the number of
+//! instruction/operand words that follow the operand, including the
+//! `END_CONTAINER` delimiter. This enables O(1) skipping with a full `u32`
+//! span.
 //!
 //! # Directives
 //!
@@ -100,8 +100,6 @@
 //! skipped. Their content is delimited by `END_CONTAINER`.
 
 use std::fmt;
-
-use crate::IonType;
 
 /// A single bytecode instruction, packed into a 32-bit integer.
 ///
@@ -154,11 +152,40 @@ impl Instruction {
         self.variant() == 7
     }
 
-    /// The 2-bit operand count field (bits 22–23). Values 0–2 are
-    /// literal counts of following operand words. Value 3 means the data
-    /// field holds the count (used for containers).
+    /// The 2-bit operand count field (bits 22–23). Values 0–3 are the
+    /// literal count of following operand words.
     pub const fn operand_count_bits(self) -> u8 {
         ((self.0 >> 22) & 0x3) as u8
+    }
+
+    /// Returns true for instructions whose first operand stores a span
+    /// used for O(1) skipping of nested bytecode.
+    pub const fn has_span_operand(self) -> bool {
+        matches!(
+            self.operation(),
+            op::LIST_START | op::SEXP_START | op::STRUCT_START | op::PLACEHOLDER_TAGGED
+        )
+    }
+
+    /// Returns the number of words following this instruction. For
+    /// span-carrying instructions, this includes the span operand itself
+    /// plus the spanned child bytecode.
+    #[inline(always)]
+    pub fn trailing_word_count(self, bytecode: &[u32], operand_index: usize) -> usize {
+        if self.has_span_operand() {
+            1 + bytecode[operand_index] as usize
+        } else {
+            self.operand_count_bits() as usize
+        }
+    }
+
+    /// Returns the span stored in the first operand for container-like
+    /// instructions. The span counts words from the first child through
+    /// the closing delimiter, excluding the span operand itself.
+    #[inline(always)]
+    pub fn span_operand(self, bytecode: &[u32], operand_index: usize) -> Option<usize> {
+        self.has_span_operand()
+            .then(|| bytecode[operand_index] as usize)
     }
 
     /// The 22-bit data field (bits 0–21). Interpretation is
@@ -198,7 +225,6 @@ impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = op_name(self.operation());
         let data = self.data();
-        let oc = self.operand_count_bits();
 
         match self.operation() {
             op::BOOL => write!(f, "{name} {}", data & 1 == 1),
@@ -216,7 +242,6 @@ impl fmt::Display for Instruction {
                 let ch = char::from_u32(data).unwrap_or('?');
                 write!(f, "{name} '{ch}'")
             }
-            _ if oc == 3 => write!(f, "{name} (len={data})"),
             _ if data != 0 => write!(f, "{name} (data={data})"),
             _ => write!(f, "{name}"),
         }
@@ -243,6 +268,11 @@ pub(crate) fn render_bytecode(bytecode: &[Instruction]) -> String {
 
         // Render the instruction with operand values when present
         match oc {
+            1 if instr.has_span_operand() => {
+                let span = bytecode[i + 1].raw();
+                write!(out, "{} (len={span})", op_name(instr.operation())).unwrap();
+                i += 2;
+            }
             1 => {
                 let operand = bytecode[i + 1].raw();
                 match instr.operation() {
@@ -280,7 +310,6 @@ pub(crate) fn render_bytecode(bytecode: &[Instruction]) -> String {
                 i += 3;
             }
             _ => {
-                // oc == 0 or oc == 3 (container start / variable-length)
                 write!(out, "{instr}").unwrap();
                 i += 1;
             }
@@ -461,8 +490,6 @@ pub mod instr {
     const O0: u8 = 0;
     const O1: u8 = 1;
     const O2: u8 = 2;
-    const ON: u8 = 3;
-
     pub const NULL_NULL: u32 = make(op::NULL_NULL, O0);
     pub const BOOL: u32 = make(op::BOOL, O0);
     pub const NULL_BOOL: u32 = make(op::NULL_BOOL, O0);
@@ -496,11 +523,11 @@ pub mod instr {
     pub const BLOB_CP: u32 = make(op::BLOB_CP, O0);
     pub const BLOB_REF: u32 = make(op::BLOB_REF, O1);
     pub const NULL_BLOB: u32 = make(op::NULL_BLOB, O0);
-    pub const LIST_START: u32 = make(op::LIST_START, ON);
+    pub const LIST_START: u32 = make(op::LIST_START, O1);
     pub const NULL_LIST: u32 = make(op::NULL_LIST, O0);
-    pub const SEXP_START: u32 = make(op::SEXP_START, ON);
+    pub const SEXP_START: u32 = make(op::SEXP_START, O1);
     pub const NULL_SEXP: u32 = make(op::NULL_SEXP, O0);
-    pub const STRUCT_START: u32 = make(op::STRUCT_START, ON);
+    pub const STRUCT_START: u32 = make(op::STRUCT_START, O1);
     pub const NULL_STRUCT: u32 = make(op::NULL_STRUCT, O0);
     pub const ANNOTATION_CP: u32 = make(op::ANNOTATION_CP, O0);
     pub const ANNOTATION_REF: u32 = make(op::ANNOTATION_REF, O1);
@@ -514,7 +541,7 @@ pub mod instr {
     pub const DIRECTIVE_SET_MACROS: u32 = make(op::DIRECTIVE_SET_MACROS, O0);
     pub const DIRECTIVE_ADD_MACROS: u32 = make(op::DIRECTIVE_ADD_MACROS, O0);
     pub const DIRECTIVE_USE: u32 = make(op::DIRECTIVE_USE, O0);
-    pub const PLACEHOLDER_TAGGED: u32 = make(op::PLACEHOLDER_TAGGED, ON);
+    pub const PLACEHOLDER_TAGGED: u32 = make(op::PLACEHOLDER_TAGGED, O1);
     pub const PLACEHOLDER_TAGLESS: u32 = make(op::PLACEHOLDER_TAGLESS, O0);
     pub const ARGUMENT_NONE: u32 = make(op::ARGUMENT_NONE, O0);
     pub const INVOKE: u32 = make(op::INVOKE, O0);
@@ -598,6 +625,7 @@ fn op_name(operation: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IonType;
     use rstest::rstest;
 
     #[test]
@@ -627,9 +655,9 @@ mod tests {
 
     #[test]
     fn instruction_container_operand_count() {
-        let i = Instruction::from_raw(instr::LIST_START | 10);
-        assert_eq!(i.operand_count_bits(), 3);
-        assert_eq!(i.data(), 10);
+        let i = Instruction::from_raw(instr::LIST_START);
+        assert_eq!(i.operand_count_bits(), 1);
+        assert_eq!(i.data(), 0);
         assert_eq!(i.operation_kind(), operation_kind::LIST);
     }
 
@@ -640,7 +668,7 @@ mod tests {
     #[case(instr::FLOAT_F64, 2)]
     #[case(instr::BOOL, 0)]
     #[case(instr::SYMBOL_SID, 0)]
-    #[case(instr::LIST_START, 3)]
+    #[case(instr::LIST_START, 1)]
     fn operand_count(#[case] raw: u32, #[case] expected: u8) {
         let i = Instruction::from_raw(raw);
         assert_eq!(i.operand_count_bits(), expected);
@@ -724,13 +752,25 @@ mod tests {
     #[case(instr::BOOL | 1, "BOOL true")]
     #[case(instr::BOOL, "BOOL false")]
     #[case(instr::INT_I16 | (-3i16 as u16 as u32), "INT_I16 -3")]
-    #[case(instr::LIST_START | 5, "LIST_START (len=5)")]
+    #[case(instr::LIST_START, "LIST_START")]
     #[case(instr::SYMBOL_SID | 7, "SYMBOL_SID $7")]
     #[case(instr::SYMBOL_CHAR | ('A' as u32), "SYMBOL_CHAR 'A'")]
     #[case(instr::END_CONTAINER, "END_CONTAINER")]
     #[case(instr::NULL_INT, "NULL_INT")]
     fn display_formatting(#[case] raw: u32, #[case] expected: &str) {
         assert_eq!(format!("{}", Instruction::from_raw(raw)), expected);
+    }
+
+    #[test]
+    fn render_bytecode_formats_container_span_operands() {
+        let rendered = render_bytecode(&[
+            Instruction::from_raw(instr::LIST_START),
+            Instruction::from_raw(3),
+            Instruction::from_raw(instr::INT_I16 | 1),
+            Instruction::from_raw(instr::INT_I16 | 2),
+            Instruction::from_raw(instr::END_CONTAINER),
+        ]);
+        assert!(rendered.contains("LIST_START (len=3)"));
     }
 
     #[test]

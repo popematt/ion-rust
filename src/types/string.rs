@@ -5,11 +5,45 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
+#[derive(Copy, Clone, Debug)]
+struct BorrowedSourceText {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: This pointer refers to immutable source bytes. ArenaReader's borrow
+// discipline guarantees the source outlives any accessible reference.
+unsafe impl Send for BorrowedSourceText {}
+unsafe impl Sync for BorrowedSourceText {}
+
+impl BorrowedSourceText {
+    /// # Safety
+    ///
+    /// `text` must point into source data that outlives any observable use of
+    /// the returned `Str`. Callers must clone to an owned representation before
+    /// the source can be released.
+    unsafe fn new(text: &str) -> Self {
+        Self {
+            ptr: text.as_ptr(),
+            len: text.len(),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: `new()` only captures valid UTF-8 slices, and callers uphold
+        // the lifetime contract for the underlying source bytes.
+        unsafe {
+            let bytes = std::slice::from_raw_parts(self.ptr, self.len);
+            std::str::from_utf8_unchecked(bytes)
+        }
+    }
+}
+
 /// Internal representation for `Str`.
-#[derive(Clone)]
 enum StrRepr {
     Owned(String),
     Source(ArcSubstr),
+    BorrowedSource(BorrowedSourceText),
 }
 
 /// An owned, immutable in-memory representation of an Ion `string`.
@@ -65,6 +99,7 @@ impl Str {
         match &self.text {
             StrRepr::Owned(s) => s.as_str(),
             StrRepr::Source(s) => s.as_str(),
+            StrRepr::BorrowedSource(s) => s.as_str(),
         }
     }
 
@@ -74,12 +109,27 @@ impl Str {
             text: StrRepr::Source(substr),
         }
     }
+
+    /// Creates a `Str` borrowing text directly from a source buffer.
+    ///
+    /// # Safety
+    ///
+    /// `text` must refer to source data that outlives any borrowed use of the
+    /// returned `Str`. Cloning this `Str` upgrades it to an owned `String`.
+    pub(crate) unsafe fn from_borrowed_source(text: &str) -> Str {
+        Str {
+            text: StrRepr::BorrowedSource(BorrowedSourceText::new(text)),
+        }
+    }
 }
 
 impl Clone for Str {
     fn clone(&self) -> Self {
-        Str {
-            text: self.text.clone(),
+        match &self.text {
+            StrRepr::Owned(text) => Str::from(text.clone()),
+            StrRepr::Source(text) => Str::from_source(text.clone()),
+            // Cloning upgrades to owned so the clone is independent of the source lifetime.
+            StrRepr::BorrowedSource(text) => Str::from(text.as_str().to_owned()),
         }
     }
 }
@@ -140,6 +190,7 @@ impl From<Str> for String {
         match value.text {
             StrRepr::Owned(s) => s,
             StrRepr::Source(s) => s.as_str().to_owned(),
+            StrRepr::BorrowedSource(s) => s.as_str().to_owned(),
         }
     }
 }

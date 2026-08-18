@@ -221,16 +221,13 @@ impl BytecodeBuilder {
 
     fn container(mut self, start_instr: u32, children: impl FnOnce(Self) -> Self) -> Self {
         let start = self.buffer.len();
+        self.buffer.push(Instruction::from_raw(start_instr));
         self.buffer.push(Instruction::from_raw(0));
         self = children(self);
         self.buffer
             .push(Instruction::from_raw(instr::END_CONTAINER));
-        let len = self.buffer.len() - start - 1;
-        debug_assert!(
-            len <= 0x003F_FFFF,
-            "container bytecode length exceeds 22-bit data field"
-        );
-        self.buffer[start] = Instruction::from_raw(start_instr | len as u32);
+        let len = self.buffer.len() - start - 2;
+        self.buffer[start + 1] = Instruction::from_raw(len as u32);
         self
     }
 
@@ -277,11 +274,11 @@ mod tests {
             .end_of_input()
             .build();
 
-        // LIST_START, 3x INT_I16, END_CONTAINER, END_OF_INPUT
-        assert_eq!(bytecode.len(), 6);
+        // LIST_START, span, 3x INT_I16, END_CONTAINER, END_OF_INPUT
+        assert_eq!(bytecode.len(), 7);
         assert_eq!(bytecode[0].operation(), op::LIST_START);
-        assert_eq!(bytecode[0].data(), 4); // 3 children + END_CONTAINER
-        assert_eq!(bytecode[4].operation(), op::END_CONTAINER);
+        assert_eq!(bytecode[1].raw(), 4); // 3 children + END_CONTAINER
+        assert_eq!(bytecode[5].operation(), op::END_CONTAINER);
     }
 
     #[test]
@@ -292,22 +289,24 @@ mod tests {
             .build();
 
         // Structure:
-        //   [0] LIST_START (len=6)  -- outer
-        //   [1]   LIST_START (len=3)  -- inner
-        //   [2]     INT_I16 1
-        //   [3]     INT_I16 2
-        //   [4]   END_CONTAINER       -- inner end
-        //   [5]   INT_I16 3
-        //   [6] END_CONTAINER         -- outer end
-        //   [7] END_OF_INPUT
-        assert_eq!(bytecode.len(), 8);
+        //   [0] LIST_START           -- outer
+        //   [1]   outer span = 7
+        //   [2]   LIST_START         -- inner
+        //   [3]     inner span = 3
+        //   [4]     INT_I16 1
+        //   [5]     INT_I16 2
+        //   [6]   END_CONTAINER      -- inner end
+        //   [7]   INT_I16 3
+        //   [8] END_CONTAINER        -- outer end
+        //   [9] END_OF_INPUT
+        assert_eq!(bytecode.len(), 10);
         assert_eq!(bytecode[0].operation(), op::LIST_START);
-        assert_eq!(bytecode[0].data(), 6); // inner(4) + int(1) + END(1)
-        assert_eq!(bytecode[1].operation(), op::LIST_START);
-        assert_eq!(bytecode[1].data(), 3); // 2 ints + END_CONTAINER
-        assert_eq!(bytecode[4].operation(), op::END_CONTAINER);
+        assert_eq!(bytecode[1].raw(), 7); // inner(5) + int(1) + END(1)
+        assert_eq!(bytecode[2].operation(), op::LIST_START);
+        assert_eq!(bytecode[3].raw(), 3); // 2 ints + END_CONTAINER
         assert_eq!(bytecode[6].operation(), op::END_CONTAINER);
-        assert_eq!(bytecode[7].operation(), op::END_OF_INPUT);
+        assert_eq!(bytecode[8].operation(), op::END_CONTAINER);
+        assert_eq!(bytecode[9].operation(), op::END_OF_INPUT);
     }
 
     #[test]
@@ -318,12 +317,13 @@ mod tests {
             .build();
 
         assert_eq!(bytecode[0].operation(), op::STRUCT_START);
-        assert_eq!(bytecode[1].operation(), op::FIELD_NAME_SID);
-        assert_eq!(bytecode[1].data(), 4);
-        assert_eq!(bytecode[2].operation(), op::INT_I16);
-        assert_eq!(bytecode[3].operation(), op::FIELD_NAME_SID);
-        assert_eq!(bytecode[3].data(), 5);
-        assert_eq!(bytecode[4].operation(), op::BOOL);
+        assert_eq!(bytecode[1].raw(), 5);
+        assert_eq!(bytecode[2].operation(), op::FIELD_NAME_SID);
+        assert_eq!(bytecode[2].data(), 4);
+        assert_eq!(bytecode[3].operation(), op::INT_I16);
+        assert_eq!(bytecode[4].operation(), op::FIELD_NAME_SID);
+        assert_eq!(bytecode[4].data(), 5);
+        assert_eq!(bytecode[5].operation(), op::BOOL);
     }
 
     #[test]

@@ -710,6 +710,7 @@ impl Element {
                     // SAFETY: The pointer is valid while we hold this Element.
                     Ok(unsafe { ptr.text() }.to_string())
                 }
+                SymbolText::BorrowedSource(text) => Ok(text.as_str().to_string()),
                 SymbolText::SourceSlice(substr) => Ok(substr.as_str().to_string()),
             },
             _ => {
@@ -1061,7 +1062,6 @@ impl AsRef<Element> for Element {
 
 #[cfg(test)]
 mod tests {
-    use chrono::*;
     use rstest::*;
     use std::collections::HashSet;
     use std::iter::{once, Once};
@@ -1074,8 +1074,10 @@ mod tests {
 
     /// Makes a timestamp from an RFC-3339 string and panics if it can't
     fn make_timestamp<T: AsRef<str>>(text: T) -> Timestamp {
-        let dt = DateTime::parse_from_rfc3339(text.as_ref()).unwrap();
-        Timestamp::from_fixed_offset_datetime(dt)
+        Element::read_one(text.as_ref())
+            .unwrap()
+            .expect_timestamp()
+            .unwrap()
     }
 
     struct CaseAnnotations {

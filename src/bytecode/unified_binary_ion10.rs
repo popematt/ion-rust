@@ -823,7 +823,8 @@ impl<S: BinaryIonSource> UnifiedBinaryIon10Generator<S> {
         constant_pool: &mut ConstantPool,
     ) {
         let start_index = destination.len();
-        destination.push(0); // placeholder
+        destination.push(start_instr);
+        destination.push(0);
 
         let end_position = self.position() + content_length;
         while self.position() < end_position {
@@ -850,12 +851,8 @@ impl<S: BinaryIonSource> UnifiedBinaryIon10Generator<S> {
         }
 
         destination.push(instr::END_CONTAINER);
-        let bytecode_length = destination.len() - start_index - 1;
-        debug_assert!(
-            bytecode_length <= 0x003F_FFFF,
-            "container bytecode length exceeds 22-bit data field"
-        );
-        destination[start_index] = start_instr | (bytecode_length as u32 & 0x003F_FFFF);
+        let bytecode_length = destination.len() - start_index - 2;
+        destination[start_index + 1] = bytecode_length as u32;
     }
 
     /// Emits an annotation wrapper.
@@ -1438,7 +1435,7 @@ mod tests {
         let (dest, _cp) = generate_in_memory(source);
         let list_start = Instruction::from_raw(dest[0]);
         assert_eq!(list_start.operation(), op::LIST_START);
-        assert_eq!(list_start.data(), 3);
+        assert_eq!(dest[1], 3);
     }
 
     #[test]

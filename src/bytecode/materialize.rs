@@ -393,12 +393,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                         }
                         _ => {
                             // Skip unknown instructions within the directive.
-                            let oc = instr.operand_count_bits();
-                            if oc == 3 {
-                                self.pos += instr.data() as usize;
-                            } else {
-                                self.pos += oc as usize;
-                            }
+                            self.pos += instr.trailing_word_count(&self.bytecode, self.pos);
                         }
                     }
                 }
@@ -410,12 +405,7 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
                     if instr.operation() == op::END_CONTAINER {
                         break;
                     }
-                    let oc = instr.operand_count_bits();
-                    if oc == 3 {
-                        self.pos += instr.data() as usize;
-                    } else {
-                        self.pos += oc as usize;
-                    }
+                    self.pos += instr.trailing_word_count(&self.bytecode, self.pos);
                 }
             }
         }
@@ -618,13 +608,22 @@ impl<G: BytecodeGenerator> BytecodeElementIterator<G> {
             }
             op::NULL_CLOB => Ok(Value::Null(IonType::Clob)),
 
-            op::LIST_START => Ok(Value::List(self.read_sequence()?)),
+            op::LIST_START => {
+                let _ = self.consume_raw();
+                Ok(Value::List(self.read_sequence()?))
+            }
             op::NULL_LIST => Ok(Value::Null(IonType::List)),
 
-            op::SEXP_START => Ok(Value::SExp(self.read_sequence()?)),
+            op::SEXP_START => {
+                let _ = self.consume_raw();
+                Ok(Value::SExp(self.read_sequence()?))
+            }
             op::NULL_SEXP => Ok(Value::Null(IonType::SExp)),
 
-            op::STRUCT_START => Ok(Value::Struct(self.read_struct()?)),
+            op::STRUCT_START => {
+                let _ = self.consume_raw();
+                Ok(Value::Struct(self.read_struct()?))
+            }
             op::NULL_STRUCT => Ok(Value::Null(IonType::Struct)),
 
             op::NULL_NULL => Ok(Value::Null(IonType::Null)),
