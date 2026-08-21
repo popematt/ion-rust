@@ -1,0 +1,992 @@
+pub mod ion_rs
+pub mod ion_rs::decimal
+pub enum ion_rs::decimal::Sign
+pub ion_rs::decimal::Sign::Negative = -1
+pub ion_rs::decimal::Sign::Positive = 1
+pub struct ion_rs::decimal::Coefficient
+impl ion_rs::decimal::Coefficient
+pub const ion_rs::decimal::Coefficient::NEGATIVE_ZERO: ion_rs::decimal::Coefficient
+pub const ion_rs::decimal::Coefficient::ZERO: ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::is_negative(&self) -> bool
+pub fn ion_rs::decimal::Coefficient::is_negative_zero(&self) -> bool
+pub fn ion_rs::decimal::Coefficient::is_positive_zero(&self) -> bool
+pub fn ion_rs::decimal::Coefficient::is_zero(&self) -> bool
+pub fn ion_rs::decimal::Coefficient::magnitude(&self) -> ion_rs::UInt
+pub fn ion_rs::decimal::Coefficient::sign(&self) -> ion_rs::decimal::Sign
+impl core::convert::From<i128> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(i128) -> ion_rs::decimal::Coefficient
+impl core::convert::From<i16> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(i16) -> ion_rs::decimal::Coefficient
+impl core::convert::From<i32> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(i32) -> ion_rs::decimal::Coefficient
+impl core::convert::From<i64> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(i64) -> ion_rs::decimal::Coefficient
+impl core::convert::From<i8> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(i8) -> ion_rs::decimal::Coefficient
+impl core::convert::From<ion_rs::Int> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(ion_rs::Int) -> ion_rs::decimal::Coefficient
+impl core::convert::From<ion_rs::UInt> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(ion_rs::UInt) -> ion_rs::decimal::Coefficient
+impl core::convert::From<isize> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(isize) -> ion_rs::decimal::Coefficient
+impl core::convert::From<u128> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(u128) -> ion_rs::decimal::Coefficient
+impl core::convert::From<u16> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(u16) -> ion_rs::decimal::Coefficient
+impl core::convert::From<u32> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(u32) -> ion_rs::decimal::Coefficient
+impl core::convert::From<u64> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(u64) -> ion_rs::decimal::Coefficient
+impl core::convert::From<u8> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(u8) -> ion_rs::decimal::Coefficient
+impl core::convert::From<usize> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(usize) -> ion_rs::decimal::Coefficient
+impl core::convert::TryFrom<&ion_rs::decimal::Coefficient> for ion_rs::Int
+pub type ion_rs::Int::Error = ion_rs::IonError
+pub fn ion_rs::Int::try_from(&ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::decimal::Coefficient> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(&ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::decimal::Coefficient> for ion_rs::Int
+pub type ion_rs::Int::Error = ion_rs::IonError
+pub fn ion_rs::Int::try_from(ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::decimal::Coefficient> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Display for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub mod ion_rs::v1_0
+pub struct ion_rs::v1_0::Binary
+impl core::convert::From<ion_rs::v1_0::Binary> for ion_rs::WriteConfig<ion_rs::v1_0::Binary>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Binary>::from(ion_rs::v1_0::Binary) -> Self
+pub struct ion_rs::v1_0::Text
+impl ion_rs::v1_0::Text
+pub fn ion_rs::v1_0::Text::with_format(self, ion_rs::TextFormat) -> ion_rs::WriteConfig<Self>
+impl core::convert::From<ion_rs::v1_0::Text> for ion_rs::WriteConfig<ion_rs::v1_0::Text>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Text>::from(ion_rs::v1_0::Text) -> Self
+pub macro ion_rs::ion_list!
+pub macro ion_rs::ion_seq!
+pub macro ion_rs::ion_sexp!
+pub macro ion_rs::ion_struct!
+#[non_exhaustive] pub enum ion_rs::IonError
+pub ion_rs::IonError::Conversion(ion_rs::result::conversion::ConversionError)
+pub ion_rs::IonError::Decoding(ion_rs::result::decoding_error::DecodingError)
+pub ion_rs::IonError::Encoding(ion_rs::result::encoding_error::EncodingError)
+pub ion_rs::IonError::IllegalOperation(ion_rs::result::illegal_operation::IllegalOperation)
+pub ion_rs::IonError::Incomplete(ion_rs::result::incomplete::IncompleteError)
+pub ion_rs::IonError::Io(ion_rs::result::io_error::IoError)
+impl core::convert::From<core::fmt::Error> for ion_rs::IonError
+pub fn ion_rs::IonError::from(core::fmt::Error) -> Self
+impl core::convert::From<core::io::error::ErrorKind> for ion_rs::IonError
+pub fn ion_rs::IonError::from(core::io::error::ErrorKind) -> Self
+impl core::convert::From<ion_rs::IonError> for core::fmt::Error
+pub fn core::fmt::Error::from(ion_rs::IonError) -> Self
+impl core::convert::From<std::io::error::Error> for ion_rs::IonError
+pub fn ion_rs::IonError::from(std::io::error::Error) -> Self
+impl<FromType, ToType> core::convert::From<ion_rs::ConversionOperationError<FromType, ToType>> for ion_rs::IonError where FromType: ion_rs::result::conversion::ValueTypeExpectation, ToType: ion_rs::result::conversion::TypeExpectation
+pub fn ion_rs::IonError::from(ion_rs::ConversionOperationError<FromType, ToType>) -> Self
+pub enum ion_rs::IonType
+pub ion_rs::IonType::Blob
+pub ion_rs::IonType::Bool
+pub ion_rs::IonType::Clob
+pub ion_rs::IonType::Decimal
+pub ion_rs::IonType::Float
+pub ion_rs::IonType::Int
+pub ion_rs::IonType::List
+pub ion_rs::IonType::Null
+pub ion_rs::IonType::SExp
+pub ion_rs::IonType::String
+pub ion_rs::IonType::Struct
+pub ion_rs::IonType::Symbol
+pub ion_rs::IonType::Timestamp
+impl ion_rs::IonType
+pub fn ion_rs::IonType::is_container(&self) -> bool
+impl core::convert::From<ion_rs::IonType> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::IonType) -> Self
+impl core::fmt::Display for ion_rs::IonType
+pub fn ion_rs::IonType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum ion_rs::TextFormat
+pub ion_rs::TextFormat::Compact
+pub ion_rs::TextFormat::Lines
+pub ion_rs::TextFormat::Pretty
+pub enum ion_rs::TimestampPrecision
+pub ion_rs::TimestampPrecision::Day
+pub ion_rs::TimestampPrecision::HourAndMinute
+pub ion_rs::TimestampPrecision::Month
+pub ion_rs::TimestampPrecision::Second
+pub ion_rs::TimestampPrecision::Year
+pub enum ion_rs::Value
+pub ion_rs::Value::Blob(ion_rs::Bytes)
+pub ion_rs::Value::Bool(bool)
+pub ion_rs::Value::Clob(ion_rs::Bytes)
+pub ion_rs::Value::Decimal(ion_rs::Decimal)
+pub ion_rs::Value::Float(f64)
+pub ion_rs::Value::Int(ion_rs::Int)
+pub ion_rs::Value::List(ion_rs::Sequence)
+pub ion_rs::Value::Null(ion_rs::IonType)
+pub ion_rs::Value::SExp(ion_rs::Sequence)
+pub ion_rs::Value::String(ion_rs::Str)
+pub ion_rs::Value::Struct(ion_rs::Struct)
+pub ion_rs::Value::Symbol(ion_rs::Symbol)
+pub ion_rs::Value::Timestamp(ion_rs::Timestamp)
+impl ion_rs::Value
+pub fn ion_rs::Value::ion_type(&self) -> ion_rs::IonType
+impl core::convert::From<&[u8]> for ion_rs::Value
+pub fn ion_rs::Value::from(&[u8]) -> Self
+impl core::convert::From<&str> for ion_rs::Value
+pub fn ion_rs::Value::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for ion_rs::Value
+pub fn ion_rs::Value::from(alloc::string::String) -> Self
+impl core::convert::From<alloc::vec::Vec<u8>> for ion_rs::Value
+pub fn ion_rs::Value::from(alloc::vec::Vec<u8>) -> Self
+impl core::convert::From<bool> for ion_rs::Value
+pub fn ion_rs::Value::from(bool) -> Self
+impl core::convert::From<f64> for ion_rs::Value
+pub fn ion_rs::Value::from(f64) -> Self
+impl core::convert::From<ion_rs::Blob> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Blob) -> Self
+impl core::convert::From<ion_rs::Clob> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Clob) -> Self
+impl core::convert::From<ion_rs::Decimal> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Decimal) -> Self
+impl core::convert::From<ion_rs::IonType> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::IonType) -> Self
+impl core::convert::From<ion_rs::List> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::List) -> Self
+impl core::convert::From<ion_rs::SExp> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::SExp) -> Self
+impl core::convert::From<ion_rs::Str> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Str) -> Self
+impl core::convert::From<ion_rs::Struct> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Struct) -> Self
+impl core::convert::From<ion_rs::Symbol> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Symbol) -> Self
+impl core::convert::From<ion_rs::SymbolRef<'_>> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::SymbolRef<'_>) -> Self
+impl core::convert::From<ion_rs::Timestamp> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Timestamp) -> Self
+impl core::fmt::Display for ion_rs::Value
+pub fn ion_rs::Value::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<I: core::convert::Into<ion_rs::Int>> core::convert::From<I> for ion_rs::Value
+pub fn ion_rs::Value::from(I) -> Self
+pub struct ion_rs::Annotations
+impl ion_rs::Annotations
+pub fn ion_rs::Annotations::contains<S: core::convert::AsRef<str>>(&self, S) -> bool
+pub fn ion_rs::Annotations::empty() -> Self
+pub fn ion_rs::Annotations::first(&self) -> core::option::Option<&str>
+pub fn ion_rs::Annotations::is_empty(&self) -> bool
+pub fn ion_rs::Annotations::iter(&self) -> ion_rs::element::iterators::SymbolsIterator<'_>
+pub fn ion_rs::Annotations::len(&self) -> usize
+impl core::convert::AsRef<[ion_rs::Symbol]> for ion_rs::Annotations
+pub fn ion_rs::Annotations::as_ref(&self) -> &[ion_rs::Symbol]
+impl core::convert::From<alloc::vec::Vec<ion_rs::Symbol>> for ion_rs::Annotations
+pub fn ion_rs::Annotations::from(alloc::vec::Vec<ion_rs::Symbol>) -> Self
+impl core::iter::traits::collect::IntoIterator for ion_rs::Annotations
+pub type ion_rs::Annotations::IntoIter = ion_rs::element::iterators::AnnotationsIntoIter
+pub type ion_rs::Annotations::Item = ion_rs::Symbol
+pub fn ion_rs::Annotations::into_iter(self) -> Self::IntoIter
+impl<'a> core::iter::traits::collect::IntoIterator for &'a ion_rs::Annotations
+pub type &'a ion_rs::Annotations::IntoIter = ion_rs::element::iterators::SymbolsIterator<'a>
+pub type &'a ion_rs::Annotations::Item = &'a ion_rs::Symbol
+pub fn &'a ion_rs::Annotations::into_iter(self) -> Self::IntoIter
+impl<S: core::convert::Into<ion_rs::Symbol>> core::iter::traits::collect::FromIterator<S> for ion_rs::Annotations
+pub fn ion_rs::Annotations::from_iter<T: core::iter::traits::collect::IntoIterator<Item = S>>(T) -> Self
+pub struct ion_rs::Blob(pub ion_rs::Bytes)
+impl ion_rs::Blob
+pub fn ion_rs::Blob::as_slice(&self) -> &[u8]
+impl core::cmp::PartialEq<[u8]> for ion_rs::Blob
+pub fn ion_rs::Blob::eq(&self, &[u8]) -> bool
+impl core::convert::AsRef<[u8]> for ion_rs::Blob
+pub fn ion_rs::Blob::as_ref(&self) -> &[u8]
+impl core::convert::From<&[u8]> for ion_rs::Blob
+pub fn ion_rs::Blob::from(&[u8]) -> Self
+impl core::convert::From<&str> for ion_rs::Blob
+pub fn ion_rs::Blob::from(&str) -> Self
+impl core::convert::From<alloc::vec::Vec<u8>> for ion_rs::Blob
+pub fn ion_rs::Blob::from(alloc::vec::Vec<u8>) -> Self
+impl core::convert::From<ion_rs::Blob> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(ion_rs::Blob) -> Self
+impl core::convert::From<ion_rs::Blob> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Blob) -> Self
+pub struct ion_rs::Bytes
+impl core::cmp::PartialEq<[u8]> for ion_rs::Bytes
+pub fn ion_rs::Bytes::eq(&self, &[u8]) -> bool
+impl core::convert::AsRef<[u8]> for ion_rs::Bytes
+pub fn ion_rs::Bytes::as_ref(&self) -> &[u8]
+impl core::convert::From<&[u8]> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(&[u8]) -> Self
+impl core::convert::From<&str> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(&str) -> Self
+impl core::convert::From<alloc::vec::Vec<u8>> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(alloc::vec::Vec<u8>) -> Self
+impl core::convert::From<ion_rs::Blob> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(ion_rs::Blob) -> Self
+impl core::convert::From<ion_rs::Bytes> for alloc::vec::Vec<u8>
+pub fn alloc::vec::Vec<u8>::from(ion_rs::Bytes) -> Self
+impl core::convert::From<ion_rs::Clob> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(ion_rs::Clob) -> Self
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Bytes
+pub type ion_rs::Bytes::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Bytes>
+pub fn ion_rs::Bytes::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Bytes>
+impl<const N: usize> core::convert::From<&[u8; N]> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(&[u8; N]) -> Self
+pub struct ion_rs::Clob(pub ion_rs::Bytes)
+impl ion_rs::Clob
+pub fn ion_rs::Clob::as_slice(&self) -> &[u8]
+impl core::cmp::PartialEq<[u8]> for ion_rs::Clob
+pub fn ion_rs::Clob::eq(&self, &[u8]) -> bool
+impl core::convert::AsRef<[u8]> for ion_rs::Clob
+pub fn ion_rs::Clob::as_ref(&self) -> &[u8]
+impl core::convert::From<&[u8]> for ion_rs::Clob
+pub fn ion_rs::Clob::from(&[u8]) -> Self
+impl core::convert::From<&str> for ion_rs::Clob
+pub fn ion_rs::Clob::from(&str) -> Self
+impl core::convert::From<alloc::vec::Vec<u8>> for ion_rs::Clob
+pub fn ion_rs::Clob::from(alloc::vec::Vec<u8>) -> Self
+impl core::convert::From<ion_rs::Clob> for ion_rs::Bytes
+pub fn ion_rs::Bytes::from(ion_rs::Clob) -> Self
+impl core::convert::From<ion_rs::Clob> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Clob) -> Self
+pub struct ion_rs::ConversionOperationError<FromType, ToType>
+impl<FromType, ToType> ion_rs::ConversionOperationError<FromType, ToType>
+pub fn ion_rs::ConversionOperationError<FromType, ToType>::new(FromType) -> Self
+pub fn ion_rs::ConversionOperationError<FromType, ToType>::original_value(self) -> FromType
+impl<FromType, ToType> core::convert::From<FromType> for ion_rs::ConversionOperationError<FromType, ToType> where FromType: ion_rs::result::conversion::ValueTypeExpectation, ToType: ion_rs::result::conversion::TypeExpectation
+pub fn ion_rs::ConversionOperationError<FromType, ToType>::from(FromType) -> Self
+impl<FromType, ToType> core::convert::From<ion_rs::ConversionOperationError<FromType, ToType>> for ion_rs::IonError where FromType: ion_rs::result::conversion::ValueTypeExpectation, ToType: ion_rs::result::conversion::TypeExpectation
+pub fn ion_rs::IonError::from(ion_rs::ConversionOperationError<FromType, ToType>) -> Self
+impl<FromType, ToType> core::error::Error for ion_rs::ConversionOperationError<FromType, ToType> where FromType: ion_rs::result::conversion::ValueTypeExpectation + core::fmt::Debug, ToType: ion_rs::result::conversion::TypeExpectation + core::fmt::Debug
+impl<FromType, ToType> core::fmt::Display for ion_rs::ConversionOperationError<FromType, ToType> where FromType: ion_rs::result::conversion::ValueTypeExpectation, ToType: ion_rs::result::conversion::TypeExpectation
+pub fn ion_rs::ConversionOperationError<FromType, ToType>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct ion_rs::Decimal
+impl ion_rs::Decimal
+pub const ion_rs::Decimal::NEGATIVE_ZERO: ion_rs::Decimal
+pub const ion_rs::Decimal::ZERO: ion_rs::Decimal
+pub fn ion_rs::Decimal::coefficient(&self) -> ion_rs::decimal::Coefficient
+pub fn ion_rs::Decimal::exponent(&self) -> i64
+pub fn ion_rs::Decimal::fract(&self) -> ion_rs::Decimal
+pub fn ion_rs::Decimal::is_less_than_zero(&self) -> bool
+pub fn ion_rs::Decimal::is_zero(&self) -> bool
+pub fn ion_rs::Decimal::negative_zero() -> ion_rs::Decimal
+pub fn ion_rs::Decimal::negative_zero_with_exponent(i64) -> ion_rs::Decimal
+pub fn ion_rs::Decimal::new<C: core::convert::Into<ion_rs::decimal::Coefficient>, E: core::convert::Into<i64>>(C, E) -> ion_rs::Decimal
+pub fn ion_rs::Decimal::precision(&self) -> u64
+pub fn ion_rs::Decimal::scale(&self) -> i64
+pub fn ion_rs::Decimal::trunc(&self) -> ion_rs::Decimal
+impl core::cmp::Eq for ion_rs::Decimal
+impl core::cmp::Ord for ion_rs::Decimal
+pub fn ion_rs::Decimal::cmp(&self, &Self) -> core::cmp::Ordering
+impl core::cmp::PartialEq for ion_rs::Decimal
+pub fn ion_rs::Decimal::eq(&self, &Self) -> bool
+impl core::cmp::PartialOrd for ion_rs::Decimal
+pub fn ion_rs::Decimal::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<i16> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(i16) -> Self
+impl core::convert::From<i32> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(i32) -> Self
+impl core::convert::From<i64> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(i64) -> Self
+impl core::convert::From<i8> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(i8) -> Self
+impl core::convert::From<ion_rs::Decimal> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Decimal) -> Self
+impl core::convert::From<ion_rs::Int> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(ion_rs::Int) -> Self
+impl core::convert::From<isize> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(isize) -> Self
+impl core::convert::From<u16> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(u16) -> Self
+impl core::convert::From<u32> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(u32) -> Self
+impl core::convert::From<u64> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(u64) -> Self
+impl core::convert::From<u8> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(u8) -> Self
+impl core::convert::From<usize> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(usize) -> Self
+impl core::convert::TryFrom<f32> for ion_rs::Decimal
+pub type ion_rs::Decimal::Error = ion_rs::IonError
+pub fn ion_rs::Decimal::try_from(f32) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<f64> for ion_rs::Decimal
+pub type ion_rs::Decimal::Error = ion_rs::IonError
+pub fn ion_rs::Decimal::try_from(f64) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Decimal
+pub type ion_rs::Decimal::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Decimal>
+pub fn ion_rs::Decimal::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Decimal>
+impl core::fmt::Display for ion_rs::Decimal
+pub fn ion_rs::Decimal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct ion_rs::Element
+impl ion_rs::Element
+pub fn ion_rs::Element::annotations(&self) -> &ion_rs::Annotations
+pub fn ion_rs::Element::as_blob(&self) -> core::option::Option<&[u8]>
+pub fn ion_rs::Element::as_bool(&self) -> core::option::Option<bool>
+pub fn ion_rs::Element::as_clob(&self) -> core::option::Option<&[u8]>
+pub fn ion_rs::Element::as_decimal(&self) -> core::option::Option<ion_rs::Decimal>
+pub fn ion_rs::Element::as_float(&self) -> core::option::Option<f64>
+pub fn ion_rs::Element::as_i64(&self) -> core::option::Option<i64>
+pub fn ion_rs::Element::as_int(&self) -> core::option::Option<&ion_rs::Int>
+pub fn ion_rs::Element::as_list(&self) -> core::option::Option<&ion_rs::Sequence>
+pub fn ion_rs::Element::as_lob(&self) -> core::option::Option<&[u8]>
+pub fn ion_rs::Element::as_sequence(&self) -> core::option::Option<&ion_rs::Sequence>
+pub fn ion_rs::Element::as_sexp(&self) -> core::option::Option<&ion_rs::Sequence>
+pub fn ion_rs::Element::as_string(&self) -> core::option::Option<&str>
+pub fn ion_rs::Element::as_struct(&self) -> core::option::Option<&ion_rs::Struct>
+pub fn ion_rs::Element::as_symbol(&self) -> core::option::Option<&ion_rs::Symbol>
+pub fn ion_rs::Element::as_text(&self) -> core::option::Option<&str>
+pub fn ion_rs::Element::as_timestamp(&self) -> core::option::Option<ion_rs::Timestamp>
+pub fn ion_rs::Element::as_usize(&self) -> core::option::Option<usize>
+pub fn ion_rs::Element::blob<A: core::convert::AsRef<[u8]>>(A) -> ion_rs::Element
+pub fn ion_rs::Element::boolean(bool) -> ion_rs::Element
+pub fn ion_rs::Element::clob<A: core::convert::AsRef<[u8]>>(A) -> ion_rs::Element
+pub fn ion_rs::Element::decimal(ion_rs::Decimal) -> ion_rs::Element
+pub fn ion_rs::Element::encode_as<E: ion_rs::lazy::encoding::Encoding, C: core::convert::Into<ion_rs::WriteConfig<E>>>(&self, C) -> ion_rs::IonResult<<E as ion_rs::lazy::encoding::Encoding>::Output>
+pub fn ion_rs::Element::encode_to<E: ion_rs::lazy::encoding::Encoding, C: core::convert::Into<ion_rs::WriteConfig<E>>, W: std::io::Write>(&self, W, C) -> ion_rs::IonResult<W>
+pub fn ion_rs::Element::expect_blob(&self) -> ion_rs::IonResult<&[u8]>
+pub fn ion_rs::Element::expect_bool(&self) -> ion_rs::IonResult<bool>
+pub fn ion_rs::Element::expect_clob(&self) -> ion_rs::IonResult<&[u8]>
+pub fn ion_rs::Element::expect_decimal(&self) -> ion_rs::IonResult<ion_rs::Decimal>
+pub fn ion_rs::Element::expect_float(&self) -> ion_rs::IonResult<f64>
+pub fn ion_rs::Element::expect_i64(&self) -> ion_rs::IonResult<i64>
+pub fn ion_rs::Element::expect_int(&self) -> ion_rs::IonResult<&ion_rs::Int>
+pub fn ion_rs::Element::expect_list(&self) -> ion_rs::IonResult<&ion_rs::Sequence>
+pub fn ion_rs::Element::expect_lob(&self) -> ion_rs::IonResult<&[u8]>
+pub fn ion_rs::Element::expect_sequence(&self) -> ion_rs::IonResult<&ion_rs::Sequence>
+pub fn ion_rs::Element::expect_sexp(&self) -> ion_rs::IonResult<&ion_rs::Sequence>
+pub fn ion_rs::Element::expect_string(&self) -> ion_rs::IonResult<&str>
+pub fn ion_rs::Element::expect_struct(&self) -> ion_rs::IonResult<&ion_rs::Struct>
+pub fn ion_rs::Element::expect_symbol(&self) -> ion_rs::IonResult<&ion_rs::Symbol>
+pub fn ion_rs::Element::expect_text(&self) -> ion_rs::IonResult<&str>
+pub fn ion_rs::Element::expect_timestamp(&self) -> ion_rs::IonResult<ion_rs::Timestamp>
+pub fn ion_rs::Element::expect_usize(&self) -> ion_rs::IonResult<usize>
+pub fn ion_rs::Element::float(f64) -> ion_rs::Element
+pub fn ion_rs::Element::int<I: core::convert::Into<ion_rs::Int>>(I) -> ion_rs::Element
+pub fn ion_rs::Element::into_annotations(self) -> ion_rs::Annotations
+pub fn ion_rs::Element::into_parts(self) -> (ion_rs::Annotations, ion_rs::Value)
+pub fn ion_rs::Element::into_value(self) -> ion_rs::Value
+pub fn ion_rs::Element::ion_type(&self) -> ion_rs::IonType
+pub fn ion_rs::Element::is_null(&self) -> bool
+pub fn ion_rs::Element::iter<'a, I: ion_rs::IonInput + 'a>(I) -> ion_rs::IonResult<impl core::iter::traits::iterator::Iterator<Item = ion_rs::IonResult<ion_rs::Element>> + 'a>
+pub fn ion_rs::Element::location(&self) -> &ion_rs::SourceLocation
+pub fn ion_rs::Element::null(ion_rs::IonType) -> ion_rs::Element
+pub fn ion_rs::Element::read_all<A: core::convert::AsRef<[u8]>>(A) -> ion_rs::IonResult<ion_rs::Sequence>
+pub fn ion_rs::Element::read_first<A: core::convert::AsRef<[u8]>>(A) -> ion_rs::IonResult<core::option::Option<ion_rs::Element>>
+pub fn ion_rs::Element::read_one<A: core::convert::AsRef<[u8]>>(A) -> ion_rs::IonResult<ion_rs::Element>
+pub fn ion_rs::Element::sequence_builder() -> ion_rs::SequenceBuilder
+pub fn ion_rs::Element::string<I: core::convert::Into<ion_rs::Str>>(I) -> ion_rs::Element
+pub fn ion_rs::Element::struct_builder() -> ion_rs::StructBuilder
+pub fn ion_rs::Element::symbol<I: core::convert::Into<ion_rs::Symbol>>(I) -> ion_rs::Element
+pub fn ion_rs::Element::timestamp(ion_rs::Timestamp) -> ion_rs::Element
+pub fn ion_rs::Element::try_into_blob(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Bytes>
+pub fn ion_rs::Element::try_into_bool(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, bool>
+pub fn ion_rs::Element::try_into_clob(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Bytes>
+pub fn ion_rs::Element::try_into_decimal(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Decimal>
+pub fn ion_rs::Element::try_into_float(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, f64>
+pub fn ion_rs::Element::try_into_i64(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, i64>
+pub fn ion_rs::Element::try_into_int(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Int>
+pub fn ion_rs::Element::try_into_list(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Sequence>
+pub fn ion_rs::Element::try_into_lob(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Bytes>
+pub fn ion_rs::Element::try_into_sequence(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Sequence>
+pub fn ion_rs::Element::try_into_sexp(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Sequence>
+pub fn ion_rs::Element::try_into_string(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Str>
+pub fn ion_rs::Element::try_into_struct(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Struct>
+pub fn ion_rs::Element::try_into_symbol(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Symbol>
+pub fn ion_rs::Element::try_into_text(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, alloc::string::String>
+pub fn ion_rs::Element::try_into_timestamp(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Timestamp>
+pub fn ion_rs::Element::try_into_usize(self) -> ion_rs::ConversionOperationResult<ion_rs::Element, usize>
+pub fn ion_rs::Element::value(&self) -> &ion_rs::Value
+pub fn ion_rs::Element::with_annotations<I: ion_rs::IntoAnnotations>(self, I) -> Self
+impl core::cmp::PartialEq for ion_rs::Element
+pub fn ion_rs::Element::eq(&self, &Self) -> bool
+impl core::convert::AsRef<ion_rs::Element> for ion_rs::Element
+pub fn ion_rs::Element::as_ref(&self) -> &ion_rs::Element
+impl core::convert::TryFrom<ion_rs::Element> for alloc::string::String
+pub type alloc::string::String::Error = ion_rs::ConversionOperationError<ion_rs::Element, alloc::string::String>
+pub fn alloc::string::String::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, alloc::string::String>
+impl core::convert::TryFrom<ion_rs::Element> for bool
+pub type bool::Error = ion_rs::ConversionOperationError<ion_rs::Element, bool>
+pub fn bool::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, bool>
+impl core::convert::TryFrom<ion_rs::Element> for f64
+pub type f64::Error = ion_rs::ConversionOperationError<ion_rs::Element, f64>
+pub fn f64::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, f64>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Bytes
+pub type ion_rs::Bytes::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Bytes>
+pub fn ion_rs::Bytes::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Bytes>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Decimal
+pub type ion_rs::Decimal::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Decimal>
+pub fn ion_rs::Decimal::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Decimal>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Sequence
+pub type ion_rs::Sequence::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Sequence>
+pub fn ion_rs::Sequence::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Sequence>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Str
+pub type ion_rs::Str::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Str>
+pub fn ion_rs::Str::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Str>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Struct
+pub type ion_rs::Struct::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Struct>
+pub fn ion_rs::Struct::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Struct>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Symbol
+pub type ion_rs::Symbol::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Symbol>
+pub fn ion_rs::Symbol::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Symbol>
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Timestamp
+pub type ion_rs::Timestamp::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Timestamp>
+pub fn ion_rs::Timestamp::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Timestamp>
+impl core::fmt::Debug for ion_rs::Element
+pub fn ion_rs::Element::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for ion_rs::Element
+pub fn ion_rs::Element::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::iter::traits::collect::FromIterator<ion_rs::Element> for ion_rs::List
+pub fn ion_rs::List::from_iter<T: core::iter::traits::collect::IntoIterator<Item = ion_rs::Element>>(T) -> Self
+impl core::iter::traits::collect::FromIterator<ion_rs::Element> for ion_rs::SExp
+pub fn ion_rs::SExp::from_iter<T: core::iter::traits::collect::IntoIterator<Item = ion_rs::Element>>(T) -> Self
+impl core::iter::traits::collect::FromIterator<ion_rs::Element> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from_iter<T: core::iter::traits::collect::IntoIterator<Item = ion_rs::Element>>(T) -> Self
+impl<'a> core::convert::From<&'a ion_rs::Element> for ion_rs::Element
+pub fn ion_rs::Element::from(&'a ion_rs::Element) -> Self
+impl<T> core::convert::From<T> for ion_rs::Element where T: core::convert::Into<ion_rs::Value>
+pub fn ion_rs::Element::from(T) -> Self
+pub struct ion_rs::Int
+impl ion_rs::Int
+pub const ion_rs::Int::ZERO: ion_rs::Int
+pub fn ion_rs::Int::as_i128(&self) -> core::option::Option<i128>
+pub fn ion_rs::Int::as_i64(&self) -> core::option::Option<i64>
+pub fn ion_rs::Int::as_u32(&self) -> core::option::Option<u32>
+pub fn ion_rs::Int::as_u64(&self) -> core::option::Option<u64>
+pub fn ion_rs::Int::as_usize(&self) -> core::option::Option<usize>
+pub fn ion_rs::Int::expect_i128(&self) -> ion_rs::IonResult<i128>
+pub fn ion_rs::Int::expect_i64(&self) -> ion_rs::IonResult<i64>
+pub fn ion_rs::Int::expect_u32(&self) -> ion_rs::IonResult<u32>
+pub fn ion_rs::Int::expect_u64(&self) -> ion_rs::IonResult<u64>
+pub fn ion_rs::Int::expect_usize(&self) -> ion_rs::IonResult<usize>
+pub fn ion_rs::Int::from_le_signed_bytes(&[u8]) -> ion_rs::Int
+pub fn ion_rs::Int::is_negative(&self) -> bool
+pub fn ion_rs::Int::is_zero(&self) -> bool
+pub fn ion_rs::Int::neg(self) -> Self
+pub fn ion_rs::Int::to_le_signed_bytes(&self) -> alloc::vec::Vec<u8>
+pub fn ion_rs::Int::unsigned_abs(&self) -> ion_rs::UInt
+impl core::convert::From<&ion_rs::Int> for ion_rs::Int
+pub fn ion_rs::Int::from(&ion_rs::Int) -> Self
+impl core::convert::From<&ion_rs::UInt> for ion_rs::Int
+pub fn ion_rs::Int::from(&ion_rs::UInt) -> Self
+impl core::convert::From<ion_rs::Int> for ion_rs::Decimal
+pub fn ion_rs::Decimal::from(ion_rs::Int) -> Self
+impl core::convert::From<ion_rs::Int> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(ion_rs::Int) -> ion_rs::decimal::Coefficient
+impl core::convert::TryFrom<&ion_rs::Int> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(&ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::decimal::Coefficient> for ion_rs::Int
+pub type ion_rs::Int::Error = ion_rs::IonError
+pub fn ion_rs::Int::try_from(&ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for i128
+pub type i128::Error = ion_rs::IonError
+pub fn i128::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for i16
+pub type i16::Error = ion_rs::IonError
+pub fn i16::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for i32
+pub type i32::Error = ion_rs::IonError
+pub fn i32::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for i64
+pub type i64::Error = ion_rs::IonError
+pub fn i64::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for i8
+pub type i8::Error = ion_rs::IonError
+pub fn i8::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for isize
+pub type isize::Error = ion_rs::IonError
+pub fn isize::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for u128
+pub type u128::Error = ion_rs::IonError
+pub fn u128::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for u16
+pub type u16::Error = ion_rs::IonError
+pub fn u16::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for u32
+pub type u32::Error = ion_rs::IonError
+pub fn u32::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for u64
+pub type u64::Error = ion_rs::IonError
+pub fn u64::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for u8
+pub type u8::Error = ion_rs::IonError
+pub fn u8::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for usize
+pub type usize::Error = ion_rs::IonError
+pub fn usize::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::decimal::Coefficient> for ion_rs::Int
+pub type ion_rs::Int::Error = ion_rs::IonError
+pub fn ion_rs::Int::try_from(ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Display for ion_rs::Int
+pub fn ion_rs::Int::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl<T> core::convert::From<T> for ion_rs::Int where T: core::convert::Into<int_data::IntData>
+pub fn ion_rs::Int::from(T) -> Self
+pub struct ion_rs::IonData<T>(_)
+impl<T: ion_rs::ion_data::ion_eq::IonEq> ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::eq<R: core::ops::deref::Deref<Target = T>>(R, R) -> bool
+pub fn ion_rs::IonData<T>::into_inner(self) -> T
+impl<T: IonDataHash> core::hash::Hash for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::hash<H: core::hash::Hasher>(&self, &mut H)
+impl<T: core::fmt::Display> core::fmt::Display for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T: ion_rs::ion_data::ion_eq::IonEq + IonDataOrd> core::cmp::Ord for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::cmp(&self, &Self) -> core::cmp::Ordering
+impl<T: ion_rs::ion_data::ion_eq::IonEq + IonDataOrd> core::cmp::PartialOrd for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
+impl<T: ion_rs::ion_data::ion_eq::IonEq> core::cmp::Eq for ion_rs::IonData<T>
+impl<T: ion_rs::ion_data::ion_eq::IonEq> core::cmp::PartialEq for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::eq(&self, &Self) -> bool
+impl<T: ion_rs::ion_data::ion_eq::IonEq> core::convert::AsRef<T> for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::as_ref(&self) -> &T
+impl<T: ion_rs::ion_data::ion_eq::IonEq> core::convert::From<T> for ion_rs::IonData<T>
+pub fn ion_rs::IonData<T>::from(T) -> Self
+pub struct ion_rs::List(pub ion_rs::Sequence)
+impl ion_rs::List
+pub fn ion_rs::List::clone_builder(&self) -> ion_rs::SequenceBuilder
+pub fn ion_rs::List::elements(&self) -> ion_rs::element::iterators::SequenceIterator<'_>
+pub fn ion_rs::List::get(&self, usize) -> core::option::Option<&ion_rs::Element>
+pub fn ion_rs::List::is_empty(&self) -> bool
+pub fn ion_rs::List::len(&self) -> usize
+impl ion_rs::List
+pub fn ion_rs::List::new(impl core::convert::Into<ion_rs::Sequence>) -> Self
+impl core::convert::AsRef<[ion_rs::Element]> for ion_rs::List
+pub fn ion_rs::List::as_ref(&self) -> &[ion_rs::Element]
+impl core::convert::AsRef<ion_rs::Sequence> for ion_rs::List
+pub fn ion_rs::List::as_ref(&self) -> &ion_rs::Sequence
+impl core::convert::From<alloc::vec::Vec<ion_rs::Element>> for ion_rs::List
+pub fn ion_rs::List::from(alloc::vec::Vec<ion_rs::Element>) -> Self
+impl core::convert::From<ion_rs::List> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from(ion_rs::List) -> Self
+impl core::convert::From<ion_rs::List> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::List) -> Self
+impl core::convert::From<ion_rs::Sequence> for ion_rs::List
+pub fn ion_rs::List::from(ion_rs::Sequence) -> Self
+impl core::fmt::Display for ion_rs::List
+pub fn ion_rs::List::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::iter::traits::collect::FromIterator<ion_rs::Element> for ion_rs::List
+pub fn ion_rs::List::from_iter<T: core::iter::traits::collect::IntoIterator<Item = ion_rs::Element>>(T) -> Self
+impl<'a> core::iter::traits::collect::IntoIterator for &'a ion_rs::List
+pub type &'a ion_rs::List::IntoIter = ion_rs::element::iterators::SequenceIterator<'a>
+pub type &'a ion_rs::List::Item = &'a ion_rs::Element
+pub fn &'a ion_rs::List::into_iter(self) -> Self::IntoIter
+pub struct ion_rs::Null(pub ion_rs::IonType)
+pub struct ion_rs::SExp(pub ion_rs::Sequence)
+impl ion_rs::SExp
+pub fn ion_rs::SExp::clone_builder(&self) -> ion_rs::SequenceBuilder
+pub fn ion_rs::SExp::elements(&self) -> ion_rs::element::iterators::SequenceIterator<'_>
+pub fn ion_rs::SExp::get(&self, usize) -> core::option::Option<&ion_rs::Element>
+pub fn ion_rs::SExp::is_empty(&self) -> bool
+pub fn ion_rs::SExp::len(&self) -> usize
+impl ion_rs::SExp
+pub fn ion_rs::SExp::new(impl core::convert::Into<ion_rs::Sequence>) -> Self
+impl core::convert::AsRef<[ion_rs::Element]> for ion_rs::SExp
+pub fn ion_rs::SExp::as_ref(&self) -> &[ion_rs::Element]
+impl core::convert::AsRef<ion_rs::Sequence> for ion_rs::SExp
+pub fn ion_rs::SExp::as_ref(&self) -> &ion_rs::Sequence
+impl core::convert::From<alloc::vec::Vec<ion_rs::Element>> for ion_rs::SExp
+pub fn ion_rs::SExp::from(alloc::vec::Vec<ion_rs::Element>) -> Self
+impl core::convert::From<ion_rs::SExp> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from(ion_rs::SExp) -> Self
+impl core::convert::From<ion_rs::SExp> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::SExp) -> Self
+impl core::convert::From<ion_rs::Sequence> for ion_rs::SExp
+pub fn ion_rs::SExp::from(ion_rs::Sequence) -> Self
+impl core::fmt::Display for ion_rs::SExp
+pub fn ion_rs::SExp::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::iter::traits::collect::FromIterator<ion_rs::Element> for ion_rs::SExp
+pub fn ion_rs::SExp::from_iter<T: core::iter::traits::collect::IntoIterator<Item = ion_rs::Element>>(T) -> Self
+impl<'a> core::iter::traits::collect::IntoIterator for &'a ion_rs::SExp
+pub type &'a ion_rs::SExp::IntoIter = ion_rs::element::iterators::SequenceIterator<'a>
+pub type &'a ion_rs::SExp::Item = &'a ion_rs::Element
+pub fn &'a ion_rs::SExp::into_iter(self) -> Self::IntoIter
+pub struct ion_rs::Sequence
+impl ion_rs::Sequence
+pub fn ion_rs::Sequence::builder() -> ion_rs::SequenceBuilder
+pub fn ion_rs::Sequence::clone_builder(&self) -> ion_rs::SequenceBuilder
+pub fn ion_rs::Sequence::elements(&self) -> ion_rs::element::iterators::SequenceIterator<'_>
+pub fn ion_rs::Sequence::encode_as<E: ion_rs::lazy::encoding::Encoding, C: core::convert::Into<ion_rs::WriteConfig<E>>>(&self, C) -> ion_rs::IonResult<<E as ion_rs::lazy::encoding::Encoding>::Output>
+pub fn ion_rs::Sequence::encode_to<E: ion_rs::lazy::encoding::Encoding, C: core::convert::Into<ion_rs::WriteConfig<E>>, W: std::io::Write>(&self, W, C) -> ion_rs::IonResult<W>
+pub fn ion_rs::Sequence::get(&self, usize) -> core::option::Option<&ion_rs::Element>
+pub fn ion_rs::Sequence::is_empty(&self) -> bool
+pub fn ion_rs::Sequence::iter(&self) -> ion_rs::element::iterators::SequenceIterator<'_>
+pub fn ion_rs::Sequence::len(&self) -> usize
+pub fn ion_rs::Sequence::new<E: core::convert::Into<ion_rs::Element>, I: core::iter::traits::collect::IntoIterator<Item = E>>(I) -> ion_rs::Sequence
+impl core::convert::AsRef<[ion_rs::Element]> for ion_rs::Sequence
+pub fn ion_rs::Sequence::as_ref(&self) -> &[ion_rs::Element]
+impl core::convert::AsRef<ion_rs::Sequence> for ion_rs::List
+pub fn ion_rs::List::as_ref(&self) -> &ion_rs::Sequence
+impl core::convert::AsRef<ion_rs::Sequence> for ion_rs::SExp
+pub fn ion_rs::SExp::as_ref(&self) -> &ion_rs::Sequence
+impl core::convert::AsRef<ion_rs::Sequence> for ion_rs::Sequence
+pub fn ion_rs::Sequence::as_ref(&self) -> &ion_rs::Sequence
+impl core::convert::From<alloc::vec::Vec<ion_rs::Element>> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from(alloc::vec::Vec<ion_rs::Element>) -> Self
+impl core::convert::From<ion_rs::List> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from(ion_rs::List) -> Self
+impl core::convert::From<ion_rs::SExp> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from(ion_rs::SExp) -> Self
+impl core::convert::From<ion_rs::Sequence> for alloc::vec::Vec<ion_rs::Element>
+pub fn alloc::vec::Vec<ion_rs::Element>::from(ion_rs::Sequence) -> Self
+impl core::convert::From<ion_rs::Sequence> for ion_rs::List
+pub fn ion_rs::List::from(ion_rs::Sequence) -> Self
+impl core::convert::From<ion_rs::Sequence> for ion_rs::SExp
+pub fn ion_rs::SExp::from(ion_rs::Sequence) -> Self
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Sequence
+pub type ion_rs::Sequence::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Sequence>
+pub fn ion_rs::Sequence::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Sequence>
+impl core::fmt::Debug for ion_rs::Sequence
+pub fn ion_rs::Sequence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::iter::traits::collect::FromIterator<ion_rs::Element> for ion_rs::Sequence
+pub fn ion_rs::Sequence::from_iter<T: core::iter::traits::collect::IntoIterator<Item = ion_rs::Element>>(T) -> Self
+impl core::iter::traits::collect::IntoIterator for ion_rs::Sequence
+pub type ion_rs::Sequence::IntoIter = ion_rs::element::sequence::OwnedSequenceIterator
+pub type ion_rs::Sequence::Item = ion_rs::Element
+pub fn ion_rs::Sequence::into_iter(self) -> Self::IntoIter
+impl<'a> core::iter::traits::collect::IntoIterator for &'a ion_rs::Sequence
+pub type &'a ion_rs::Sequence::IntoIter = ion_rs::element::iterators::SequenceIterator<'a>
+pub type &'a ion_rs::Sequence::Item = &'a ion_rs::Element
+pub fn &'a ion_rs::Sequence::into_iter(self) -> Self::IntoIter
+pub struct ion_rs::SequenceBuilder
+impl ion_rs::SequenceBuilder
+pub fn ion_rs::SequenceBuilder::build(self) -> ion_rs::Sequence
+pub fn ion_rs::SequenceBuilder::build_list(self) -> ion_rs::List
+pub fn ion_rs::SequenceBuilder::build_sexp(self) -> ion_rs::SExp
+pub fn ion_rs::SequenceBuilder::push<E: core::convert::Into<ion_rs::Element>>(self, E) -> Self
+pub fn ion_rs::SequenceBuilder::push_all<E: core::convert::Into<ion_rs::Element>, I: core::iter::traits::collect::IntoIterator<Item = E>>(self, I) -> Self
+pub fn ion_rs::SequenceBuilder::remove(self, usize) -> Self
+pub struct ion_rs::SourceLocation
+impl ion_rs::SourceLocation
+pub fn ion_rs::SourceLocation::column(&self) -> core::option::Option<usize>
+pub fn ion_rs::SourceLocation::row(&self) -> core::option::Option<usize>
+pub fn ion_rs::SourceLocation::row_column(&self) -> core::option::Option<(usize, usize)>
+pub struct ion_rs::Str
+impl ion_rs::Str
+pub fn ion_rs::Str::is_empty(&self) -> bool
+pub fn ion_rs::Str::len(&self) -> usize
+pub fn ion_rs::Str::text(&self) -> &str
+impl core::cmp::PartialEq<ion_rs::Str> for &str
+pub fn &str::eq(&self, &ion_rs::Str) -> bool
+impl core::cmp::PartialEq<ion_rs::Str> for alloc::string::String
+pub fn alloc::string::String::eq(&self, &ion_rs::Str) -> bool
+impl core::convert::AsRef<str> for ion_rs::Str
+pub fn ion_rs::Str::as_ref(&self) -> &str
+impl core::convert::From<&str> for ion_rs::Str
+pub fn ion_rs::Str::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for ion_rs::Str
+pub fn ion_rs::Str::from(alloc::string::String) -> Self
+impl core::convert::From<ion_rs::Str> for alloc::string::String
+pub fn alloc::string::String::from(ion_rs::Str) -> Self
+impl core::convert::From<ion_rs::Str> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Str) -> Self
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Str
+pub type ion_rs::Str::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Str>
+pub fn ion_rs::Str::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Str>
+impl core::fmt::Display for ion_rs::Str
+pub fn ion_rs::Str::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<S> core::cmp::PartialEq<S> for ion_rs::Str where S: core::convert::AsRef<str>
+pub fn ion_rs::Str::eq(&self, &S) -> bool
+pub struct ion_rs::Struct
+impl ion_rs::Struct
+pub fn ion_rs::Struct::builder() -> ion_rs::StructBuilder
+pub fn ion_rs::Struct::clone_builder(&self) -> ion_rs::StructBuilder
+pub fn ion_rs::Struct::fields(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&ion_rs::Symbol, &ion_rs::Element)>
+pub fn ion_rs::Struct::get<A: ion_rs::symbol_ref::AsSymbolRef>(&self, A) -> core::option::Option<&ion_rs::Element>
+pub fn ion_rs::Struct::get_all<A: ion_rs::symbol_ref::AsSymbolRef>(&self, A) -> impl core::iter::traits::iterator::Iterator<Item = &ion_rs::Element>
+pub fn ion_rs::Struct::is_empty(&self) -> bool
+pub fn ion_rs::Struct::iter(&self) -> ion_rs::types::struct::FieldIterator<'_>
+pub fn ion_rs::Struct::len(&self) -> usize
+impl core::cmp::PartialEq for ion_rs::Struct
+pub fn ion_rs::Struct::eq(&self, &Self) -> bool
+impl core::convert::From<ion_rs::Struct> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Struct) -> Self
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Struct
+pub type ion_rs::Struct::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Struct>
+pub fn ion_rs::Struct::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Struct>
+impl core::fmt::Display for ion_rs::Struct
+pub fn ion_rs::Struct::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::iter::traits::collect::IntoIterator for ion_rs::Struct
+pub type ion_rs::Struct::IntoIter = ion_rs::types::struct::OwnedFieldIterator
+pub type ion_rs::Struct::Item = (ion_rs::Symbol, ion_rs::Element)
+pub fn ion_rs::Struct::into_iter(self) -> Self::IntoIter
+impl<'a> core::iter::traits::collect::IntoIterator for &'a ion_rs::Struct
+pub type &'a ion_rs::Struct::IntoIter = ion_rs::types::struct::FieldIterator<'a>
+pub type &'a ion_rs::Struct::Item = (&'a ion_rs::Symbol, &'a ion_rs::Element)
+pub fn &'a ion_rs::Struct::into_iter(self) -> Self::IntoIter
+impl<K, V> core::iter::traits::collect::FromIterator<(K, V)> for ion_rs::Struct where K: core::convert::Into<ion_rs::Symbol>, V: core::convert::Into<ion_rs::Element>
+pub fn ion_rs::Struct::from_iter<I: core::iter::traits::collect::IntoIterator<Item = (K, V)>>(I) -> Self
+pub struct ion_rs::StructBuilder
+impl ion_rs::StructBuilder
+pub fn ion_rs::StructBuilder::build(self) -> ion_rs::Struct
+pub fn ion_rs::StructBuilder::remove_field<A: core::convert::AsRef<str>>(self, A) -> Self
+pub fn ion_rs::StructBuilder::with_field<S: core::convert::Into<ion_rs::Symbol>, E: core::convert::Into<ion_rs::Element>>(self, S, E) -> Self
+pub fn ion_rs::StructBuilder::with_fields<S, E, I>(self, I) -> Self where S: core::convert::Into<ion_rs::Symbol>, E: core::convert::Into<ion_rs::Element>, I: core::iter::traits::collect::IntoIterator<Item = (S, E)>
+pub struct ion_rs::Symbol
+impl ion_rs::Symbol
+pub fn ion_rs::Symbol::expect_text(&self) -> ion_rs::IonResult<&str>
+pub fn ion_rs::Symbol::owned<I: core::convert::Into<alloc::string::String>>(I) -> ion_rs::Symbol
+pub fn ion_rs::Symbol::shared(alloc::sync::Arc<str>) -> ion_rs::Symbol
+pub const fn ion_rs::Symbol::static_text(&'static str) -> ion_rs::Symbol
+pub fn ion_rs::Symbol::text(&self) -> core::option::Option<&str>
+pub fn ion_rs::Symbol::unknown_text() -> ion_rs::Symbol
+impl core::borrow::Borrow<str> for ion_rs::Symbol
+pub fn ion_rs::Symbol::borrow(&self) -> &str
+impl core::cmp::PartialEq<ion_rs::Symbol> for &str
+pub fn &str::eq(&self, &ion_rs::Symbol) -> bool
+impl core::cmp::PartialEq<ion_rs::Symbol> for alloc::string::String
+pub fn alloc::string::String::eq(&self, &ion_rs::Symbol) -> bool
+impl core::convert::From<&alloc::string::String> for ion_rs::Symbol
+pub fn ion_rs::Symbol::from(&alloc::string::String) -> Self
+impl core::convert::From<&str> for ion_rs::Symbol
+pub fn ion_rs::Symbol::from(&str) -> Self
+impl core::convert::From<alloc::string::String> for ion_rs::Symbol
+pub fn ion_rs::Symbol::from(alloc::string::String) -> Self
+impl core::convert::From<ion_rs::Symbol> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Symbol) -> Self
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Symbol
+pub type ion_rs::Symbol::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Symbol>
+pub fn ion_rs::Symbol::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Symbol>
+impl core::fmt::Display for ion_rs::Symbol
+pub fn ion_rs::Symbol::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::convert::From<&'a ion_rs::Symbol> for ion_rs::Symbol
+pub fn ion_rs::Symbol::from(&'a ion_rs::Symbol) -> Self
+impl<'a> core::convert::From<&'a ion_rs::Symbol> for ion_rs::SymbolRef<'a>
+pub fn ion_rs::SymbolRef<'a>::from(&'a ion_rs::Symbol) -> Self
+impl<'a> core::convert::From<ion_rs::SymbolRef<'a>> for ion_rs::Symbol
+pub fn ion_rs::Symbol::from(ion_rs::SymbolRef<'a>) -> Self
+impl<A: core::convert::AsRef<str>> core::cmp::PartialEq<A> for ion_rs::Symbol
+pub fn ion_rs::Symbol::eq(&self, &A) -> bool
+pub struct ion_rs::SymbolRef<'a>
+impl<'a> ion_rs::SymbolRef<'a>
+pub fn ion_rs::SymbolRef<'a>::expect_text(&self) -> ion_rs::IonResult<&'a str>
+pub fn ion_rs::SymbolRef<'a>::text(&self) -> core::option::Option<&'a str>
+pub fn ion_rs::SymbolRef<'a>::to_owned(self) -> ion_rs::Symbol
+pub fn ion_rs::SymbolRef<'a>::with_text(&'a str) -> ion_rs::SymbolRef<'a>
+pub fn ion_rs::SymbolRef<'a>::with_unknown_text() -> Self
+impl core::borrow::Borrow<str> for ion_rs::SymbolRef<'_>
+pub fn ion_rs::SymbolRef<'_>::borrow(&self) -> &str
+impl core::convert::From<ion_rs::SymbolRef<'_>> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::SymbolRef<'_>) -> Self
+impl core::fmt::Debug for ion_rs::SymbolRef<'_>
+pub fn ion_rs::SymbolRef<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for ion_rs::SymbolRef<'_>
+pub fn ion_rs::SymbolRef<'_>::hash<H: core::hash::Hasher>(&self, &mut H)
+impl<'a> core::convert::From<&'a ion_rs::Symbol> for ion_rs::SymbolRef<'a>
+pub fn ion_rs::SymbolRef<'a>::from(&'a ion_rs::Symbol) -> Self
+impl<'a> core::convert::From<&'a str> for ion_rs::SymbolRef<'a>
+pub fn ion_rs::SymbolRef<'a>::from(&'a str) -> Self
+impl<'a> core::convert::From<ion_rs::SymbolRef<'a>> for ion_rs::Symbol
+pub fn ion_rs::Symbol::from(ion_rs::SymbolRef<'a>) -> Self
+impl<A> core::cmp::PartialEq<A> for ion_rs::SymbolRef<'_> where A: ion_rs::symbol_ref::AsSymbolRef
+pub fn ion_rs::SymbolRef<'_>::eq(&self, &A) -> bool
+pub struct ion_rs::Timestamp
+impl ion_rs::Timestamp
+pub fn ion_rs::Timestamp::day(&self) -> u32
+pub fn ion_rs::Timestamp::fractional_seconds_scale(&self) -> core::option::Option<i64>
+pub fn ion_rs::Timestamp::hour(&self) -> u32
+pub fn ion_rs::Timestamp::microseconds(&self) -> u32
+pub fn ion_rs::Timestamp::milliseconds(&self) -> u32
+pub fn ion_rs::Timestamp::minute(&self) -> u32
+pub fn ion_rs::Timestamp::month(&self) -> u32
+pub fn ion_rs::Timestamp::nanoseconds(&self) -> u32
+pub fn ion_rs::Timestamp::offset(&self) -> core::option::Option<i32>
+pub fn ion_rs::Timestamp::precision(&self) -> ion_rs::TimestampPrecision
+pub fn ion_rs::Timestamp::second(&self) -> u32
+pub fn ion_rs::Timestamp::to_utc(&self) -> ion_rs::Timestamp
+pub fn ion_rs::Timestamp::with_year(u32) -> ion_rs::types::timestamp::TimestampBuilder<ion_rs::types::timestamp::HasYear>
+pub fn ion_rs::Timestamp::with_ymd(u32, u32, u32) -> ion_rs::types::timestamp::TimestampBuilder<ion_rs::types::timestamp::HasDay>
+pub fn ion_rs::Timestamp::year(&self) -> u32
+impl core::cmp::Eq for ion_rs::Timestamp
+impl core::cmp::Ord for ion_rs::Timestamp
+pub fn ion_rs::Timestamp::cmp(&self, &Self) -> core::cmp::Ordering
+impl core::cmp::PartialEq for ion_rs::Timestamp
+pub fn ion_rs::Timestamp::eq(&self, &Self) -> bool
+impl core::cmp::PartialOrd for ion_rs::Timestamp
+pub fn ion_rs::Timestamp::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<ion_rs::Timestamp> for ion_rs::Value
+pub fn ion_rs::Value::from(ion_rs::Timestamp) -> Self
+impl core::convert::TryFrom<ion_rs::Element> for ion_rs::Timestamp
+pub type ion_rs::Timestamp::Error = ion_rs::ConversionOperationError<ion_rs::Element, ion_rs::Timestamp>
+pub fn ion_rs::Timestamp::try_from(ion_rs::Element) -> ion_rs::ConversionOperationResult<ion_rs::Element, ion_rs::Timestamp>
+impl core::fmt::Display for ion_rs::Timestamp
+pub fn ion_rs::Timestamp::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+pub struct ion_rs::UInt
+impl ion_rs::UInt
+pub const ion_rs::UInt::ZERO: ion_rs::UInt
+pub fn ion_rs::UInt::as_u128(&self) -> core::option::Option<u128>
+pub fn ion_rs::UInt::as_u64(&self) -> core::option::Option<u64>
+pub fn ion_rs::UInt::as_usize(&self) -> core::option::Option<usize>
+pub fn ion_rs::UInt::expect_u128(&self) -> ion_rs::IonResult<u128>
+pub fn ion_rs::UInt::expect_u64(&self) -> ion_rs::IonResult<u64>
+pub fn ion_rs::UInt::expect_usize(&self) -> ion_rs::IonResult<usize>
+pub fn ion_rs::UInt::from_le_bytes(&[u8]) -> ion_rs::UInt
+pub fn ion_rs::UInt::is_zero(&self) -> bool
+pub fn ion_rs::UInt::number_of_decimal_digits(&self) -> u32
+pub fn ion_rs::UInt::to_le_bytes(&self) -> alloc::vec::Vec<u8>
+impl core::convert::From<&ion_rs::UInt> for ion_rs::Int
+pub fn ion_rs::Int::from(&ion_rs::UInt) -> Self
+impl core::convert::From<&ion_rs::UInt> for ion_rs::UInt
+pub fn ion_rs::UInt::from(&ion_rs::UInt) -> Self
+impl core::convert::From<ion_rs::UInt> for ion_rs::decimal::Coefficient
+pub fn ion_rs::decimal::Coefficient::from(ion_rs::UInt) -> ion_rs::decimal::Coefficient
+impl core::convert::From<u128> for ion_rs::UInt
+pub fn ion_rs::UInt::from(u128) -> ion_rs::UInt
+impl core::convert::From<u16> for ion_rs::UInt
+pub fn ion_rs::UInt::from(u16) -> ion_rs::UInt
+impl core::convert::From<u32> for ion_rs::UInt
+pub fn ion_rs::UInt::from(u32) -> ion_rs::UInt
+impl core::convert::From<u64> for ion_rs::UInt
+pub fn ion_rs::UInt::from(u64) -> ion_rs::UInt
+impl core::convert::From<u8> for ion_rs::UInt
+pub fn ion_rs::UInt::from(u8) -> ion_rs::UInt
+impl core::convert::From<usize> for ion_rs::UInt
+pub fn ion_rs::UInt::from(usize) -> Self
+impl core::convert::TryFrom<&ion_rs::Int> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(&ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for i128
+pub type i128::Error = ion_rs::IonError
+pub fn i128::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for i16
+pub type i16::Error = ion_rs::IonError
+pub fn i16::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for i32
+pub type i32::Error = ion_rs::IonError
+pub fn i32::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for i64
+pub type i64::Error = ion_rs::IonError
+pub fn i64::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for i8
+pub type i8::Error = ion_rs::IonError
+pub fn i8::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for isize
+pub type isize::Error = ion_rs::IonError
+pub fn isize::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for u128
+pub type u128::Error = ion_rs::IonError
+pub fn u128::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for u16
+pub type u16::Error = ion_rs::IonError
+pub fn u16::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for u32
+pub type u32::Error = ion_rs::IonError
+pub fn u32::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for u64
+pub type u64::Error = ion_rs::IonError
+pub fn u64::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for u8
+pub type u8::Error = ion_rs::IonError
+pub fn u8::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::UInt> for usize
+pub type usize::Error = ion_rs::IonError
+pub fn usize::try_from(&ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<&ion_rs::decimal::Coefficient> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(&ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<i128> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(i128) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<i16> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(i16) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<i32> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(i32) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<i64> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(i64) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<i8> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(i8) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::Int> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(ion_rs::Int) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::UInt> for u128
+pub type u128::Error = ion_rs::IonError
+pub fn u128::try_from(ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::UInt> for u16
+pub type u16::Error = ion_rs::IonError
+pub fn u16::try_from(ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::UInt> for u32
+pub type u32::Error = ion_rs::IonError
+pub fn u32::try_from(ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::UInt> for u64
+pub type u64::Error = ion_rs::IonError
+pub fn u64::try_from(ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::UInt> for u8
+pub type u8::Error = ion_rs::IonError
+pub fn u8::try_from(ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::UInt> for usize
+pub type usize::Error = ion_rs::IonError
+pub fn usize::try_from(ion_rs::UInt) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<ion_rs::decimal::Coefficient> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(ion_rs::decimal::Coefficient) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<isize> for ion_rs::UInt
+pub type ion_rs::UInt::Error = ion_rs::IonError
+pub fn ion_rs::UInt::try_from(isize) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Display for ion_rs::UInt
+pub fn ion_rs::UInt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+pub struct ion_rs::WriteConfig<E: ion_rs::lazy::encoding::Encoding>
+impl ion_rs::WriteConfig<ion_rs::v1_0::Binary>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Binary>::new() -> Self
+impl ion_rs::WriteConfig<ion_rs::v1_0::Text>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Text>::new(ion_rs::TextFormat) -> Self
+impl core::convert::From<ion_rs::v1_0::Binary> for ion_rs::WriteConfig<ion_rs::v1_0::Binary>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Binary>::from(ion_rs::v1_0::Binary) -> Self
+impl core::convert::From<ion_rs::v1_0::Text> for ion_rs::WriteConfig<ion_rs::v1_0::Text>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Text>::from(ion_rs::v1_0::Text) -> Self
+impl core::default::Default for ion_rs::WriteConfig<ion_rs::lazy::encoding::BinaryEncoding_1_1>
+pub fn ion_rs::WriteConfig<ion_rs::lazy::encoding::BinaryEncoding_1_1>::default() -> Self
+impl core::default::Default for ion_rs::WriteConfig<ion_rs::lazy::encoding::TextEncoding_1_1>
+pub fn ion_rs::WriteConfig<ion_rs::lazy::encoding::TextEncoding_1_1>::default() -> Self
+impl core::default::Default for ion_rs::WriteConfig<ion_rs::v1_0::Binary>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Binary>::default() -> Self
+impl core::default::Default for ion_rs::WriteConfig<ion_rs::v1_0::Text>
+pub fn ion_rs::WriteConfig<ion_rs::v1_0::Text>::default() -> Self
+pub trait ion_rs::IntoAnnotatedElement: core::convert::Into<ion_rs::Value>
+pub fn ion_rs::IntoAnnotatedElement::with_annotations<I: ion_rs::IntoAnnotations>(self, I) -> ion_rs::Element
+impl<V> ion_rs::IntoAnnotatedElement for V where V: core::convert::Into<ion_rs::Value>
+pub fn V::with_annotations<I: ion_rs::IntoAnnotations>(self, I) -> ion_rs::Element
+pub trait ion_rs::IntoAnnotations
+pub fn ion_rs::IntoAnnotations::into_annotations(self) -> ion_rs::Annotations
+impl<S, I> ion_rs::IntoAnnotations for I where S: core::convert::Into<ion_rs::Symbol>, I: core::iter::traits::collect::IntoIterator<Item = S>
+pub fn I::into_annotations(self) -> ion_rs::Annotations
+pub trait ion_rs::IonInput
+pub type ion_rs::IonInput::DataSource: ion_rs::lazy::streaming_raw_reader::IonDataSource
+pub fn ion_rs::IonInput::into_data_source(self) -> Self::DataSource
+impl ion_rs::IonInput for alloc::boxed::Box<dyn std::io::Read>
+pub type alloc::boxed::Box<dyn std::io::Read>::DataSource = ion_rs::lazy::streaming_raw_reader::IonStream<alloc::boxed::Box<dyn std::io::Read>>
+pub fn alloc::boxed::Box<dyn std::io::Read>::into_data_source(self) -> Self::DataSource
+impl ion_rs::IonInput for std::fs::File
+pub type std::fs::File::DataSource = ion_rs::lazy::streaming_raw_reader::IonStream<std::io::buffered::bufreader::BufReader<std::fs::File>>
+pub fn std::fs::File::into_data_source(self) -> Self::DataSource
+impl ion_rs::IonInput for std::io::stdio::StdinLock<'_>
+pub type std::io::stdio::StdinLock<'_>::DataSource = ion_rs::lazy::streaming_raw_reader::IonStream<std::io::stdio::StdinLock<'_>>
+pub fn std::io::stdio::StdinLock<'_>::into_data_source(self) -> Self::DataSource
+impl<'a> ion_rs::IonInput for &'a [u8]
+pub type &'a [u8]::DataSource = ion_rs::lazy::streaming_raw_reader::IonSlice<&'a [u8]>
+pub fn &'a [u8]::into_data_source(self) -> Self::DataSource
+impl<'a> ion_rs::IonInput for &'a alloc::string::String
+pub type &'a alloc::string::String::DataSource = ion_rs::lazy::streaming_raw_reader::IonSlice<&'a alloc::string::String>
+pub fn &'a alloc::string::String::into_data_source(self) -> Self::DataSource
+impl<'a> ion_rs::IonInput for &'a alloc::vec::Vec<u8>
+pub type &'a alloc::vec::Vec<u8>::DataSource = ion_rs::lazy::streaming_raw_reader::IonSlice<&'a alloc::vec::Vec<u8>>
+pub fn &'a alloc::vec::Vec<u8>::into_data_source(self) -> Self::DataSource
+impl<'a> ion_rs::IonInput for &'a str
+pub type &'a str::DataSource = ion_rs::lazy::streaming_raw_reader::IonSlice<&'a str>
+pub fn &'a str::into_data_source(self) -> Self::DataSource
+impl<'a> ion_rs::IonInput for alloc::string::String
+pub type alloc::string::String::DataSource = ion_rs::lazy::streaming_raw_reader::IonSlice<alloc::string::String>
+pub fn alloc::string::String::into_data_source(self) -> Self::DataSource
+impl<'a> ion_rs::IonInput for alloc::vec::Vec<u8>
+pub type alloc::vec::Vec<u8>::DataSource = ion_rs::lazy::streaming_raw_reader::IonSlice<alloc::vec::Vec<u8>>
+pub fn alloc::vec::Vec<u8>::into_data_source(self) -> Self::DataSource
+impl<R: std::io::Read> ion_rs::IonInput for std::io::buffered::bufreader::BufReader<R>
+pub type std::io::buffered::bufreader::BufReader<R>::DataSource = ion_rs::lazy::streaming_raw_reader::IonStream<std::io::buffered::bufreader::BufReader<R>>
+pub fn std::io::buffered::bufreader::BufReader<R>::into_data_source(self) -> Self::DataSource
+impl<T: std::io::Read, U: std::io::Read> ion_rs::IonInput for core::io::util::Chain<T, U>
+pub type core::io::util::Chain<T, U>::DataSource = ion_rs::lazy::streaming_raw_reader::IonStream<core::io::util::Chain<T, U>>
+pub fn core::io::util::Chain<T, U>::into_data_source(self) -> Self::DataSource
+pub type ion_rs::ConversionOperationResult<FromType, ToType> = core::result::Result<ToType, ion_rs::ConversionOperationError<FromType, ToType>>
+pub type ion_rs::IonResult<T> = core::result::Result<T, ion_rs::IonError>
