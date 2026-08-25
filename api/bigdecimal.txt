@@ -1,0 +1,4 @@
+impl core::convert::TryFrom<bigdecimal::BigDecimal> for ion_rs::Decimal
+impl core::convert::TryInto<bigdecimal::BigDecimal> for ion_rs::Decimal
+pub fn ion_rs::Decimal::try_from(bigdecimal::BigDecimal) -> core::result::Result<Self, Self::Error>
+pub fn ion_rs::Decimal::try_into(self) -> core::result::Result<bigdecimal::BigDecimal, Self::Error>
