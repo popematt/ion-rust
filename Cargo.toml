@@ -115,6 +115,10 @@ bench = false
 name = "text_location_throughput"
 harness = false
 
+[[bench]]
+name = "struct_ops"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1
