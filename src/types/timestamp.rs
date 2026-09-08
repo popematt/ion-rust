@@ -129,6 +129,18 @@ fn validate_fields(y: u16, m: u8, d: u8, h: u8, min: u8, s: u8) -> bool {
     d >= 1 && d <= max_day && h <= 23 && min <= 59 && s <= 59
 }
 
+/// Returns an error if `offset_minutes` is outside Ion's valid UTC offset range. Takes an `i32`
+/// so callers can validate before narrowing to the stored `i16`.
+fn validate_offset_minutes(offset_minutes: i32) -> IonResult<()> {
+    if !(MIN_OFFSET_MINUTES as i32..=MAX_OFFSET_MINUTES as i32).contains(&offset_minutes) {
+        return IonResult::illegal_operation(format!(
+            "offset ({} minutes) exceeds valid range ({}..={})",
+            offset_minutes, MIN_OFFSET_MINUTES, MAX_OFFSET_MINUTES
+        ));
+    }
+    Ok(())
+}
+
 /// Adds `offset_minutes` to a local time represented by the given fields,
 /// returning the adjusted (year, month, day, hour, minute).
 fn add_offset_to_utc(
@@ -338,12 +350,7 @@ impl Timestamp {
         let offset_raw = match offset {
             None => OFFSET_UNKNOWN_SENTINEL,
             Some(m) => {
-                if !(MIN_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(&m) {
-                    return IonResult::illegal_operation(format!(
-                        "offset ({} minutes) exceeds valid range ({}..={})",
-                        m, MIN_OFFSET_MINUTES, MAX_OFFSET_MINUTES
-                    ));
-                }
+                validate_offset_minutes(m as i32)?;
                 (m + OFFSET_BIAS) as u16
             }
         };
@@ -904,12 +911,7 @@ impl<T> TimestampBuilder<T> {
             ));
         }
         if let Some(offset_minutes) = self.offset {
-            if !(MIN_OFFSET_MINUTES as i32..=MAX_OFFSET_MINUTES as i32).contains(&offset_minutes) {
-                return IonResult::illegal_operation(format!(
-                    "offset ({} minutes) exceeds valid range ({}..={})",
-                    offset_minutes, MIN_OFFSET_MINUTES, MAX_OFFSET_MINUTES
-                ));
-            }
+            validate_offset_minutes(offset_minutes)?;
         }
         Ok(())
     }
@@ -938,6 +940,14 @@ impl<T> TimestampBuilder<T> {
     /// Like [Self::build], but the fields provided for each time unit are understood
     /// to be in UTC rather than in the local time of the specified offset (if there is one).
     pub(crate) fn build_utc_fields_at_offset(self, offset_minutes: i32) -> IonResult<Timestamp> {
+        // Validate the fields *before* they are narrowed, for the same reason `build` does: a
+        // `u32`-to-`u8`/`u16` cast of an out-of-range value would silently wrap and could produce
+        // a field that `Timestamp::from_utc_fields` then accepts as valid (e.g. `month: 268`
+        // becomes `12`). `validate_field_ranges` covers the date-time fields and `self.offset`;
+        // the UTC offset arrives as a parameter here, so validate it before its own narrowing to
+        // `i16`.
+        self.validate_field_ranges()?;
+        validate_offset_minutes(offset_minutes)?;
         Timestamp::from_utc_fields(
             self.precision,
             offset_minutes as i16,
@@ -1181,11 +1191,142 @@ mod timestamp_tests {
     use super::*;
     use crate::ion_data::IonEq;
     use crate::result::IonResult;
-    use crate::{Decimal, Int, Timestamp, TimestampPrecision};
+    use crate::{Decimal, Element, Int, Timestamp, TimestampPrecision};
     use rstest::*;
     use std::cmp::Ordering;
     use std::io::Write;
     use std::ops::Mul;
+
+    // `build` validates its `u32`/`i32` fields before narrowing them to `u8`/`u16`/`i16`.
+    // `build_utc_fields_at_offset` must do the same: without pre-narrowing validation an
+    // out-of-range field wraps into a plausible wrong value that `from_utc_fields` accepts. This
+    // path is taken by binary 1.0 known-offset decoding and by binary 1.1 UTC-flag decoding (which
+    // passes offset 0); binary 1.1 known-offset decoding uses `with_offset` + `build` instead.
+
+    /// `build`'s own comment cites `month: 268` becoming `12` as the reason it validates before
+    /// narrowing. Its sibling must not skip that guard. Each value wraps into an in-range value
+    /// (e.g. `268 as u8 == 12`), so a rejection here can only come from pre-narrowing validation.
+    #[rstest]
+    #[case::year(67_557, 1, 1, 0, 0, 0)]
+    #[case::month(2021, 268, 1, 0, 0, 0)]
+    #[case::day(2021, 1, 261, 0, 0, 0)]
+    #[case::hour(2021, 1, 1, 261, 0, 0)]
+    #[case::minute(2021, 1, 1, 0, 286, 0)]
+    #[case::second(2021, 1, 1, 0, 0, 315)]
+    fn build_utc_fields_at_offset_rejects_out_of_range_fields(
+        #[case] year: u32,
+        #[case] month: u32,
+        #[case] day: u32,
+        #[case] hour: u32,
+        #[case] minute: u32,
+        #[case] second: u32,
+    ) {
+        let built = TimestampBuilder::with_ymd(year, month, day)
+            .with_hms(hour, minute, second)
+            .build_utc_fields_at_offset(0);
+        assert!(
+            built.is_err(),
+            "expected {year}-{month}-{day}T{hour}:{minute}:{second} to be rejected, got `{}`",
+            built.unwrap()
+        );
+    }
+
+    /// The offset parameter is narrowed `i32 as i16`, so out-of-range values must be rejected
+    /// before that cast. `MAX_OFFSET_MINUTES + 1` catches the ordinary out-of-range case; `65536`
+    /// is the boundary that survives `as i16` (it wraps to `0`), the one value the downstream
+    /// `from_fields` offset check cannot catch on its own.
+    #[rstest]
+    #[case(1440)]
+    #[case(-1440)]
+    #[case(65536)]
+    fn build_utc_fields_at_offset_rejects_out_of_range_offset(#[case] offset_minutes: i32) {
+        let built = TimestampBuilder::with_ymd(2021, 1, 1)
+            .with_hour_and_minute(0, 0)
+            .build_utc_fields_at_offset(offset_minutes);
+        assert!(
+            built.is_err(),
+            "expected offset {offset_minutes} to be rejected, got `{}`",
+            built.unwrap()
+        );
+    }
+
+    /// `from_utc_fields`/`from_fields` never check `attoseconds`, so `validate_field_ranges` is the
+    /// only guard against a subsecond value that outruns one full second (invariant 4). Reachable
+    /// from binary 1.1 short-form subseconds (e.g. the 10-bit millisecond field admits 1000..=1023).
+    #[test]
+    fn build_utc_fields_at_offset_rejects_over_range_subseconds() {
+        let built = TimestampBuilder::with_ymd(2024, 1, 1)
+            .with_hms(0, 0, 0)
+            .with_milliseconds(1023)
+            .build_utc_fields_at_offset(0);
+        assert!(
+            built.is_err(),
+            "1023 milliseconds (>= 1 second) should be rejected, got `{}`",
+            built.unwrap()
+        );
+    }
+
+    /// Guards against over-rejection: in-range fields must still build. Includes the `..=` offset
+    /// bounds (±1439) and the calendar extremes. The calendar max uses offset 0 because a positive
+    /// offset would push local time into year 10000 (a legitimate rejection, not over-rejection).
+    #[rstest]
+    #[case(2021, 6, 15, 12, 30, 45, 1439)]
+    #[case(2021, 6, 15, 12, 30, 45, -1439)]
+    #[case(9999, 12, 31, 23, 59, 59, 0)]
+    #[case(1, 1, 1, 0, 0, 0, 0)]
+    fn build_utc_fields_at_offset_accepts_in_range_extremes(
+        #[case] year: u32,
+        #[case] month: u32,
+        #[case] day: u32,
+        #[case] hour: u32,
+        #[case] minute: u32,
+        #[case] second: u32,
+        #[case] offset_minutes: i32,
+    ) {
+        let built = TimestampBuilder::with_ymd(year, month, day)
+            .with_hms(hour, minute, second)
+            .build_utc_fields_at_offset(offset_minutes);
+        assert!(
+            built.is_ok(),
+            "expected {year}-{month}-{day}T{hour}:{minute}:{second} at offset {offset_minutes} \
+             to build, got `{:?}`",
+            built.unwrap_err()
+        );
+    }
+
+    /// The same defect reached through the public API. A binary 1.0 timestamp with a known offset
+    /// at HourAndMinute precision routes to `build_utc_fields_at_offset`, so an out-of-range
+    /// VarUInt month must surface as an error rather than a plausible wrong month. The assertion
+    /// checks the error names the offending field, so a structurally malformed buffer (which fails
+    /// for an unrelated reason) can't pass this test by accident.
+    #[test]
+    fn binary_1_0_rejects_timestamp_with_out_of_range_month() {
+        const IVM: [u8; 4] = [0xE0, 0x01, 0x00, 0xEA];
+
+        // Control: month = 12 as a one-byte VarUInt reads as December.
+        let mut control = IVM.to_vec();
+        control.extend_from_slice(&[0x67, 0xBC, 0x0F, 0xE5, 0x8C, 0x81, 0x80, 0x80]);
+        let control = Element::read_one(&control).expect("control timestamp must decode");
+        assert_eq!(
+            control
+                .as_timestamp()
+                .expect("control is a timestamp")
+                .month(),
+            12
+        );
+
+        // month = 268 as a two-byte VarUInt, and `268 as u8` is also 12. Only the month bytes
+        // differ from the control (plus the length byte 0x67 -> 0x68 for the extra byte).
+        let mut wrapped = IVM.to_vec();
+        wrapped.extend_from_slice(&[0x68, 0xBC, 0x0F, 0xE5, 0x02, 0x8C, 0x81, 0x80, 0x80]);
+        let error = Element::read_one(&wrapped)
+            .expect_err("month 268 must not decode as a valid timestamp");
+        let message = error.to_string();
+        assert!(
+            message.contains("month"),
+            "expected an out-of-range month error, got: {message}"
+        );
+    }
 
     #[test]
     fn test_timestamps_with_same_ymd_hms_millis_at_known_offset_are_equal() -> IonResult<()> {
