@@ -37,66 +37,6 @@ fn offset_east(seconds_east: i32) -> FixedOffset {
     FixedOffset::east_opt(seconds_east).expect("seconds_east was outside the supported range")
 }
 
-// ─── Packed bit layout ────────────────────────────────────────────────
-//
-// All date-time fields are stored as LOCAL time in a single u64.
-// A second u64 holds the attoseconds payload.
-//
-// Date-time fields are in the HIGH bits (most-significant first) so that
-// a numeric comparison of the packed value yields chronological order.
-// Metadata (offset, precision, subsecond_digits) is in the LOW bits.
-//
-// Bit layout of `packed` (MSB = bit 63):
-//
-//   [63:50] year                (14 bits, 0-9999)
-//   [49:46] month               (4 bits, 1-12)
-//   [45:41] day                 (5 bits, 1-31)
-//   [40:36] hour                (5 bits, 0-23)
-//   [35:30] minute              (6 bits, 0-59)
-//   [29:24] second              (6 bits, 0-59)
-//   [23:21] precision           (3 bits, 0-4 maps to TimestampPrecision)
-//   [20:16] subsecond_precision (5 bits, 0 = none, 1-18 = digit count)
-//   [15:4]  offset              (12 bits, biased unsigned: stored = minutes + 1440;
-//                                valid range 1..=2879; 0 = unknown)
-//   [3:0]   spare               (4 bits)
-//
-// `attoseconds`: fractional seconds normalized to 10^-18 scale.
-// `subsecond_precision` records display precision (how many digits to render).
-//
-// Invariants:
-//
-// 1. Fields below the declared precision hold their default values:
-//    - Year:          month=1, day=1, hour=0, minute=0, second=0
-//    - Month:         day=1, hour=0, minute=0, second=0
-//    - Day:           hour=0, minute=0, second=0
-//    - HourAndMinute: second=0
-//    - Second:        (no fields required to be zero)
-//
-// 2. When precision < Second: attoseconds == 0 and subsecond_precision == 0.
-//
-// 3. When precision == Second and subsecond_precision == 0: attoseconds == 0.
-//    (No fractional part means the attoseconds payload is unused.)
-//
-// 4. attoseconds < 10^18 (strictly less than one full second).
-//
-// 5. attoseconds is consistent with subsecond_precision: the value must be
-//    representable in `subsecond_precision` decimal digits. Formally,
-//    attoseconds % 10^(18 - subsecond_precision) == 0.
-//    Example: subsecond_precision=3 (millis) → attoseconds is a multiple
-//    of 10^15.
-//
-// 6. offset == 0 (unknown) is valid at any precision. When precision <
-//    HourAndMinute, the offset field MUST be 0 (unknown) because sub-day
-//    precision timestamps cannot meaningfully carry a UTC offset.
-//
-// 7. year is in 1..=9999 for user-constructed timestamps. Internally,
-//    `to_utc` can produce year 0 (e.g., 0001-01-01T00:30+01:00 → year 0 UTC)
-//    and `from_fixed_offset_datetime` can produce year 10000 (e.g., UTC
-//    9999-12-31T23:30Z with offset -01:00 → local 10000-01-01). These values
-//    fit in the 14-bit field but must not escape through public constructors.
-//
-// 8. spare bits [3:0] are always 0.
-
 const YEAR_BITS: u64 = 14;
 const MONTH_BITS: u64 = 4;
 const DAY_BITS: u64 = 5;
@@ -106,12 +46,12 @@ const SECOND_BITS: u64 = 6;
 const OFFSET_BITS: u64 = 12;
 const PRECISION_BITS: u64 = 3;
 const SUBSECOND_PRECISION_BITS: u64 = 5;
-const SPARE_BITS: u64 = 4;
+const RESERVED_BITS: u64 = 4;
 
 // Shifts: metadata at bottom, date-time at top.
 // Within metadata: precision > subsecond_digits > offset (tiebreak order for IonDataOrd).
-const SPARE_SHIFT: u64 = 0;
-const OFFSET_SHIFT: u64 = SPARE_SHIFT + SPARE_BITS; // 4
+const RESERVED_SHIFT: u64 = 0;
+const OFFSET_SHIFT: u64 = RESERVED_SHIFT + RESERVED_BITS; // 4
 const SUBSECOND_PRECISION_SHIFT: u64 = OFFSET_SHIFT + OFFSET_BITS; // 16
 const PRECISION_SHIFT: u64 = SUBSECOND_PRECISION_SHIFT + SUBSECOND_PRECISION_BITS; // 21
 const SECOND_SHIFT: u64 = PRECISION_SHIFT + PRECISION_BITS; // 24
@@ -140,15 +80,38 @@ const DATETIME_MASK: u64 = (YEAR_MASK << YEAR_SHIFT)
     | (MINUTE_MASK << MINUTE_SHIFT)
     | (SECOND_MASK << SECOND_SHIFT);
 
-/// Bias added to offset-in-minutes before storage. With this bias the valid
-/// range (-1439..=+1439) maps to 1..=2879, leaving 0 free as the "unknown" sentinel.
+// Compile-time guards on the bit layout. These enforce the invariants the
+// packing (and the `Ord`/`PartialEq`/`ion_cmp` integer comparisons) rely on, so
+// a future edit to the shifts, widths, or field order fails the build rather
+// than silently corrupting comparisons.
+const _: () = assert!(YEAR_SHIFT + YEAR_BITS == 64, "fields must fill the word");
+// The date-time region must be contiguous and top-aligned; `Ord` compares it as an integer.
+const _: () = assert!(DATETIME_MASK.leading_zeros() == 0);
+const _: () = assert!(DATETIME_MASK.trailing_zeros() == SECOND_SHIFT as u32);
+const _: () = assert!(DATETIME_MASK.count_ones() == 64 - SECOND_SHIFT as u32);
+
+/// Offset-in-minutes is stored biased so the field's zero value can serve as the
+/// "unknown offset" sentinel:
+///
+/// ```text
+/// stored  = minutes + OFFSET_BIAS   // -1439..=1439  ->  1..=2879
+/// minutes = stored  - OFFSET_BIAS
+/// ```
+///
+/// Note that `+00:00` stores as 1440, distinct from _unknown_.
 const OFFSET_BIAS: i16 = 1440;
+
+/// Stored `offset` value meaning "no offset specified" (Ion's `-00:00`).
 const OFFSET_UNKNOWN_SENTINEL: u16 = 0;
 
 // 18 digits = attosecond precision. Exceeds any system clock or commercial
 // atomic clock. Chosen over 19 to align with SI prefixes (multiples of 3)
 // and to leave one bit free in the u64 coefficient for future niche use.
 const MAX_FRAC_DIGITS: u8 = 18;
+const _: () = assert!(
+    10u128.pow(MAX_FRAC_DIGITS as u32) <= u64::MAX as u128,
+    "attoseconds scale must fit in the u64 payload"
+);
 
 /// The largest year the packed `year` field can represent.
 const MAX_YEAR: u16 = 9999;
@@ -236,6 +199,86 @@ fn add_offset_to_utc(
 /// NOTE: In an intentional divergence from the Ion Specification (which allows unlimited precision),
 /// this implementation is limited to attoseconds precision and will produce an error when
 /// attempting to read any value with more than attosecond precision.
+//
+// `Timestamp` is two 64-bit words. The time *value* needs 100 bits: 40 for the
+// date-time fields (year..second) and 60 for the fraction (10^18 - 1 < 2^60),
+// which is more than one word holds. It is intentional that the date-time
+// component and the fraction each get their own word: the date-time occupies the
+// top of `packed_fields`, and the fraction gets `attoseconds` to itself.
+//
+// The 24 bits left over in `packed_fields` hold the metadata, which is why
+// precision, subsecond_precision, and offset sit *between* `second` and the
+// fraction in significance order. Two consequences for future changes:
+//
+// - year..second must stay in the top bits, in descending significance, with no
+//   metadata interleaved: `Ord` and `PartialEq` compare `packed & DATETIME_MASK`
+//   as a single integer.
+// - `ion_cmp` compares `packed_fields` and then `attoseconds` as raw integers, so
+//   this layout *is* the `IonDataOrd` total order — date-time, precision,
+//   subsecond_precision, offset, fraction. Permuting the metadata fields changes
+//   how `IonData`-wrapped timestamps sort. (`IonDataOrd` makes no promise that
+//   this ordering stays consistent between releases, so the layout is free to
+//   change.)
+//
+// ─── Packed bit layout ────────────────────────────────────────────────
+//
+// All date-time fields are stored as LOCAL time in a single u64.
+// A second u64 holds the attoseconds payload.
+//
+// Date-time fields are in the HIGH bits (most-significant first) so that
+// a numeric comparison of the packed value yields chronological order.
+// Metadata (offset, precision, subsecond_digits) is in the LOW bits.
+//
+// Bit layout of `packed` (MSB = bit 63):
+//
+//   [63:50] year                (14 bits, 0-9999)
+//   [49:46] month               (4 bits, 1-12)
+//   [45:41] day                 (5 bits, 1-31)
+//   [40:36] hour                (5 bits, 0-23)
+//   [35:30] minute              (6 bits, 0-59)
+//   [29:24] second              (6 bits, 0-59)
+//   [23:21] precision           (3 bits, 0-4 maps to TimestampPrecision)
+//   [20:16] subsecond_precision (5 bits, 0 = none, 1-18 = digit count)
+//   [15:4]  offset              (12 bits, biased unsigned: stored = minutes + 1440;
+//                                valid range 1..=2879; 0 = unknown)
+//   [3:0]   reserved            (4 bits)
+//
+// `attoseconds`: fractional seconds normalized to 10^-18 scale.
+// `subsecond_precision` records display precision (how many digits to render).
+//
+// Invariants:
+//
+// 1. Fields below the declared precision hold their default values:
+//    - Year:          month=1, day=1, hour=0, minute=0, second=0
+//    - Month:         day=1, hour=0, minute=0, second=0
+//    - Day:           hour=0, minute=0, second=0
+//    - HourAndMinute: second=0
+//    - Second:        (no fields required to be zero)
+//
+// 2. When precision < Second: attoseconds == 0 and subsecond_precision == 0.
+//
+// 3. When precision == Second and subsecond_precision == 0: attoseconds == 0.
+//    (No fractional part means the attoseconds payload is unused.)
+//
+// 4. attoseconds < 10^18 (strictly less than one full second).
+//
+// 5. attoseconds is consistent with subsecond_precision: the value must be
+//    representable in `subsecond_precision` decimal digits. Formally,
+//    attoseconds % 10^(18 - subsecond_precision) == 0.
+//    Example: subsecond_precision=3 (millis) → attoseconds is a multiple
+//    of 10^15.
+//
+// 6. offset == 0 (unknown) is valid at any precision. When precision <
+//    HourAndMinute, the offset field MUST be 0 (unknown) because sub-day
+//    precision timestamps cannot meaningfully carry a UTC offset.
+//
+// 7. year is in 1..=9999 for user-constructed timestamps. Internally,
+//    `to_utc` can produce year 0 (e.g., 0001-01-01T00:30+01:00 → year 0 UTC)
+//    and `from_fixed_offset_datetime` can produce year 10000 (e.g., UTC
+//    9999-12-31T23:30Z with offset -01:00 → local 10000-01-01). These values
+//    fit in the 14-bit field but must not escape through public constructors.
+//
+// 8. reserved bits [3:0] are always 0.
 #[derive(Clone)]
 pub struct Timestamp {
     packed_fields: u64,
