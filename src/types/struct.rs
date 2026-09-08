@@ -13,10 +13,46 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 /// Field counts at or below this length are served by a linear scan over `slots`; above it, `get()`
-/// lazily builds and probes a hash index. The crossover is a benchmark-derived tuning default
-/// (measured on aarch64 / Graviton2, with a workload of roughly one lookup per field), not a
-/// contract. Revisit if `Element`/`Symbol` size or real `get()` access patterns change.
-const LINEAR_SCAN_THRESHOLD: usize = 48;
+/// lazily builds and probes a hash index. The default is a benchmark-derived tuning value, not a
+/// contract; revisit if `Element`/`Symbol` size or real `get()` access patterns change.
+///
+/// Chosen on aarch64 / Graviton2 against a happy-path (hit-dominated) workload: the linear-vs-hash
+/// crossover measured at ~10 fields for 2 lookups/field, ~19 for 1×, and ~28 for 0.5×, and the cost
+/// of setting the threshold too high (linear's O(n²) tail) dwarfs setting it too low (one bounded
+/// ~140 ns + ~14 ns/field index build). Erring low, 16 covers the ≥1×/field cases and stays cheap
+/// for the sparser ones.
+///
+/// The default (16) can be overridden at build time by setting the
+/// `ION_RS_STRUCT_LINEAR_SCAN_THRESHOLD` environment variable to a base-10 integer, e.g.
+/// `ION_RS_STRUCT_LINEAR_SCAN_THRESHOLD=32 cargo build`. This is a tuning/experimentation knob, not
+/// a stability guarantee; a malformed value is a compile error. `rustc` records the read, so the
+/// crate is rebuilt when the value changes.
+const LINEAR_SCAN_THRESHOLD: usize = match option_env!("ION_RS_STRUCT_LINEAR_SCAN_THRESHOLD") {
+    None => 16,
+    Some(text) => parse_threshold(text),
+};
+
+/// Parses the `ION_RS_STRUCT_LINEAR_SCAN_THRESHOLD` override in const context. A non-empty run of
+/// ASCII digits only; anything else is a compile error, and const evaluation traps on overflow.
+const fn parse_threshold(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    assert!(
+        !bytes.is_empty(),
+        "ION_RS_STRUCT_LINEAR_SCAN_THRESHOLD must not be empty"
+    );
+    let mut value: usize = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let digit = bytes[i];
+        assert!(
+            digit >= b'0' && digit <= b'9',
+            "ION_RS_STRUCT_LINEAR_SCAN_THRESHOLD must be a base-10 integer"
+        );
+        value = value * 10 + (digit - b'0') as usize;
+        i += 1;
+    }
+    value
+}
 
 /// One entry in the lazily built hash lookup index. Stores the cached field-name hash (so probes
 /// don't rehash the stored name) and the index of the corresponding pair in [`Fields::slots`].
