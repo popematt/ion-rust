@@ -1,10 +1,6 @@
 use crate::ion_data::{IonDataHash, IonDataOrd, IonEq};
 use crate::result::{IonFailure, IonResult};
 use crate::types::Decimal;
-#[cfg(feature = "experimental-chrono")]
-use crate::IonError;
-#[cfg(feature = "experimental-chrono")]
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -26,15 +22,6 @@ pub enum TimestampPrecision {
     HourAndMinute = 3,
     /// Second-level precision or greater. (e.g. `2020-08-01T12:34:56Z` or `2020-08-01T12:34:56.123456789Z`)
     Second = 4,
-}
-
-/// Constructs a [`FixedOffset`] at the specified offset seconds from UTC. If the specified offset
-/// is out of bounds, this method will panic.
-// Only the tests below construct a `FixedOffset` this way; production conversions go through
-// `try_to_datetime_fixed_offset`, which reports an out-of-range offset as an `IonError`.
-#[cfg(all(test, feature = "experimental-chrono"))]
-fn offset_east(seconds_east: i32) -> FixedOffset {
-    FixedOffset::east_opt(seconds_east).expect("seconds_east was outside the supported range")
 }
 
 const YEAR_BITS: u64 = 14;
@@ -193,8 +180,8 @@ fn add_offset_to_utc(
     (y as u16, mo as u8, d as u8, h, m)
 }
 
-/// Represents a point in time to a specified degree of precision. Unlike `chrono`'s [NaiveDateTime]
-/// and [DateTime], a `Timestamp` has variable precision ranging from a year to attoseconds.
+/// Represents a point in time to a specified degree of precision. Unlike `chrono`'s `NaiveDateTime`
+/// and `DateTime`, a `Timestamp` has variable precision ranging from a year to attoseconds.
 ///
 /// NOTE: In an intentional divergence from the Ion Specification (which allows unlimited precision),
 /// this implementation is limited to attoseconds precision and will produce an error when
@@ -417,131 +404,6 @@ impl Timestamp {
             frac_digits,
             attoseconds,
         )
-    }
-
-    /// Converts a [`NaiveDateTime`] or [`DateTime<FixedOffset>`] to a Timestamp with the specified
-    /// precision. If the precision is [`TimestampPrecision::Second`], nanosecond precision (the maximum
-    /// supported by a [`Timelike`]) is assumed.
-    #[cfg(feature = "experimental-chrono")]
-    pub fn from_datetime<D>(datetime: D, precision: TimestampPrecision) -> Timestamp
-    where
-        D: Datelike + Timelike + Into<Timestamp>,
-    {
-        let mut timestamp: Timestamp = datetime.into();
-
-        // Zero fields below the requested precision to uphold invariants 1, 2, and 6.
-        match precision {
-            TimestampPrecision::Year => {
-                timestamp.packed_fields &= YEAR_MASK << YEAR_SHIFT;
-                // Restore month=1, day=1 (the default "unset" values)
-                timestamp.packed_fields |= 1 << MONTH_SHIFT | 1 << DAY_SHIFT;
-                timestamp.attoseconds = 0;
-            }
-            TimestampPrecision::Month => {
-                timestamp.packed_fields &= (YEAR_MASK << YEAR_SHIFT) | (MONTH_MASK << MONTH_SHIFT);
-                // Restore day=1
-                timestamp.packed_fields |= 1 << DAY_SHIFT;
-                timestamp.attoseconds = 0;
-            }
-            TimestampPrecision::Day => {
-                timestamp.packed_fields &= (YEAR_MASK << YEAR_SHIFT)
-                    | (MONTH_MASK << MONTH_SHIFT)
-                    | (DAY_MASK << DAY_SHIFT);
-                timestamp.attoseconds = 0;
-            }
-            TimestampPrecision::HourAndMinute => {
-                timestamp.packed_fields &= (YEAR_MASK << YEAR_SHIFT)
-                    | (MONTH_MASK << MONTH_SHIFT)
-                    | (DAY_MASK << DAY_SHIFT)
-                    | (HOUR_MASK << HOUR_SHIFT)
-                    | (MINUTE_MASK << MINUTE_SHIFT)
-                    | (OFFSET_MASK << OFFSET_SHIFT);
-                timestamp.attoseconds = 0;
-            }
-            TimestampPrecision::Second => {
-                // Keep everything; just strip subsecond if not already at Second precision
-            }
-        }
-
-        // Set the precision field
-        timestamp.packed_fields &= !(PRECISION_MASK << PRECISION_SHIFT);
-        timestamp.packed_fields |= (precision as u64 & PRECISION_MASK) << PRECISION_SHIFT;
-
-        // Retain offset only at HourAndMinute or Second precision
-        if precision < TimestampPrecision::HourAndMinute {
-            timestamp.packed_fields &= !(OFFSET_MASK << OFFSET_SHIFT);
-        }
-
-        timestamp
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    pub(crate) fn from_naive_datetime(date_time: NaiveDateTime) -> Self {
-        let attoseconds = (date_time.nanosecond() as u64) * 1_000_000_000;
-        Self::from_fields(
-            TimestampPrecision::Second,
-            None,
-            date_time.year() as u16,
-            date_time.month() as u8,
-            date_time.day() as u8,
-            date_time.hour() as u8,
-            date_time.minute() as u8,
-            date_time.second() as u8,
-            9,
-            attoseconds,
-        )
-        .expect("chrono NaiveDateTime fields are always valid")
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    pub(crate) fn from_fixed_offset_datetime(
-        fixed_offset_date_time: DateTime<FixedOffset>,
-    ) -> Self {
-        let offset_seconds = fixed_offset_date_time.offset().local_minus_utc();
-        let offset_minutes = (offset_seconds / 60) as i16;
-        let local = fixed_offset_date_time.naive_local();
-        let attoseconds = (local.nanosecond() as u64) * 1_000_000_000;
-        // Pack directly from local fields — chrono guarantees validity of the
-        // DateTime, and local year may exceed 9999 (e.g., UTC year 9999 Dec 31
-        // with negative offset). We bypass from_fields validation to avoid panic.
-        let packed = Self::pack_masked(
-            TimestampPrecision::Second,
-            local.year() as u16,
-            local.month() as u8,
-            local.day() as u8,
-            local.hour() as u8,
-            local.minute() as u8,
-            local.second() as u8,
-            (offset_minutes + OFFSET_BIAS) as u16,
-            9,
-        );
-        Timestamp {
-            packed_fields: packed,
-            attoseconds,
-        }
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    pub(crate) fn try_to_naive_datetime(&self) -> IonResult<NaiveDateTime> {
-        if self.offset().is_some() {
-            return IonResult::illegal_operation(
-                "cannot convert a Timestamp with a known offset into a NaiveDateTime",
-            );
-        }
-        downconvert_to_naive_datetime_with_nanoseconds(self)
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    pub(crate) fn try_to_datetime_fixed_offset(&self) -> IonResult<DateTime<FixedOffset>> {
-        if self.offset().is_none() {
-            return IonResult::illegal_operation(
-                "cannot convert a Timestamp with an unknown offset into a DateTime<FixedOffset>",
-            );
-        }
-        let utc = self.to_utc();
-        let utc_naive = downconvert_to_naive_datetime_with_nanoseconds(&utc)?;
-        let offset = FixedOffset::east_opt(self.offset().unwrap_or_default() * 60);
-        Ok(offset.unwrap().from_utc_datetime(&utc_naive))
     }
 
     /// If the precision is [TimestampPrecision::Second], returns the Decimal scale of this Timestamp's
@@ -1314,65 +1176,12 @@ impl TimestampBuilder<HasFractionalSeconds> {
 pub struct HasOffset;
 // No impl for TimestampBuilder<HasOffset> because `build()` is included in TimestampBuilder<T>
 
-#[cfg(feature = "experimental-chrono")]
-fn downconvert_to_naive_datetime_with_nanoseconds(
-    timestamp: &Timestamp,
-) -> IonResult<NaiveDateTime> {
-    let dt = NaiveDate::from_ymd_opt(timestamp.year() as i32, timestamp.month(), timestamp.day())
-        .and_then(|d| {
-            d.and_hms_nano_opt(
-                timestamp.hour(),
-                timestamp.minute(),
-                timestamp.second(),
-                timestamp.nanoseconds(),
-            )
-        })
-        .ok_or_else(|| {
-            IonError::illegal_operation("timestamp fields produce invalid NaiveDateTime")
-        })?;
-    Ok(dt)
-}
-
-#[cfg(feature = "experimental-chrono")]
-impl TryInto<NaiveDateTime> for Timestamp {
-    type Error = IonError;
-
-    fn try_into(self) -> Result<NaiveDateTime, Self::Error> {
-        self.try_to_naive_datetime()
-    }
-}
-
-#[cfg(feature = "experimental-chrono")]
-impl TryInto<DateTime<FixedOffset>> for Timestamp {
-    type Error = IonError;
-
-    fn try_into(self) -> Result<DateTime<FixedOffset>, Self::Error> {
-        self.try_to_datetime_fixed_offset()
-    }
-}
-
-#[cfg(feature = "experimental-chrono")]
-impl From<NaiveDateTime> for Timestamp {
-    fn from(date_time: NaiveDateTime) -> Self {
-        Self::from_naive_datetime(date_time)
-    }
-}
-
-#[cfg(feature = "experimental-chrono")]
-impl From<DateTime<FixedOffset>> for Timestamp {
-    fn from(fixed_offset_date_time: DateTime<FixedOffset>) -> Self {
-        Self::from_fixed_offset_datetime(fixed_offset_date_time)
-    }
-}
-
 #[cfg(test)]
 mod timestamp_tests {
     use super::*;
     use crate::ion_data::IonEq;
     use crate::result::IonResult;
     use crate::{Decimal, Int, Timestamp, TimestampPrecision};
-    #[cfg(feature = "experimental-chrono")]
-    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Timelike};
     use rstest::*;
     use std::cmp::Ordering;
     use std::io::Write;
@@ -1650,131 +1459,6 @@ mod timestamp_tests {
         let timestamp2 = TimestampBuilder::with_year(2022).build()?;
         assert_ne!(timestamp1, timestamp2);
         assert!(!timestamp1.ion_eq(&timestamp2));
-        Ok(())
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_timestamp_try_into_naive_datetime() -> IonResult<()> {
-        let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
-            .with_hms(10, 15, 0)
-            .build()?;
-        let naive_datetime: NaiveDateTime = timestamp.try_into()?;
-        let expected = NaiveDate::from_ymd_opt(2021, 4, 6)
-            .unwrap()
-            .and_hms_opt(10, 15, 0)
-            .unwrap();
-        assert_eq!(expected, naive_datetime);
-        Ok(())
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_timestamp_try_into_naive_datetime_fractional_seconds() -> IonResult<()> {
-        let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
-            .with_hms(10, 15, 0)
-            .with_milliseconds(449)
-            .build()?;
-        let datetime: NaiveDateTime = timestamp.try_into()?;
-        let naive_datetime = NaiveDate::from_ymd_opt(2021, 4, 6)
-            .unwrap()
-            .and_hms_opt(10, 15, 0)
-            .unwrap()
-            .with_nanosecond(449000000)
-            .unwrap();
-        assert_eq!(datetime, naive_datetime);
-        Ok(())
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_timestamp_try_into_naive_datetime_error() -> IonResult<()> {
-        let timestamp = TimestampBuilder::with_ymd(2021, 1, 1)
-            .with_hms(0, 0, 0)
-            .with_offset(0)
-            .build()?;
-        //     ^---- This timestamp has a known offset, so we cannot convert it into a NaiveDateTime
-        let result: IonResult<NaiveDateTime> = timestamp.try_into();
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_timestamp_try_into_fixed_offset_datetime() -> IonResult<()> {
-        let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
-            .with_hms(10, 15, 0)
-            .with_offset(-5 * 60)
-            .build()?;
-        //                    ^-- Timestamp's offset API takes minutes
-        let datetime: DateTime<FixedOffset> = timestamp.try_into()?;
-        // chrono's FixedOffset takes seconds ----------v
-        let expected_offset = offset_east(-5 * 60 * 60);
-        let naive_datetime = NaiveDate::from_ymd_opt(2021, 4, 6)
-            .unwrap()
-            .and_hms_opt(10, 15, 0)
-            .unwrap();
-        let expected_datetime = expected_offset
-            .from_local_datetime(&naive_datetime)
-            .unwrap();
-        assert_eq!(datetime, expected_datetime);
-        Ok(())
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_timestamp_try_into_fixed_offset_datetime_fractional_seconds() -> IonResult<()> {
-        let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
-            .with_hms(10, 15, 0)
-            .with_milliseconds(449)
-            .with_offset(-5 * 60)
-            .build()?;
-        //                    ^-- Timestamp's offset API takes minutes
-        let datetime: DateTime<FixedOffset> = timestamp.try_into()?;
-        // chrono's FixedOffset takes seconds ----------v
-        let expected_offset = offset_east(-5 * 60 * 60);
-        let naive_datetime = NaiveDate::from_ymd_opt(2021, 4, 6)
-            .unwrap()
-            .and_hms_opt(10, 15, 0)
-            .unwrap()
-            .with_nanosecond(449000000)
-            .unwrap();
-        let expected_datetime = expected_offset
-            .from_local_datetime(&naive_datetime)
-            .unwrap();
-        assert_eq!(datetime, expected_datetime);
-        Ok(())
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_fixed_offset_datetime_to_timestamp_offset_roundtrip() {
-        let offsets_minutes: &[i32] = &[0, 330, -330, 60, -60, 720, -720, 1, -1];
-        for &offset_min in offsets_minutes {
-            let offset = FixedOffset::east_opt(offset_min * 60).unwrap();
-            let dt = NaiveDate::from_ymd_opt(2024, 6, 15)
-                .unwrap()
-                .and_hms_opt(12, 30, 45)
-                .unwrap();
-            let fixed_dt = offset.from_local_datetime(&dt).unwrap();
-            let timestamp: Timestamp = fixed_dt.into();
-            assert_eq!(
-                timestamp.offset(),
-                Some(offset_min),
-                "offset roundtrip failed for {offset_min} minutes"
-            );
-        }
-    }
-
-    #[cfg(feature = "experimental-chrono")]
-    #[test]
-    fn test_timestamp_try_into_datetime_fixedoffset_error() -> IonResult<()> {
-        let timestamp = TimestampBuilder::with_ymd(2021, 1, 1)
-            .with_hms(0, 0, 0)
-            .build()?;
-        //     ^---- This timestamp has an unknown offset, so we cannot convert it into a DateTime<FixedOffset>
-        let result: IonResult<DateTime<FixedOffset>> = timestamp.try_into();
-        assert!(result.is_err());
         Ok(())
     }
 
@@ -2560,5 +2244,326 @@ mod timestamp_tests {
             .build()?;
         assert_eq!(ts.nanoseconds(), 999_999_999);
         Ok(())
+    }
+}
+
+/// `chrono` interop. All of `timestamp.rs`'s `experimental-chrono` code lives here so the
+/// feature's footprint in this file is a single gated module rather than gates scattered
+/// throughout. (`serde` support also compiles under this feature; see `src/serde/`.) As a
+/// descendant module it retains access to `Timestamp`'s private fields and the packed-layout
+/// constants.
+///
+/// Named `chrono_interop` rather than `chrono` so it does not shadow the extern crate for the
+/// rest of `timestamp.rs`.
+#[cfg(feature = "experimental-chrono")]
+mod chrono_interop {
+    use super::{
+        Timestamp, TimestampPrecision, DAY_MASK, DAY_SHIFT, HOUR_MASK, HOUR_SHIFT, MINUTE_MASK,
+        MINUTE_SHIFT, MONTH_MASK, MONTH_SHIFT, OFFSET_BIAS, OFFSET_MASK, OFFSET_SHIFT,
+        PRECISION_MASK, PRECISION_SHIFT, YEAR_MASK, YEAR_SHIFT,
+    };
+    use crate::result::{IonFailure, IonResult};
+    use crate::IonError;
+    use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+
+    impl Timestamp {
+        /// Converts a [`NaiveDateTime`] or [`DateTime<FixedOffset>`] to a Timestamp with the specified
+        /// precision. If the precision is [`TimestampPrecision::Second`], nanosecond precision (the maximum
+        /// supported by a [`Timelike`]) is assumed.
+        pub fn from_datetime<D>(datetime: D, precision: TimestampPrecision) -> Timestamp
+        where
+            D: Datelike + Timelike + Into<Timestamp>,
+        {
+            let mut timestamp: Timestamp = datetime.into();
+
+            // Zero fields below the requested precision to uphold invariants 1, 2, and 6.
+            match precision {
+                TimestampPrecision::Year => {
+                    timestamp.packed_fields &= YEAR_MASK << YEAR_SHIFT;
+                    // Restore month=1, day=1 (the default "unset" values)
+                    timestamp.packed_fields |= 1 << MONTH_SHIFT | 1 << DAY_SHIFT;
+                    timestamp.attoseconds = 0;
+                }
+                TimestampPrecision::Month => {
+                    timestamp.packed_fields &=
+                        (YEAR_MASK << YEAR_SHIFT) | (MONTH_MASK << MONTH_SHIFT);
+                    // Restore day=1
+                    timestamp.packed_fields |= 1 << DAY_SHIFT;
+                    timestamp.attoseconds = 0;
+                }
+                TimestampPrecision::Day => {
+                    timestamp.packed_fields &= (YEAR_MASK << YEAR_SHIFT)
+                        | (MONTH_MASK << MONTH_SHIFT)
+                        | (DAY_MASK << DAY_SHIFT);
+                    timestamp.attoseconds = 0;
+                }
+                TimestampPrecision::HourAndMinute => {
+                    timestamp.packed_fields &= (YEAR_MASK << YEAR_SHIFT)
+                        | (MONTH_MASK << MONTH_SHIFT)
+                        | (DAY_MASK << DAY_SHIFT)
+                        | (HOUR_MASK << HOUR_SHIFT)
+                        | (MINUTE_MASK << MINUTE_SHIFT)
+                        | (OFFSET_MASK << OFFSET_SHIFT);
+                    timestamp.attoseconds = 0;
+                }
+                TimestampPrecision::Second => {
+                    // Keep everything; just strip subsecond if not already at Second precision
+                }
+            }
+
+            // Set the precision field
+            timestamp.packed_fields &= !(PRECISION_MASK << PRECISION_SHIFT);
+            timestamp.packed_fields |= (precision as u64 & PRECISION_MASK) << PRECISION_SHIFT;
+
+            // Retain offset only at HourAndMinute or Second precision
+            if precision < TimestampPrecision::HourAndMinute {
+                timestamp.packed_fields &= !(OFFSET_MASK << OFFSET_SHIFT);
+            }
+
+            timestamp
+        }
+
+        fn from_naive_datetime(date_time: NaiveDateTime) -> Self {
+            let attoseconds = (date_time.nanosecond() as u64) * 1_000_000_000;
+            Self::from_fields(
+                TimestampPrecision::Second,
+                None,
+                date_time.year() as u16,
+                date_time.month() as u8,
+                date_time.day() as u8,
+                date_time.hour() as u8,
+                date_time.minute() as u8,
+                date_time.second() as u8,
+                9,
+                attoseconds,
+            )
+            .expect("chrono NaiveDateTime fields are always valid")
+        }
+
+        fn from_fixed_offset_datetime(fixed_offset_date_time: DateTime<FixedOffset>) -> Self {
+            let offset_seconds = fixed_offset_date_time.offset().local_minus_utc();
+            let offset_minutes = (offset_seconds / 60) as i16;
+            let local = fixed_offset_date_time.naive_local();
+            let attoseconds = (local.nanosecond() as u64) * 1_000_000_000;
+            // Pack directly from local fields — chrono guarantees validity of the
+            // DateTime, and local year may exceed 9999 (e.g., UTC year 9999 Dec 31
+            // with negative offset). We bypass from_fields validation to avoid panic.
+            let packed = Self::pack_masked(
+                TimestampPrecision::Second,
+                local.year() as u16,
+                local.month() as u8,
+                local.day() as u8,
+                local.hour() as u8,
+                local.minute() as u8,
+                local.second() as u8,
+                (offset_minutes + OFFSET_BIAS) as u16,
+                9,
+            );
+            Timestamp {
+                packed_fields: packed,
+                attoseconds,
+            }
+        }
+
+        fn try_to_naive_datetime(&self) -> IonResult<NaiveDateTime> {
+            if self.offset().is_some() {
+                return IonResult::illegal_operation(
+                    "cannot convert a Timestamp with a known offset into a NaiveDateTime",
+                );
+            }
+            downconvert_to_naive_datetime_with_nanoseconds(self)
+        }
+
+        fn try_to_datetime_fixed_offset(&self) -> IonResult<DateTime<FixedOffset>> {
+            if self.offset().is_none() {
+                return IonResult::illegal_operation(
+                    "cannot convert a Timestamp with an unknown offset into a DateTime<FixedOffset>",
+                );
+            }
+            let utc = self.to_utc();
+            let utc_naive = downconvert_to_naive_datetime_with_nanoseconds(&utc)?;
+            let offset = FixedOffset::east_opt(self.offset().unwrap_or_default() * 60);
+            Ok(offset.unwrap().from_utc_datetime(&utc_naive))
+        }
+    }
+
+    fn downconvert_to_naive_datetime_with_nanoseconds(
+        timestamp: &Timestamp,
+    ) -> IonResult<NaiveDateTime> {
+        let dt =
+            NaiveDate::from_ymd_opt(timestamp.year() as i32, timestamp.month(), timestamp.day())
+                .and_then(|d| {
+                    d.and_hms_nano_opt(
+                        timestamp.hour(),
+                        timestamp.minute(),
+                        timestamp.second(),
+                        timestamp.nanoseconds(),
+                    )
+                })
+                .ok_or_else(|| {
+                    IonError::illegal_operation("timestamp fields produce invalid NaiveDateTime")
+                })?;
+        Ok(dt)
+    }
+
+    impl TryInto<NaiveDateTime> for Timestamp {
+        type Error = IonError;
+
+        fn try_into(self) -> Result<NaiveDateTime, Self::Error> {
+            self.try_to_naive_datetime()
+        }
+    }
+
+    impl TryInto<DateTime<FixedOffset>> for Timestamp {
+        type Error = IonError;
+
+        fn try_into(self) -> Result<DateTime<FixedOffset>, Self::Error> {
+            self.try_to_datetime_fixed_offset()
+        }
+    }
+
+    impl From<NaiveDateTime> for Timestamp {
+        fn from(date_time: NaiveDateTime) -> Self {
+            Self::from_naive_datetime(date_time)
+        }
+    }
+
+    impl From<DateTime<FixedOffset>> for Timestamp {
+        fn from(fixed_offset_date_time: DateTime<FixedOffset>) -> Self {
+            Self::from_fixed_offset_datetime(fixed_offset_date_time)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::types::TimestampBuilder;
+
+        /// Constructs a [`FixedOffset`] at the specified offset seconds from UTC. If the specified
+        /// offset is out of bounds, this method will panic.
+        // Only these tests construct a `FixedOffset` this way; production conversions build the
+        // offset from a `Timestamp` whose offset the builder has already bounded to ±1439 minutes.
+        fn offset_east(seconds_east: i32) -> FixedOffset {
+            FixedOffset::east_opt(seconds_east)
+                .expect("seconds_east was outside the supported range")
+        }
+
+        #[test]
+        fn test_timestamp_try_into_naive_datetime() -> IonResult<()> {
+            let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
+                .with_hms(10, 15, 0)
+                .build()?;
+            let naive_datetime: NaiveDateTime = timestamp.try_into()?;
+            let expected = NaiveDate::from_ymd_opt(2021, 4, 6)
+                .unwrap()
+                .and_hms_opt(10, 15, 0)
+                .unwrap();
+            assert_eq!(expected, naive_datetime);
+            Ok(())
+        }
+
+        #[test]
+        fn test_timestamp_try_into_naive_datetime_fractional_seconds() -> IonResult<()> {
+            let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
+                .with_hms(10, 15, 0)
+                .with_milliseconds(449)
+                .build()?;
+            let datetime: NaiveDateTime = timestamp.try_into()?;
+            let naive_datetime = NaiveDate::from_ymd_opt(2021, 4, 6)
+                .unwrap()
+                .and_hms_opt(10, 15, 0)
+                .unwrap()
+                .with_nanosecond(449000000)
+                .unwrap();
+            assert_eq!(datetime, naive_datetime);
+            Ok(())
+        }
+
+        #[test]
+        fn test_timestamp_try_into_naive_datetime_error() -> IonResult<()> {
+            let timestamp = TimestampBuilder::with_ymd(2021, 1, 1)
+                .with_hms(0, 0, 0)
+                .with_offset(0)
+                .build()?;
+            //     ^---- This timestamp has a known offset, so we cannot convert it into a NaiveDateTime
+            let result: IonResult<NaiveDateTime> = timestamp.try_into();
+            assert!(result.is_err());
+            Ok(())
+        }
+
+        #[test]
+        fn test_timestamp_try_into_fixed_offset_datetime() -> IonResult<()> {
+            let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
+                .with_hms(10, 15, 0)
+                .with_offset(-5 * 60)
+                .build()?;
+            //                    ^-- Timestamp's offset API takes minutes
+            let datetime: DateTime<FixedOffset> = timestamp.try_into()?;
+            // chrono's FixedOffset takes seconds ----------v
+            let expected_offset = offset_east(-5 * 60 * 60);
+            let naive_datetime = NaiveDate::from_ymd_opt(2021, 4, 6)
+                .unwrap()
+                .and_hms_opt(10, 15, 0)
+                .unwrap();
+            let expected_datetime = expected_offset
+                .from_local_datetime(&naive_datetime)
+                .unwrap();
+            assert_eq!(datetime, expected_datetime);
+            Ok(())
+        }
+
+        #[test]
+        fn test_timestamp_try_into_fixed_offset_datetime_fractional_seconds() -> IonResult<()> {
+            let timestamp = TimestampBuilder::with_ymd(2021, 4, 6)
+                .with_hms(10, 15, 0)
+                .with_milliseconds(449)
+                .with_offset(-5 * 60)
+                .build()?;
+            //                    ^-- Timestamp's offset API takes minutes
+            let datetime: DateTime<FixedOffset> = timestamp.try_into()?;
+            // chrono's FixedOffset takes seconds ----------v
+            let expected_offset = offset_east(-5 * 60 * 60);
+            let naive_datetime = NaiveDate::from_ymd_opt(2021, 4, 6)
+                .unwrap()
+                .and_hms_opt(10, 15, 0)
+                .unwrap()
+                .with_nanosecond(449000000)
+                .unwrap();
+            let expected_datetime = expected_offset
+                .from_local_datetime(&naive_datetime)
+                .unwrap();
+            assert_eq!(datetime, expected_datetime);
+            Ok(())
+        }
+
+        #[test]
+        fn test_fixed_offset_datetime_to_timestamp_offset_roundtrip() {
+            let offsets_minutes: &[i32] = &[0, 330, -330, 60, -60, 720, -720, 1, -1];
+            for &offset_min in offsets_minutes {
+                let offset = FixedOffset::east_opt(offset_min * 60).unwrap();
+                let dt = NaiveDate::from_ymd_opt(2024, 6, 15)
+                    .unwrap()
+                    .and_hms_opt(12, 30, 45)
+                    .unwrap();
+                let fixed_dt = offset.from_local_datetime(&dt).unwrap();
+                let timestamp: Timestamp = fixed_dt.into();
+                assert_eq!(
+                    timestamp.offset(),
+                    Some(offset_min),
+                    "offset roundtrip failed for {offset_min} minutes"
+                );
+            }
+        }
+
+        #[test]
+        fn test_timestamp_try_into_datetime_fixedoffset_error() -> IonResult<()> {
+            let timestamp = TimestampBuilder::with_ymd(2021, 1, 1)
+                .with_hms(0, 0, 0)
+                .build()?;
+            //     ^---- This timestamp has an unknown offset, so we cannot convert it into a DateTime<FixedOffset>
+            let result: IonResult<DateTime<FixedOffset>> = timestamp.try_into();
+            assert!(result.is_err());
+            Ok(())
+        }
     }
 }
