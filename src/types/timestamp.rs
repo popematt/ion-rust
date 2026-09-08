@@ -7,22 +7,33 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 /// Indicates the most precise time unit that has been specified in the accompanying [Timestamp].
-// IMPL NOTE: Discriminant values are cast to u64 and stored in the packed bit layout.
-// They must remain stable. They are not exposed in the public API.
+// IMPL NOTE: Discriminant values are cast to u64 and stored in the packed bit layout, so they must
+// remain stable. The discriminants are left implicit (rather than written as `= 0`, `= 1`, ...) so
+// they do not appear in the public API; the `const _` block below asserts the expected values, so
+// reordering the variants fails the build instead of silently changing the packed encoding.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Default, Hash)]
 pub enum TimestampPrecision {
     /// Year-level precision (e.g. `2020T`)
     #[default]
-    Year = 0,
+    Year,
     /// Month-level precision (e.g. `2020-08T`)
-    Month = 1,
+    Month,
     /// Day-level precision (e.g. `2020-08-01T`)
-    Day = 2,
+    Day,
     /// Minute-level precision (e.g. `2020-08-01T12:34Z`)
-    HourAndMinute = 3,
+    HourAndMinute,
     /// Second-level precision or greater. (e.g. `2020-08-01T12:34:56Z` or `2020-08-01T12:34:56.123456789Z`)
-    Second = 4,
+    Second,
 }
+
+// The packed layout depends on these exact discriminant values; guard them at compile time.
+const _: () = {
+    assert!(TimestampPrecision::Year as u64 == 0);
+    assert!(TimestampPrecision::Month as u64 == 1);
+    assert!(TimestampPrecision::Day as u64 == 2);
+    assert!(TimestampPrecision::HourAndMinute as u64 == 3);
+    assert!(TimestampPrecision::Second as u64 == 4);
+};
 
 const YEAR_BITS: u64 = 14;
 const MONTH_BITS: u64 = 4;
