@@ -2401,7 +2401,7 @@ mod chrono_interop {
     use super::{
         Timestamp, TimestampPrecision, DAY_MASK, DAY_SHIFT, HOUR_MASK, HOUR_SHIFT, MINUTE_MASK,
         MINUTE_SHIFT, MONTH_MASK, MONTH_SHIFT, OFFSET_BIAS, OFFSET_MASK, OFFSET_SHIFT,
-        PRECISION_MASK, PRECISION_SHIFT, YEAR_MASK, YEAR_SHIFT,
+        OFFSET_UNKNOWN_SENTINEL, PRECISION_MASK, PRECISION_SHIFT, YEAR_MASK, YEAR_SHIFT,
     };
     use crate::result::{IonFailure, IonResult};
     use crate::IonError;
@@ -2466,19 +2466,26 @@ mod chrono_interop {
 
         fn from_naive_datetime(date_time: NaiveDateTime) -> Self {
             let attoseconds = (date_time.nanosecond() as u64) * 1_000_000_000;
-            Self::from_fields(
+            // Pack directly from the fields, bypassing `from_fields` validation. chrono permits
+            // years outside Ion's 1..=9999 range (e.g. year 0), which `from_fields` would reject;
+            // we accept them silently here so this conversion behaves consistently with
+            // `from_fixed_offset_datetime`. Making both conversions fallible is tracked in #1035.
+            // A `NaiveDateTime` has no offset, so the offset is stored as "unknown".
+            let packed = Self::pack_masked(
                 TimestampPrecision::Second,
-                None,
                 date_time.year() as u16,
                 date_time.month() as u8,
                 date_time.day() as u8,
                 date_time.hour() as u8,
                 date_time.minute() as u8,
                 date_time.second() as u8,
+                OFFSET_UNKNOWN_SENTINEL,
                 9,
+            );
+            Timestamp {
+                packed_fields: packed,
                 attoseconds,
-            )
-            .expect("chrono NaiveDateTime fields are always valid")
+            }
         }
 
         fn from_fixed_offset_datetime(fixed_offset_date_time: DateTime<FixedOffset>) -> Self {
@@ -2587,6 +2594,30 @@ mod chrono_interop {
         fn offset_east(seconds_east: i32) -> FixedOffset {
             FixedOffset::east_opt(seconds_east)
                 .expect("seconds_east was outside the supported range")
+        }
+
+        /// chrono permits years outside Ion's `1..=9999` range. Both `From` conversions accept
+        /// such values silently (masking the year to the packed field) rather than one panicking
+        /// and the other masking. This documents that agreed-upon behavior; making the conversions
+        /// fallible is tracked in #1035.
+        #[test]
+        fn out_of_range_year_is_accepted_consistently_by_both_conversions() {
+            // `From<NaiveDateTime>`: year 0 must not panic.
+            let naive_year_zero = NaiveDate::from_ymd_opt(0, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let from_naive = Timestamp::from(naive_year_zero);
+
+            // `From<DateTime<FixedOffset>>`: year 0 at UTC.
+            let fixed_year_zero = offset_east(0)
+                .from_local_datetime(&naive_year_zero)
+                .unwrap();
+            let from_fixed = Timestamp::from(fixed_year_zero);
+
+            // Neither errored or panicked, and both masked year 0 into the 14-bit field the same
+            // way, so the two conversions agree.
+            assert_eq!(from_naive.year(), from_fixed.year());
         }
 
         #[test]
