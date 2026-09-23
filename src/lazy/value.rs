@@ -1,16 +1,15 @@
 use crate::lazy::decoder::Decoder;
-use crate::lazy::expanded::lazy_element::LazyElement;
-use crate::lazy::expanded::{
-    EncodingContextRef, ExpandedAnnotationsIterator, IoBufferSource, LazyExpandedValue,
-};
+use crate::lazy::expanded::lazy_element::{LazyElement, ValueMetadata};
+use crate::lazy::expanded::{EncodingContextRef, ExpandedAnnotationsIterator, LazyExpandedValue};
 use crate::lazy::value_ref::ValueRef;
 use crate::location::SourceLocation;
 use crate::result::IonFailure;
 use crate::symbol_ref::AsSymbolRef;
 use crate::{
     try_or_some_err, Annotations, Element, ExpandedValueSource, HasSpan, IntoAnnotatedElement,
-    IonError, IonResult, IonType, LazyRawValue, Span, SymbolRef, SymbolTable, Value,
+    IonError, IonResult, IonType, LazyRawValue, SymbolRef, SymbolTable, Value,
 };
+use std::rc::Rc;
 
 /// A value in a binary Ion stream whose header has been parsed but whose body (i.e. its data) has
 /// not. A `LazyValue` is immutable; its data can be read any number of times.
@@ -254,30 +253,35 @@ impl<'top, D: Decoder> LazyValue<'top, D> {
         }
     }
 
+    /// Returns a `LazyElement`: an owned handle to this value that can outlive the `Reader`.
+    ///
+    /// Note that a `LazyElement` does not copy the value; it shares ownership of the resources
+    /// needed to read it. Holding one prevents those resources--the input buffer holding the
+    /// value's bytes, the symbol table, and the reader's bump allocator--from being released.
     pub fn to_owned(self) -> LazyElement<D> {
+        // Capture the value's header facts while we still have a parsed view of it. Recording them
+        // now is free and spares the `LazyElement` from re-parsing to answer `ion_type()` and
+        // friends.
+        let metadata = ValueMetadata::of(&self);
         // Clone the `EncodingContext`, which will also bump the reference counts for the resources
-        // it owns.
+        // it owns. Cloning also captures an `IoBuffer`: a shared handle to the input buffer holding
+        // the value's serialized bytes.
         let context = self.context().context.clone();
-        // The value's source is a `ValueLiteral`, which may hold references to bytes in the input
-        // buffer. Modify the source to point to heap data owned by `context`.
-        // First, get the `IoBufferSource` and ask it for a shared copy of the IoBuffer.
-        // SAFETY: `io_buffer_source` is an `UnsafeCell` to allow us to set it from the
-        //         `StreamingRawReader` after each top-level value. That means we need `unsafe` here.
+        // Ask the clone for a handle to that `IoBuffer`. (For a cloned context this is cheap; it
+        // does not copy the input.) The `LazyElement` stores it so that it can borrow the value's
+        // bytes without reaching through the context's `UnsafeCell`.
+        let io_buffer = context.save_io_buffer();
+        // Rather than storing a borrowed view of the value--which would point into memory the
+        // `LazyElement` itself owns--record where the value is. The first read parses it from the
+        // `IoBuffer` and caches the result; see `LazyElement::as_lazy_value`.
         let ExpandedValueSource::ValueLiteral(raw_value) = self.expanded_value.source;
-        let IoBufferSource::IoBuffer(ref io_buffer) = (unsafe { &*context.io_buffer_source.get() })
-        else {
-            unreachable!("tried to access cloned EncodingContext IoBuffer but it didn't exist");
-        };
-        let value_span = raw_value.span();
-        let value_offset = value_span.offset();
-        let value_length = value_span.len();
-        let local_offset = value_offset - io_buffer.stream_offset();
-        let value_bytes = &io_buffer.all_bytes()[local_offset..local_offset + value_length];
-        let backing_span = Span::with_offset(value_offset, value_bytes);
-        let raw_value = raw_value.with_backing_data(backing_span);
-        let source = ExpandedValueSource::ValueLiteral(raw_value);
-        // Now that we have upheld the invariants required by `LazyElement::new`, we can safely call it.
-        unsafe { LazyElement::new(context, source) }
+        LazyElement::new(
+            Rc::new(context),
+            io_buffer,
+            raw_value.span().range(),
+            raw_value.encoding(),
+            metadata,
+        )
     }
 }
 
@@ -852,27 +856,28 @@ mod tests {
     ) -> IonResult<Vec<SourceLocation>> {
         let mut locations = vec![];
         for lazy_element in values {
-            locations.push(lazy_element.as_lazy_value().location());
+            // Re-parse the value once and answer both this element's location and its children from
+            // the same view. `LazyElement::read` hands back owned data, so it cannot produce the
+            // child `LazyValue`s that `to_owned()` needs.
+            let lazy_value = lazy_element.as_lazy_value()?;
+            locations.push(lazy_value.location());
             let contained_values = match lazy_element.ion_type() {
-                IonType::List => lazy_element
+                IonType::List => lazy_value
                     .read()?
-                    .clone()
                     .expect_list()?
                     .iter()
                     .map(Result::unwrap)
                     .map(LazyValue::into)
                     .collect(),
-                IonType::SExp => lazy_element
+                IonType::SExp => lazy_value
                     .read()?
-                    .clone()
                     .expect_sexp()?
                     .iter()
                     .map(Result::unwrap)
                     .map(LazyValue::into)
                     .collect(),
-                IonType::Struct => lazy_element
+                IonType::Struct => lazy_value
                     .read()?
-                    .clone()
                     .expect_struct()?
                     .iter()
                     .map(|f| f.unwrap().value())

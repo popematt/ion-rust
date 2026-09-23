@@ -53,6 +53,24 @@ impl Decoder for AnyEncoding {
     type FieldName<'top> = LazyRawAnyFieldName<'top>;
     type AnnotationsIterator<'top> = RawAnyAnnotationsIterator<'top>;
     type VersionMarker<'top> = LazyRawAnyVersionMarker<'top>;
+
+    fn value_from_span<'a>(
+        context: EncodingContextRef<'a>,
+        span: Span<'a>,
+        encoding: IonEncoding,
+    ) -> IonResult<Self::Value<'a>> {
+        // Unlike the encoding-specific decoders, `AnyEncoding` cannot tell from the bytes alone how
+        // the value was serialized; the caller has to say.
+        let kind = match encoding {
+            IonEncoding::Text_1_0 => LazyRawValueKind::Text_1_0(TextEncoding_1_0::value_from_span(
+                context, span, encoding,
+            )?),
+            IonEncoding::Binary_1_0 => LazyRawValueKind::Binary_1_0(
+                BinaryEncoding_1_0::value_from_span(context, span, encoding)?,
+            ),
+        };
+        Ok(LazyRawAnyValue { encoding: kind })
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -562,19 +580,6 @@ impl<'top> LazyRawValue<'top, AnyEncoding> for LazyRawAnyValue<'top> {
         match &self.encoding {
             LazyRawValueKind::Text_1_0(v) => v.value_span(),
             LazyRawValueKind::Binary_1_0(v) => v.value_span(),
-        }
-    }
-
-    fn with_backing_data(&self, span: Span<'top>) -> Self {
-        Self {
-            encoding: match &self.encoding {
-                LazyRawValueKind::Text_1_0(v) => {
-                    LazyRawValueKind::Text_1_0(v.with_backing_data(span))
-                }
-                LazyRawValueKind::Binary_1_0(v) => {
-                    LazyRawValueKind::Binary_1_0(v.with_backing_data(span))
-                }
-            },
         }
     }
 

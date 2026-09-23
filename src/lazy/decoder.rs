@@ -81,6 +81,28 @@ pub trait Decoder: 'static + Sized + Debug + Clone + Copy {
     fn with_catalog(self, catalog: impl Catalog + 'static) -> ReadConfig<Self> {
         ReadConfig::new_with_catalog(self, catalog)
     }
+
+    /// Parses the single value that is serialized in `span`, returning a view of it that borrows
+    /// `context` and `span`.
+    ///
+    /// `span` must hold exactly the bytes of one encoded Ion value--including its annotations, if
+    /// it has any--and `span.offset()` must be the stream offset at which those bytes appeared.
+    /// `encoding` is the encoding in which the value was serialized; decoders that support a single
+    /// encoding ignore it, while [`AnyEncoding`](crate::AnyEncoding) uses it to choose an
+    /// implementation.
+    ///
+    /// Unlike [`LazyRawReader::next`], this does not interpret the bytes as a *stream*: it will not
+    /// match an Ion version marker, NOP padding, or trailing data. That matters because a value's
+    /// bytes can be ambiguous when read as a stream. For example, the text symbol `$ion_1_0` is a
+    /// legal value inside a container, but a stream that begins with those bytes begins with an IVM.
+    ///
+    /// This is used by `LazyElement`, which stores the location of a value rather than a borrowed
+    /// view of it and rebuilds the view on demand.
+    fn value_from_span<'a>(
+        context: EncodingContextRef<'a>,
+        span: Span<'a>,
+        encoding: IonEncoding,
+    ) -> IonResult<Self::Value<'a>>;
 }
 
 pub trait RawVersionMarker<'top>: Debug + Copy + Clone + HasSpan<'top> {
@@ -406,13 +428,6 @@ pub trait LazyRawValue<'top, D: Decoder>:
     fn annotations_span(&self) -> Span<'top>;
 
     fn value_span(&self) -> Span<'top>;
-
-    /// Returns a copy of the `LazyRawValue` whose backing data—the slice of bytes representing the
-    /// serialized value—has been replaced by `span`.
-    ///
-    /// This method is used when converting a `LazyValue` (which may be backed by a slice of the
-    /// input buffer) to a `LazyElement` (which needs to be backed by heap data).
-    fn with_backing_data(&self, span: Span<'top>) -> Self;
 
     fn encoding(&self) -> IonEncoding;
 }

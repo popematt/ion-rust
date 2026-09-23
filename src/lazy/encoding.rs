@@ -1,6 +1,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::lazy::any_encoding::{IonEncoding, IonVersion, LazyRawAnyValue};
+use crate::lazy::binary::binary_buffer::BinaryBuffer;
 use crate::lazy::binary::raw::annotations_iterator::RawBinaryAnnotationsIterator;
 use crate::lazy::binary::raw::r#struct::{LazyRawBinaryFieldName_1_0, LazyRawBinaryStruct_1_0};
 use crate::lazy::binary::raw::reader::LazyRawBinaryReader_1_0;
@@ -9,9 +10,12 @@ use crate::lazy::binary::raw::value::{LazyRawBinaryValue_1_0, LazyRawBinaryVersi
 use crate::lazy::decoder::Decoder;
 use crate::lazy::encoder::write_as_ion::WriteAsIon;
 use crate::lazy::encoder::Encoder;
+use crate::lazy::expanded::EncodingContextRef;
+use crate::lazy::span::Span;
 use crate::lazy::text::buffer::{whitespace_and_then, IonParser, TextBuffer};
 use crate::lazy::text::encoded_value::EncodedTextValue;
 use crate::lazy::text::matched::MatchedValue;
+use crate::lazy::text::parse_result::WithContext;
 use crate::lazy::text::raw::r#struct::{
     LazyRawTextFieldName, LazyRawTextStruct, RawTextStructIterator,
 };
@@ -23,6 +27,7 @@ use crate::lazy::text::value::{
     LazyRawTextValue, LazyRawTextValue_1_0, LazyRawTextVersionMarker_1_0,
     RawTextAnnotationsIterator,
 };
+use crate::result::IonFailure;
 
 use crate::{
     AnnotationsEncoding, ContainerEncoding, FieldNameEncoding, HasRange, IonError, IonResult,
@@ -183,6 +188,25 @@ pub trait TextEncoding:
         encoded_text_value: EncodedTextValue<'a, Self>,
     ) -> Self::Value<'a>;
 
+    /// Implements [`Decoder::value_from_span`] for text encodings.
+    ///
+    /// Note that this matches an annotated value rather than a top-level stream item, so the bytes
+    /// `$ion_1_0` are read as the symbol value they are inside a container, not as an IVM.
+    fn value_from_text_span<'a>(
+        context: EncodingContextRef<'a>,
+        span: Span<'a>,
+    ) -> IonResult<Self::Value<'a>> {
+        let mut input = TextBuffer::from_span(context, span, true);
+        let value = input
+            .match_annotated_value::<Self>()
+            .with_context("reading a value from its own bytes", input)?;
+        debug_assert!(
+            input.is_empty(),
+            "span passed to value_from_span held more than one value"
+        );
+        Ok(value)
+    }
+
     /// Matches a value that appears in value position.
     fn value_expr_matcher<'a>() -> impl IonParser<'a, Self::Value<'a>>;
 
@@ -306,6 +330,20 @@ impl Decoder for BinaryEncoding_1_0 {
     type FieldName<'top> = LazyRawBinaryFieldName_1_0<'top>;
     type AnnotationsIterator<'top> = RawBinaryAnnotationsIterator<'top>;
     type VersionMarker<'top> = LazyRawBinaryVersionMarker_1_0<'top>;
+
+    fn value_from_span<'a>(
+        context: EncodingContextRef<'a>,
+        span: Span<'a>,
+        _encoding: IonEncoding,
+    ) -> IonResult<Self::Value<'a>> {
+        let buffer = BinaryBuffer::new_with_offset(context, span.bytes(), span.offset());
+        // `peek_sequence_value` allocates the value it parses in `context`'s arena. It is also the
+        // method the reader uses to read a value at any depth, so the bytes are interpreted here
+        // exactly as they were when the value was first encountered.
+        buffer.peek_sequence_value()?.ok_or_else(|| {
+            IonError::decoding_error("no value found at the recorded offset of a stored value")
+        })
+    }
 }
 
 impl Decoder for TextEncoding_1_0 {
@@ -319,6 +357,14 @@ impl Decoder for TextEncoding_1_0 {
     type FieldName<'top> = LazyRawTextFieldName<'top, Self>;
     type AnnotationsIterator<'top> = RawTextAnnotationsIterator<'top>;
     type VersionMarker<'top> = LazyRawTextVersionMarker_1_0<'top>;
+
+    fn value_from_span<'a>(
+        context: EncodingContextRef<'a>,
+        span: Span<'a>,
+        _encoding: IonEncoding,
+    ) -> IonResult<Self::Value<'a>> {
+        Self::value_from_text_span(context, span)
+    }
 }
 
 /// Marker trait for types that represent value literals in an Ion stream of some encoding.

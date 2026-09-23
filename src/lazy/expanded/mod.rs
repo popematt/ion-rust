@@ -97,6 +97,10 @@ impl Clone for EncodingContext {
         let io_buffer = self.save_io_buffer();
         Self {
             symbol_table: self.symbol_table.clone(),
+            // NB: cloning the `Rc` handle (not the arena) is load-bearing. It raises
+            //     `Rc::strong_count(allocator)` above 1, which is what makes
+            //     `make_allocator_mut` swap in a fresh arena instead of resetting the shared one.
+            //     See `make_allocator_mut` and `LazyElement`.
             allocator: self.allocator.clone(),
             io_buffer_source: IoBufferSource::IoBuffer(io_buffer).into(),
         }
@@ -169,6 +173,15 @@ impl EncodingContext {
         &self.allocator
     }
 
+    /// Returns a mutable reference to the arena, which the reader uses to reset it between
+    /// top-level expressions.
+    ///
+    /// SOUNDNESS-CRITICAL: this is a copy-on-write guard. If another `EncodingContext` (in practice,
+    /// one held by a stored [`LazyElement`](lazy_element::LazyElement)) shares this `Rc` handle,
+    /// resetting the arena in place would invalidate data that is still in use: re-parsing a
+    /// `LazyElement`'s value allocates in the arena, and any `LazyValue` derived from it borrows
+    /// those allocations. Instead, we install a *fresh* arena here and leave the shared one alone;
+    /// the last surviving handle frees it.
     fn make_allocator_mut(allocator: &mut Rc<BumpAllocator>) -> &mut BumpAllocator {
         // This is the same logic as `Rc::make_mut`. We can't use that method here because
         // the bump allocator doesn't implement `Clone`, a required bound.
