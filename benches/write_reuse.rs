@@ -32,6 +32,46 @@ mod benchmark {
         s
     }
 
+    // An aggregate document: a top-level struct with nested sub-structs and an `items` list of `n`
+    // structs. Each item has a `parts` list of two part sub-trees that alternate structs and lists
+    // and vary in depth by item; the deepest container (an empty `children` list) is at depth 16.
+    fn make_nested_doc(n: usize) -> String {
+        let mut s = String::from(
+            r#"{ order_id: 902211, created: 2022-12-07T20:59:59.744Z, status: shipped,
+                customer: { id: 4182, name: "Example Customer", tier: gold,
+                    address: { street: "123 Example Ave", city: "Seattle", postal_code: "98101",
+                        geo: { lat: 47.6062e0, lon: -122.3321e0 } } },
+                items: ["#,
+        );
+        for i in 0..n {
+            s.push_str(&format!(
+                r#"{{ sku: "SKU-{i:06}", quantity: {q}, unit_price: {p}.99, taxable: {t},
+                    tags: [promo, seasonal], parts: [{a}, {b}] }},"#,
+                q = 1 + i % 5,
+                p = 10 + i % 90,
+                t = i % 2 == 0,
+                a = make_part(i, 5, 5 + 2 * (i % 6)),
+                b = make_part(i + 1, 5, 5 + 2 * ((i + 3) % 6)),
+            ));
+        }
+        s.push_str("] }");
+        s
+    }
+
+    // A part struct at container depth `depth` whose `children` list holds one nested part, until
+    // the part at `max_depth` (at most 15), whose `children` list is empty.
+    fn make_part(id: usize, depth: usize, max_depth: usize) -> String {
+        let children = if depth < max_depth {
+            make_part(id, depth + 2, max_depth)
+        } else {
+            String::new()
+        };
+        format!(
+            "{{ id: {id}, kind: component, weight: {w}e-1, children: [{children}] }}",
+            w = 1 + id % 9
+        )
+    }
+
     // Benchmarks encoding `elem` as one binary 1.0 document: a fresh writer per document
     // (`main`'s behavior) vs a reused writer bound to a fresh sink per document via attach/detach.
     fn bench_doc(c: &mut Criterion, label: &str, elem: &Element) {
@@ -152,6 +192,18 @@ mod benchmark {
         ];
         for (label, n) in sizes {
             let elem = Element::read_one(make_doc(n).as_str()).unwrap();
+            bench_doc(c, label, &elem);
+        }
+
+        // (label, item count) chosen to land near ~1 KB, ~10 KB, ~100 KB, ~1 MB encoded.
+        let nested_sizes = [
+            ("nested ~1KB", 4usize),
+            ("nested ~10KB", 55),
+            ("nested ~100KB", 563),
+            ("nested ~1MB", 5650),
+        ];
+        for (label, n) in nested_sizes {
+            let elem = Element::read_one(make_nested_doc(n).as_str()).unwrap();
             bench_doc(c, label, &elem);
         }
 

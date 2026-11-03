@@ -91,8 +91,8 @@ pub trait Recycle {
     fn apply_config<E: Encoding>(&mut self, config: &WriteConfig<E>);
 }
 
-/// The upper bound on the memory a parked (idle) writer may retain in any one of its buffers or
-/// scratch arenas. Each of those grows to fit the largest document the writer has encoded; a pooled
+/// The upper bound on the memory a parked (idle) writer may retain in any one of its buffers or its
+/// scratch memory. Each of those grows to fit the largest document the writer has encoded; a pooled
 /// writer can live for the rest of the process, so anything that has grown past this cap is dropped
 /// in favor of a small fresh allocation instead of being held indefinitely. The cost is one
 /// reallocation the next time a large document is encoded. (A future refinement could make this

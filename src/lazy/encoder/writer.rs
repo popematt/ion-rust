@@ -31,8 +31,9 @@ use crate::{
 /// buffered. Flushing it is not guaranteed to produce a valid Ion stream.
 // Note: the struct itself is generic over `Output` WITHOUT an `Output: Write` bound so that a
 // sink-less `Writer<E, ()>` can be parked in a pool (e.g. thread-local) between uses, retaining its
-// warm sub-writers and their scratch arenas. All encoding methods live in `impl<E, Output: Write>`;
-// the idle state (`Writer<E, ()>`) exposes only `idle`/`set_config`/`attach`.
+// warm sub-writers and their scratch buffers. All encoding methods live in
+// `impl<E, Output: Write>`; the idle state (`Writer<E, ()>`) exposes only
+// `idle`/`set_config`/`attach`.
 #[cfg_attr(feature = "experimental-reader-writer", visibility::make(pub))]
 pub(crate) struct Writer<E: Encoding, Output> {
     symbols: WriterSymbolTable,
@@ -82,9 +83,9 @@ fn build_parts<E: Encoding>(config: WriteConfig<E>) -> IonResult<WriterParts<E>>
     })
 }
 
-/// The idle (sink-less) state of a reusable managed writer. It holds warm sub-writers (each with a
-/// warm scratch arena) and a fresh symbol table, but no output sink, so it can be parked in a pool.
-/// Call [`Self::attach`] to bind a sink and get an active writer back.
+/// The idle (sink-less) state of a reusable managed writer. It holds warm sub-writers (each with
+/// warm scratch buffers) and a fresh symbol table, but no output sink, so it can be parked in a
+/// pool. Call [`Self::attach`] to bind a sink and get an active writer back.
 ///
 /// Only encodings whose raw writer is [`Reusable`] have this API, which today means Ion 1.0 -- both
 /// binary and text. For an encoding that opts out, the missing `Reusable` bound makes
@@ -132,9 +133,6 @@ where
 
     /// Binds `output` to this idle writer and returns an active writer ready to encode.
     pub fn attach<Output: Write>(self, output: Output) -> Writer<E, Output> {
-        // Moving the sub-writers (and so their scratch arenas) is sound: each holds its arena via an
-        // `AliasableBump`, which keeps the `&Bump` captured by the arena-allocated encoding buffer
-        // valid across the move.
         let (active, ()) = self.replace_output(output);
         active
     }
@@ -146,7 +144,7 @@ where
     E::Writer<Vec<u8>>: Reusable,
 {
     /// Returns this writer to the idle (sink-less) state along with the output sink, so the writer
-    /// (and its warm sub-writers/arenas) can be parked in a pool and reused via
+    /// (and its warm sub-writers/scratch buffers) can be parked in a pool and reused via
     /// [`Writer::<E, ()>::attach`].
     ///
     /// **This DISCARDS any un-flushed document.** Nothing is written to `output` here; call
@@ -177,8 +175,8 @@ where
 #[cfg_attr(not(feature = "experimental-reader-writer"), allow(dead_code))]
 impl<E: Encoding, Output> Writer<E, Output> {
     /// Swaps this writer's output sink for `output`, returning the rebuilt writer and the sink it
-    /// was holding. Everything else -- the warm sub-writers, their scratch arenas, the symbol table
-    /// -- moves across untouched.
+    /// was holding. Everything else -- the warm sub-writers, their scratch buffers, the symbol
+    /// table -- moves across untouched.
     fn replace_output<NewOutput>(self, output: NewOutput) -> (Writer<E, NewOutput>, Output) {
         let Writer {
             symbols,
@@ -802,15 +800,11 @@ impl<S: SequenceWriter> ElementWriter for S {
 mod reuse_tests {
     use super::tests::assert_depth_error;
     use super::Writer;
-    // `DEFAULT_BUMP_SIZE` is the binary writer's arena size, imported here (and only here) so the
-    // arena tests can derive their sizes from the real arena rather than hardcoding them.
-    use crate::lazy::encoder::binary::v1_0::writer::DEFAULT_BUMP_SIZE;
     use crate::lazy::encoder::{
         LazyRawWriter, Reusable, IDLE_BUFFER_CAPACITY, IDLE_RETAIN_CAP, IDLE_SYMBOL_RETAIN_CAP,
     };
     use crate::lazy::encoding::{BinaryEncoding_1_0, TextEncoding_1_0};
     use crate::{v1_0, Element, Encoding, IonData, IonResult, TextFormat, WriteConfig};
-    use bumpalo::Bump as BumpAllocator;
     use rstest::rstest;
 
     /// Encodes a single document with a fresh managed writer (the non-reused baseline).
@@ -835,10 +829,9 @@ mod reuse_tests {
         Writer::<BinaryEncoding_1_0, ()>::idle(v1_0::Binary)
     }
 
-    /// The size of a freshly constructed scratch arena, computed rather than hardcoded so bumpalo's
-    /// internal rounding cannot make the assertions brittle.
-    fn fresh_arena_bytes() -> usize {
-        BumpAllocator::with_capacity(DEFAULT_BUMP_SIZE).allocated_bytes()
+    /// The scratch memory held by a freshly constructed binary writer.
+    fn fresh_scratch_bytes() -> IonResult<usize> {
+        Ok(idle_binary_writer()?.data_writer.retained_scratch_bytes())
     }
 
     /// A managed Ion 1.0 writer that is reused across DIFFERENT documents (each of which forces the
@@ -900,38 +893,39 @@ mod reuse_tests {
         Ok(())
     }
 
-    /// `detach` must release a scratch arena that grew past `IDLE_RETAIN_CAP` while encoding an
+    /// `detach` must release scratch memory that grew past `IDLE_RETAIN_CAP` while encoding an
     /// unusually large value, rather than retaining it for the life of the pooled writer.
     #[test]
-    fn detach_shrinks_oversized_arena() -> IonResult<()> {
-        // A blob twice the retain cap; large top-level values are encoded through the bump arena.
+    fn detach_shrinks_oversized_scratch() -> IonResult<()> {
+        // A blob twice the retain cap; top-level values are encoded into the encoding buffer.
         let big = vec![0u8; IDLE_RETAIN_CAP * 2];
 
         let mut writer = idle_binary_writer()?.attach(Vec::new());
         writer.write(big.as_slice())?;
-        // Precondition: the value really did grow the arena past the cap. Without this the
-        // post-conditions below could pass vacuously if large values stopped routing through it.
+        // Precondition: the value really did grow the scratch memory past the cap. Without this
+        // the post-conditions below could pass vacuously if large values stopped being buffered
+        // there.
         assert!(
-            writer.data_writer.allocated_bytes() > IDLE_RETAIN_CAP,
-            "arena did not exceed the retain cap before detach: {} bytes",
-            writer.data_writer.allocated_bytes()
+            writer.data_writer.retained_scratch_bytes() > IDLE_RETAIN_CAP,
+            "scratch memory did not exceed the retain cap before detach: {} bytes",
+            writer.data_writer.retained_scratch_bytes()
         );
         writer.flush()?;
 
         let (idle, bytes) = writer.detach();
         assert_eq!(
-            idle.data_writer.allocated_bytes(),
-            fresh_arena_bytes(),
-            "detach retained the oversized arena instead of replacing it with a fresh one"
+            idle.data_writer.retained_scratch_bytes(),
+            fresh_scratch_bytes()?,
+            "detach retained oversized scratch memory instead of replacing it with fresh buffers"
         );
         // The large value still made it to the sink intact.
         assert_eq!(
             Element::read_one(bytes)?.expect_blob()?,
             big.as_slice(),
-            "the large value did not survive the arena shrink"
+            "the large value did not survive the scratch shrink"
         );
 
-        // The writer whose arena was swapped out still encodes a correct document.
+        // The writer whose scratch memory was swapped out still encodes a correct document.
         let doc = Element::read_one(r#"{ a: 1, b: [2, 3], c: sym_c }"#)?;
         let mut writer = idle.attach(Vec::new());
         writer.write(&doc)?;
@@ -940,7 +934,60 @@ mod reuse_tests {
         assert_eq!(
             bytes,
             encode_fresh(v1_0::Binary, &doc)?,
-            "reuse after an arena shrink is not byte-identical to fresh"
+            "reuse after a scratch shrink is not byte-identical to fresh"
+        );
+        Ok(())
+    }
+
+    /// `detach` must also release the pooled container buffers when, together, they grow past
+    /// `IDLE_RETAIN_CAP`, even though no single buffer does.
+    #[test]
+    fn detach_shrinks_oversized_buffer_pool() -> IonResult<()> {
+        // Each enclosing list's pooled buffer holds a copy of the blob, so the two lists' buffers
+        // together exceed the cap, while the top-level encoding buffer (one copy) stays under it.
+        let big = vec![0u8; IDLE_RETAIN_CAP * 3 / 5];
+        let value = [[big.as_slice()]];
+
+        let mut writer = idle_binary_writer()?.attach(Vec::new());
+        writer.write(value)?;
+        writer.flush()?;
+        // Preconditions: the pool alone is what pushes the scratch memory past the cap. Without
+        // these, the post-condition below could hold because of the top-level buffer instead.
+        let pooled_bytes = writer.data_writer.pooled_scratch_bytes();
+        let top_level_bytes = writer.data_writer.retained_scratch_bytes() - pooled_bytes;
+        assert!(
+            pooled_bytes > IDLE_RETAIN_CAP,
+            "the buffer pool did not exceed the retain cap before detach: {pooled_bytes} bytes"
+        );
+        assert!(
+            top_level_bytes <= IDLE_RETAIN_CAP,
+            "the top-level encoding buffer alone exceeded the retain cap: {top_level_bytes} bytes"
+        );
+
+        let (idle, bytes) = writer.detach();
+        assert_eq!(
+            idle.data_writer.retained_scratch_bytes(),
+            fresh_scratch_bytes()?,
+            "detach retained an oversized buffer pool instead of replacing it with a fresh one"
+        );
+        let mut fresh = Writer::new(v1_0::Binary, Vec::new())?;
+        fresh.write(value)?;
+        assert_eq!(
+            bytes,
+            fresh.close()?,
+            "the nested value was not encoded as a fresh writer encodes it"
+        );
+
+        // The writer whose pool was swapped out still encodes a correct document.
+        let doc = Element::read_one(r#"{ a: 1, b: [2, 3], c: sym_c }"#)?;
+        let mut writer = idle.attach(Vec::new());
+        writer.write(&doc)?;
+        writer.flush()?;
+        let (_idle, bytes) = writer.detach();
+        assert_eq!(
+            bytes,
+            encode_fresh(v1_0::Binary, &doc)?,
+            "reuse after a buffer pool shrink is not byte-identical to fresh"
         );
         Ok(())
     }
@@ -953,8 +1000,8 @@ mod reuse_tests {
 
         let mut writer = idle_binary_writer()?.attach(Vec::new());
         writer.write(big.as_slice())?;
-        // `flush` moves the encoded value out of the arena and through the data writer's `Vec`, which
-        // is what grows its capacity. Precondition: it really did grow past the cap.
+        // `flush` copies the encoded value from the encoding buffer into the data writer's `Vec`,
+        // which is what grows its capacity. Precondition: it really did grow past the cap.
         writer.flush()?;
         assert!(
             writer.data_writer.output().capacity() > IDLE_RETAIN_CAP,
@@ -1067,17 +1114,18 @@ mod reuse_tests {
         Ok(())
     }
 
-    /// The flip side of the four cap tests, and the premise the whole API rests on: for a document
-    /// whose arena, buffers, and symbol table all stay UNDER their caps, `detach` must leave that warm
-    /// memory exactly as it found it. A regression that reallocated any of it on every `detach` would
-    /// still encode correct documents -- and would make pooling pointless -- so only this test would
-    /// catch it.
+    /// The flip side of the five cap tests, and the premise the whole API rests on: for a document
+    /// whose scratch memory, output buffers, and symbol table all stay UNDER their caps,
+    /// `detach` must leave that warm memory exactly as it found it. A regression that reallocated
+    /// any of it on every `detach` would still encode correct documents -- and would make pooling
+    /// pointless -- so only this test would catch it.
     #[test]
     #[cfg_attr(miri, ignore = "too slow under Miri")]
     fn detach_retains_warm_capacity_for_a_mid_sized_document() -> IonResult<()> {
-        // Big enough to grow the arena past its initial chunk and the data buffer past the capacity a
-        // replacement buffer would be given, but far short of the cap at which either is released.
-        let mid_sized_blob = vec![0u8; DEFAULT_BUMP_SIZE * 2];
+        // Big enough to grow the encoding buffer past its initial capacity and the data buffer past
+        // the capacity a replacement buffer would be given, but far short of the cap at which
+        // either is released.
+        let mid_sized_blob = vec![0u8; 32 * 1024];
         // More symbols than a fresh table is sized for, fewer than the cap at which it is released.
         let fields = (0..IDLE_SYMBOL_RETAIN_CAP / 4)
             .map(|i| format!("field_{i}: {i}"))
@@ -1091,11 +1139,11 @@ mod reuse_tests {
         let mut writer = idle_binary_writer()?.attach(Vec::new());
         writer.write(&doc)?;
         writer.write(mid_sized_blob.as_slice())?;
-        // `flush` drains the buffers (leaving their capacity) and rewinds the arena, which is the
-        // state `detach` finds them in.
+        // `flush` drains the buffers, leaving their capacity and the pooled buffers in place, which
+        // is the state `detach` finds them in.
         writer.flush()?;
 
-        let arena_bytes = writer.data_writer.allocated_bytes();
+        let scratch_bytes = writer.data_writer.retained_scratch_bytes();
         let data_capacity = writer.data_writer.output().capacity();
         let directive_capacity = writer.directive_writer.output().capacity();
         let symbol_capacity = writer.symbol_table().retained_capacity();
@@ -1105,8 +1153,12 @@ mod reuse_tests {
         // these, the assertions below could pass by measuring memory that was never warm to begin
         // with.
         assert!(
-            arena_bytes > fresh_arena_bytes() && arena_bytes <= IDLE_RETAIN_CAP,
-            "the document did not leave the arena warm and under the cap: {arena_bytes} bytes"
+            scratch_bytes > fresh_scratch_bytes()? && scratch_bytes <= IDLE_RETAIN_CAP,
+            "the document did not leave the scratch memory warm and under the cap: {scratch_bytes} bytes"
+        );
+        assert!(
+            writer.data_writer.pooled_scratch_bytes() > 0,
+            "the document did not leave any pooled buffers warm"
         );
         assert!(
             data_capacity > IDLE_BUFFER_CAPACITY && data_capacity <= IDLE_RETAIN_CAP,
@@ -1128,9 +1180,9 @@ mod reuse_tests {
 
         let (idle, _bytes) = writer.detach();
         assert_eq!(
-            idle.data_writer.allocated_bytes(),
-            arena_bytes,
-            "detach replaced an under-cap scratch arena instead of keeping it warm"
+            idle.data_writer.retained_scratch_bytes(),
+            scratch_bytes,
+            "detach replaced under-cap scratch memory instead of keeping it warm"
         );
         assert_eq!(
             idle.data_writer.output().capacity(),
@@ -1168,8 +1220,9 @@ mod reuse_tests {
 
     /// `detach` writes nothing: a document that was never flushed is dropped, and the writer is still
     /// left in the fresh-document state that makes the NEXT document correct. Both encodings are
-    /// covered because they buffer an un-flushed document in different places -- binary in its scratch
-    /// arena, text directly in its output buffer -- and each `recycle` has to discard its own.
+    /// covered because they buffer an un-flushed document in different places -- binary in its
+    /// encoding buffer, text directly in its output buffer -- and each `recycle` has to discard its
+    /// own.
     #[rstest]
     #[case::binary_1_0(v1_0::Binary)]
     #[case::text_1_0(v1_0::Text)]

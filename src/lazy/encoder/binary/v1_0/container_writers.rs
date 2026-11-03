@@ -1,55 +1,54 @@
-use bumpalo::collections::Vec as BumpVec;
-use bumpalo::Bump as BumpAllocator;
+use std::mem;
 
 use crate::binary::var_uint::VarUInt;
 use crate::lazy::encoder::binary::v1_0::value_writer::{BinaryValueWriter_1_0, MAX_INLINE_LENGTH};
+use crate::lazy::encoder::binary::v1_0::EncodingResources;
 use crate::lazy::encoder::value_writer::internal::{FieldEncoder, MakeValueWriter};
 use crate::lazy::encoder::value_writer::{SequenceWriter, StructWriter};
 use crate::raw_symbol_ref::AsRawSymbolRef;
 use crate::result::cold_error;
-use crate::{v1_0, ContextWriter, Encoding, IonResult, RawSymbolRef, SymbolId, ValueWriterConfig};
+use crate::{v1_0, ContextWriter, Encoding, IonResult, RawSymbolRef, ValueWriterConfig};
 
 /// A helper type that holds fields and logic that is common to [`BinaryListWriter_1_0`],
 /// [`BinarySExpWriter_1_0`], and [`BinaryStructWriter_1_0`].
 pub struct BinaryContainerWriter_1_0<'value, 'top> {
     // A byte containing the high nibble of the encoded container's type descriptor.
     type_code: u8,
-    // An allocator reference that can be shared with nested container writers
-    allocator: &'top BumpAllocator,
-    // The buffer containing the parent's encoded body. When this list writer is finished encoding
-    // its own data, a header will be written to the parent and then the list body will be copied
-    // over.
-    child_values_buffer: BumpVec<'top, u8>,
-    parent_buffer: &'value mut BumpVec<'top, u8>,
-    // In binary Ion 1.0, only symbol IDs can be used as annotations.
-    annotations: Option<BumpVec<'top, SymbolId>>,
+    // Pooled buffers shared with nested container writers
+    resources: &'top EncodingResources,
+    // The container's VarUInt-encoded annotation symbol IDs (if any), followed by its encoded
+    // body. When this writer is finished encoding its own data, headers will be written to the
+    // parent and then the annotations and body will be copied over.
+    child_values_buffer: Vec<u8>,
+    // The number of leading bytes in `child_values_buffer` that hold the annotations sequence.
+    annotations_length: usize,
+    parent_buffer: &'value mut Vec<u8>,
 }
 
 impl<'value, 'top> BinaryContainerWriter_1_0<'value, 'top> {
     pub fn new(
         type_code: u8,
-        allocator: &'top BumpAllocator,
-        buffer: &'value mut BumpVec<'top, u8>,
+        resources: &'top EncodingResources,
+        buffer: &'value mut Vec<u8>,
     ) -> Self {
         Self {
             type_code,
-            allocator,
-            child_values_buffer: BumpVec::with_capacity_in(
-                DEFAULT_CONTAINER_BUFFER_SIZE,
-                allocator,
-            ),
+            resources,
+            child_values_buffer: resources.acquire_buffer(),
+            annotations_length: 0,
             parent_buffer: buffer,
-            annotations: None,
         }
     }
 
+    /// Encodes `annotations` into the front of `child_values_buffer`.
+    ///
+    /// Must be called at most once, before any child value is written: everything already in the
+    /// buffer would be counted as part of the annotations sequence.
     pub fn with_annotations<S: AsRawSymbolRef, I: IntoIterator<Item = S>>(
         mut self,
         annotations: I,
     ) -> IonResult<Self> {
-        let iterator = annotations.into_iter();
-        let mut symbol_ids = BumpVec::with_capacity_in(iterator.size_hint().0, self.allocator);
-        for annotation in iterator {
+        for annotation in annotations {
             let symbol_address = match annotation.as_raw_symbol_ref() {
                 RawSymbolRef::SymbolId(symbol_id) => symbol_id,
                 other_token => {
@@ -59,103 +58,66 @@ impl<'value, 'top> BinaryContainerWriter_1_0<'value, 'top> {
                     );
                 }
             };
-            symbol_ids.push(symbol_address);
+            VarUInt::write_u64(&mut self.child_values_buffer, symbol_address as u64)?;
         }
-        // If this was called with an empty iterator, act as though it was never called at all.
-        // This prevents writing out an empty annotations sequence in binary, which is illegal.
-        self.annotations = if !symbol_ids.is_empty() {
-            Some(symbol_ids)
-        } else {
-            None
-        };
+        // An empty iterator leaves `annotations_length` at 0, as though this was never called at
+        // all. This prevents writing out an empty annotations sequence in binary, which is illegal.
+        self.annotations_length = self.child_values_buffer.len();
         Ok(self)
     }
 
     pub fn child_values_buffer(&self) -> &[u8] {
-        self.child_values_buffer.as_slice()
+        &self.child_values_buffer[self.annotations_length..]
     }
 
     pub fn end(mut self) -> IonResult<()> {
-        match self.annotations.take() {
-            None => self.write_unannotated_value_to_parent_buffer(),
-            Some(annotations) => self.write_annotated_value_to_parent_buffer(annotations),
-        }
+        let result = self.write_value_to_parent_buffer();
+        self.resources
+            .release_buffer(mem::take(&mut self.child_values_buffer));
+        result
     }
 
-    /// Encodes the container's annotations wrapper and copies the completed value to the parent
-    /// encoding buffer.
-    pub fn write_annotated_value_to_parent_buffer(
-        &mut self,
-        annotations: BumpVec<'top, SymbolId>,
-    ) -> IonResult<()> {
-        // The sequence of VarUInt-encoded symbol IDs
-        let mut encoded_sequence = BumpVec::new_in(self.allocator);
-        for annotation in annotations {
-            VarUInt::write_u64(&mut encoded_sequence, annotation as u64)?;
-        }
-
-        // The VarUInt-encoded length of the above sequence
-        let mut encoded_sequence_length = BumpVec::new_in(self.allocator);
-        VarUInt::write_u64(&mut encoded_sequence_length, encoded_sequence.len() as u64)?;
-
-        // The encoded body of the container
-        let container_body_length = self.child_values_buffer.len();
-        // The method `write_annotated_value_to_parent_buffer` encodes the container's header
-        // (including the length) to the parent buffer. In this step, we calculate how big that
-        // header will be, so we can factor it into the annotations wrapper's declared length.
-        let container_header_length = match container_body_length {
-            0..=MAX_INLINE_LENGTH => 1,
-            length => 1 + VarUInt::encoded_size_of(length as u64),
-        };
-
-        let envelope_length = encoded_sequence_length.len()
-            + encoded_sequence.len()
-            + container_header_length
-            + container_body_length;
-        match envelope_length {
-            0..=MAX_INLINE_LENGTH => self.parent_buffer.push(0xE0u8 | envelope_length as u8),
-            _ => {
-                self.parent_buffer.push(0xEE); // Annotations wrapper w/VarUInt-encoded length
-                VarUInt::write_u64(self.parent_buffer, envelope_length as u64)?;
+    /// Encodes the container's annotations wrapper (if any) and header, then copies the
+    /// annotations sequence and body bytes to the parent encoding buffer.
+    fn write_value_to_parent_buffer(&mut self) -> IonResult<()> {
+        let (annotations, body) = self.child_values_buffer.split_at(self.annotations_length);
+        let parent = &mut *self.parent_buffer;
+        if !annotations.is_empty() {
+            // The container's header (including its length) is written after the annotations
+            // sequence; factor its size into the annotations wrapper's declared length.
+            let container_header_length = match body.len() {
+                0..=MAX_INLINE_LENGTH => 1,
+                length => 1 + VarUInt::encoded_size_of(length as u64),
+            };
+            let envelope_length = VarUInt::encoded_size_of(annotations.len() as u64)
+                + annotations.len()
+                + container_header_length
+                + body.len();
+            match envelope_length {
+                0..=MAX_INLINE_LENGTH => parent.push(0xE0u8 | envelope_length as u8),
+                _ => {
+                    parent.push(0xEE); // Annotations wrapper w/VarUInt-encoded length
+                    VarUInt::write_u64(parent, envelope_length as u64)?;
+                }
             }
+            VarUInt::write_u64(parent, annotations.len() as u64)?;
+            parent.extend_from_slice(annotations);
         }
 
-        self.parent_buffer.extend_from_slices_copy(&[
-            encoded_sequence_length.as_slice(),
-            encoded_sequence.as_slice(),
-        ]);
-
-        // At this point, the parent container has the complete encoding of the annotations wrapper
-        // that prefixes the encoding of the value itself. Now we delegate the value's encoding
-        // to `write_unannotated...` to handle.
-        self.write_unannotated_value_to_parent_buffer()
-    }
-
-    /// Encodes the container's header, then copies the header and body bytes to the parent buffer.
-    pub fn write_unannotated_value_to_parent_buffer(&mut self) -> IonResult<()> {
         // Write the appropriate opcode for a container of this length.
-        let encoded_length = self.child_values_buffer.len();
-        match encoded_length {
-            0..=MAX_INLINE_LENGTH => {
-                let opcode = self.type_code | encoded_length as u8;
-                self.parent_buffer.push(opcode);
+        match body.len() {
+            encoded_length @ 0..=MAX_INLINE_LENGTH => {
+                parent.push(self.type_code | encoded_length as u8);
             }
-            _ => {
-                let opcode = self.type_code | 0x0E; // Container w/VarUInt length
-                self.parent_buffer.push(opcode);
-                VarUInt::write_u64(self.parent_buffer, encoded_length as u64)?;
+            encoded_length => {
+                parent.push(self.type_code | 0x0E); // Container w/VarUInt length
+                VarUInt::write_u64(parent, encoded_length as u64)?;
             }
         }
-        self.parent_buffer
-            .extend_from_slice_copy(self.child_values_buffer.as_slice());
+        parent.extend_from_slice(body);
         Ok(())
     }
 }
-
-// This value was chosen somewhat arbitrarily and can be modified as needed. Choosing a value that
-// is too low will lead to performance degradation as the buffer will require multiple
-// reallocations/copies.
-const DEFAULT_CONTAINER_BUFFER_SIZE: usize = 512;
 
 pub struct BinaryListWriter_1_0<'value, 'top> {
     pub(crate) container_writer: BinaryContainerWriter_1_0<'value, 'top>,
@@ -168,14 +130,11 @@ impl<'value, 'top> BinaryListWriter_1_0<'value, 'top> {
         Self { container_writer }
     }
 
-    pub(crate) fn new(
-        allocator: &'top BumpAllocator,
-        buffer: &'value mut BumpVec<'top, u8>,
-    ) -> Self {
+    pub(crate) fn new(resources: &'top EncodingResources, buffer: &'value mut Vec<u8>) -> Self {
         const LIST_TYPE_CODE: u8 = 0xB0;
         BinaryListWriter_1_0::with_container_writer(BinaryContainerWriter_1_0::new(
             LIST_TYPE_CODE,
-            allocator,
+            resources,
             buffer,
         ))
     }
@@ -199,7 +158,7 @@ impl<'top> ContextWriter for BinaryListWriter_1_0<'_, 'top> {
 impl MakeValueWriter for BinaryListWriter_1_0<'_, '_> {
     fn make_value_writer(&mut self) -> Self::NestedValueWriter<'_> {
         BinaryValueWriter_1_0::new(
-            self.container_writer.allocator,
+            self.container_writer.resources,
             &mut self.container_writer.child_values_buffer,
         )
     }
@@ -223,7 +182,7 @@ impl<'top> ContextWriter for BinarySExpWriter_1_0<'_, 'top> {
 impl MakeValueWriter for BinarySExpWriter_1_0<'_, '_> {
     fn make_value_writer(&mut self) -> Self::NestedValueWriter<'_> {
         BinaryValueWriter_1_0::new(
-            self.container_writer.allocator,
+            self.container_writer.resources,
             &mut self.container_writer.child_values_buffer,
         )
     }
@@ -248,12 +207,9 @@ impl<'value, 'top> BinarySExpWriter_1_0<'value, 'top> {
         Self { container_writer }
     }
 
-    pub(crate) fn new(
-        allocator: &'top BumpAllocator,
-        buffer: &'value mut BumpVec<'top, u8>,
-    ) -> Self {
+    pub(crate) fn new(resources: &'top EncodingResources, buffer: &'value mut Vec<u8>) -> Self {
         const SEXP_TYPE_CODE: u8 = 0xC0;
-        let container_writer = BinaryContainerWriter_1_0::new(SEXP_TYPE_CODE, allocator, buffer);
+        let container_writer = BinaryContainerWriter_1_0::new(SEXP_TYPE_CODE, resources, buffer);
         Self::with_container_writer(container_writer)
     }
 
@@ -283,14 +239,11 @@ impl<'value, 'top> BinaryStructWriter_1_0<'value, 'top> {
         }
     }
 
-    pub(crate) fn new(
-        allocator: &'top BumpAllocator,
-        buffer: &'value mut BumpVec<'top, u8>,
-    ) -> Self {
+    pub(crate) fn new(resources: &'top EncodingResources, buffer: &'value mut Vec<u8>) -> Self {
         const STRUCT_TYPE_CODE: u8 = 0xD0;
         Self::with_container_writer(BinaryContainerWriter_1_0::new(
             STRUCT_TYPE_CODE,
-            allocator,
+            resources,
             buffer,
         ))
     }
@@ -335,7 +288,7 @@ impl<'top> ContextWriter for BinaryStructWriter_1_0<'_, 'top> {
 impl MakeValueWriter for BinaryStructWriter_1_0<'_, '_> {
     fn make_value_writer(&mut self) -> Self::NestedValueWriter<'_> {
         BinaryValueWriter_1_0::new(
-            self.container_writer.allocator,
+            self.container_writer.resources,
             &mut self.container_writer.child_values_buffer,
         )
     }
