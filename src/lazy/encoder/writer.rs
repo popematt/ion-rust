@@ -26,7 +26,7 @@ use crate::raw_symbol_ref::AsRawSymbolRef;
 use crate::result::{cold_error, IonFailure};
 use crate::symbol_table::WriterSymbolTable;
 use crate::text::whitespace_config::{CompactText, LinesText, PrettyText, RuntimeStyle, TextStyle};
-use crate::write_config::WriteConfig;
+use crate::write_config::{StyledWriteConfig, WriteConfig};
 use crate::{
     ContextWriter, Decimal, Element, Int, IonResult, IonType, RawSymbolRef, Timestamp, Value,
 };
@@ -75,8 +75,9 @@ pub trait WriterStyle: private::ManagedWriterStyle {}
 /// - Every `C: Into<WriteConfig<E>>`, such as `v1_0::Binary`, `v1_0::Text`,
 ///   `v1_0::Text.with_format(format)`, or a [`WriteConfig`], configures a writer of the default
 ///   style, which reads the layout of the configured [`TextFormat`] at run time.
-/// - Each marker, such as [`v1_0::CompactText`](crate::v1_0::CompactText), configures a text
-///   writer whose style is the marker, which fixes the layout at compile time.
+/// - Each marker, such as [`v1_0::CompactText`](crate::v1_0::CompactText), and the
+///   [`StyledWriteConfig`] that its `with_max_depth` returns,
+///   configures a text writer whose style is the marker, which fixes the layout at compile time.
 ///
 /// This trait is sealed: it has no items of its own, and code outside the crate cannot implement
 /// it.
@@ -153,9 +154,9 @@ impl ManagedWriterStyle for RuntimeStyle {
     type RawWriter<E: Encoding, W: Write> = E::Writer<W>;
 }
 
-// Markers must never implement `Into<WriteConfig<_>>`. If one did, both this impl and its marker
-// impl would apply to it, and `Writer::new(marker, ..)` could no longer infer the style (E0283).
-// `new_infers_the_encoding_and_style` pins this.
+// Markers and `StyledWriteConfig` must never implement `Into<WriteConfig<_>>`. If one did, both
+// this impl and its marker impl would apply to it, and `Writer::new(marker, ..)` could no longer
+// infer the style (E0283). `new_infers_the_encoding_and_style` pins this.
 impl<E: Encoding, C: Into<WriteConfig<E>>> IntoWriterConfig<E, RuntimeStyle> for C {}
 
 impl<E: Encoding, C: Into<WriteConfig<E>>> SealedWriterConfig<E, RuntimeStyle> for C {
@@ -164,8 +165,8 @@ impl<E: Encoding, C: Into<WriteConfig<E>>> SealedWriterConfig<E, RuntimeStyle> f
     }
 }
 
-/// Makes the zero-sized style `$style` a managed writer style that it configures, with the text
-/// format whose layout it writes.
+/// Makes the zero-sized style `$style` a managed writer style that it and its `StyledWriteConfig`
+/// configure, with the text format whose layout it writes.
 macro_rules! impl_static_writer_style {
     ($style:ident) => {
         impl WriterStyle for $style {}
@@ -174,11 +175,30 @@ macro_rules! impl_static_writer_style {
             type RawWriter<E: Encoding, W: Write> = E::StyledWriter<W, Self>;
         }
 
+        #[cfg_attr(not(feature = "experimental-reader-writer"), allow(dead_code))]
+        impl $style {
+            /// Returns a configuration of this style that limits how deeply values may be nested
+            /// when a managed writer built with it encodes them; see
+            /// [`WriteConfig::with_max_depth`].
+            pub fn with_max_depth(self, max_depth: u16) -> StyledWriteConfig<Self> {
+                StyledWriteConfig::new(Self::FORMAT).with_max_depth(max_depth)
+            }
+        }
+
         impl IntoWriterConfig<TextEncoding_1_0, $style> for $style {}
 
         impl SealedWriterConfig<TextEncoding_1_0, $style> for $style {
             fn into_write_config(self) -> WriteConfig<TextEncoding_1_0> {
                 WriteConfig::<TextEncoding_1_0>::new(Self::FORMAT)
+            }
+        }
+
+        impl IntoWriterConfig<TextEncoding_1_0, $style> for StyledWriteConfig<$style> {}
+
+        impl SealedWriterConfig<TextEncoding_1_0, $style> for StyledWriteConfig<$style> {
+            fn into_write_config(self) -> WriteConfig<TextEncoding_1_0> {
+                // The inherent method, not this one.
+                StyledWriteConfig::into_write_config(self)
             }
         }
     };
@@ -317,7 +337,8 @@ where
     /// even for binary writers, which have no text format to change.
     ///
     /// A writer whose style is a marker such as [`v1_0::CompactText`](crate::v1_0::CompactText)
-    /// accepts only that marker, so it keeps the marker's layout.
+    /// accepts only that marker's configurations, so it keeps the marker's layout and only its
+    /// maximum depth changes.
     pub fn set_config(&mut self, config: impl IntoWriterConfig<E, S>) {
         let config = config.into_write_config();
         self.directive_writer.apply_config(&config);
@@ -397,7 +418,8 @@ impl<E: Encoding, Output: Write, S: WriterStyle> Writer<E, Output, S> {
     /// A text configuration with a run-time format, such as `v1_0::Text.with_format(format)`,
     /// makes a writer that reads the format's whitespace layout as it writes; for a writer
     /// specialized to one layout, pass a marker such as
-    /// [`v1_0::CompactText`](crate::v1_0::CompactText).
+    /// [`v1_0::CompactText`](crate::v1_0::CompactText), or the
+    /// [`StyledWriteConfig`] that its `with_max_depth` returns.
     pub fn new(config: impl IntoWriterConfig<E, S>, output: Output) -> IonResult<Self> {
         Self::from_write_config(config.into_write_config(), output)
     }
@@ -1053,16 +1075,34 @@ mod reuse_tests {
         Ok(idle_binary_writer()?.data_writer.retained_scratch_bytes())
     }
 
-    /// Binary, text with a run-time style, and text with each zero-sized style.
+    /// Binary, text with a run-time style, and text with each zero-sized style: a configuration
+    /// with the default maximum depth, and a function that returns a configuration of the same
+    /// encoding and style with the given maximum depth.
     #[template]
     #[rstest]
-    #[case::binary_1_0(v1_0::Binary)]
-    #[case::text_1_0(v1_0::Text)]
-    #[case::compact_text_1_0(v1_0::CompactText)]
-    #[case::lines_text_1_0(v1_0::LinesText)]
-    #[case::pretty_text_1_0(v1_0::PrettyText)]
-    fn reusable_configs<E: Encoding, S: WriterStyle>(
+    #[case::binary_1_0(
+        v1_0::Binary,
+        |max_depth| WriteConfig::from(v1_0::Binary).with_max_depth(max_depth)
+    )]
+    #[case::text_1_0(
+        v1_0::Text,
+        |max_depth| WriteConfig::from(v1_0::Text).with_max_depth(max_depth)
+    )]
+    #[case::compact_text_1_0(
+        v1_0::CompactText,
+        |max_depth| v1_0::CompactText.with_max_depth(max_depth)
+    )]
+    #[case::lines_text_1_0(
+        v1_0::LinesText,
+        |max_depth| v1_0::LinesText.with_max_depth(max_depth)
+    )]
+    #[case::pretty_text_1_0(
+        v1_0::PrettyText,
+        |max_depth| v1_0::PrettyText.with_max_depth(max_depth)
+    )]
+    fn reusable_configs<E: Encoding, S: WriterStyle, L: IntoWriterConfig<E, S>>(
         #[case] config: impl IntoWriterConfig<E, S> + Clone,
+        #[case] with_max_depth: impl Fn(u16) -> L,
     ) {
     }
 
@@ -1073,8 +1113,13 @@ mod reuse_tests {
     /// performs: a stale symbol table, a missing IVM, or an IVM emitted on the wrong sub-writer would
     /// corrupt every document after the first.
     #[apply(reusable_configs)]
-    fn reuse_is_byte_identical_and_round_trips<E: Encoding, S: WriterStyle>(
+    fn reuse_is_byte_identical_and_round_trips<
+        E: Encoding,
+        S: WriterStyle,
+        L: IntoWriterConfig<E, S>,
+    >(
         #[case] config: impl IntoWriterConfig<E, S> + Clone,
+        #[case] _with_max_depth: impl Fn(u16) -> L,
     ) -> IonResult<()>
     where
         S::RawWriter<E, Vec<u8>>: Reusable,
@@ -1442,8 +1487,13 @@ mod reuse_tests {
     /// encoding buffer, text directly in its output buffer -- and each `recycle` has to discard its
     /// own.
     #[apply(reusable_configs)]
-    fn detach_discards_an_unflushed_document<E: Encoding, S: WriterStyle>(
+    fn detach_discards_an_unflushed_document<
+        E: Encoding,
+        S: WriterStyle,
+        L: IntoWriterConfig<E, S>,
+    >(
         #[case] config: impl IntoWriterConfig<E, S> + Clone,
+        #[case] _with_max_depth: impl Fn(u16) -> L,
     ) -> IonResult<()>
     where
         S::RawWriter<E, Vec<u8>>: Reusable,
@@ -1474,19 +1524,18 @@ mod reuse_tests {
 
     /// A writer built by `idle` with a maximum depth enforces it in every document it encodes,
     /// including after a `detach`/`attach` cycle.
-    #[rstest]
-    #[case::binary_1_0(v1_0::Binary)]
-    #[case::text_1_0(v1_0::Text)]
-    fn idle_applies_the_max_depth<E>(#[case] encoding: E) -> IonResult<()>
+    #[apply(reusable_configs)]
+    fn idle_applies_the_max_depth<E: Encoding, S: WriterStyle, L: IntoWriterConfig<E, S>>(
+        #[case] _config: impl IntoWriterConfig<E, S> + Clone,
+        #[case] with_max_depth: impl Fn(u16) -> L,
+    ) -> IonResult<()>
     where
-        E: Encoding + Into<WriteConfig<E>>,
-        E::Writer<Vec<u8>>: Reusable,
+        S::RawWriter<E, Vec<u8>>: Reusable,
     {
-        let config: WriteConfig<E> = encoding.into();
         let at_max = Element::read_one("[0]")?;
         let past_max = Element::read_one("[[0]]")?;
 
-        let mut writer = Writer::<E, ()>::idle(config.with_max_depth(1))?.attach(Vec::new());
+        let mut writer = Writer::<E, (), S>::idle(with_max_depth(1))?.attach(Vec::new());
         assert_depth_error(writer.write(&past_max));
         let (idle, _discarded) = writer.detach();
 
@@ -1503,25 +1552,35 @@ mod reuse_tests {
 
     /// `set_config` replaces the maximum depth along with the rest of the configuration, so it can
     /// lift the limit a writer was built with.
-    #[test]
-    fn set_config_lifts_the_max_depth() -> IonResult<()> {
+    #[apply(reusable_configs)]
+    fn set_config_lifts_the_max_depth<E: Encoding, S: WriterStyle, L: IntoWriterConfig<E, S>>(
+        #[case] config: impl IntoWriterConfig<E, S> + Clone,
+        #[case] with_max_depth: impl Fn(u16) -> L,
+    ) -> IonResult<()>
+    where
+        S::RawWriter<E, Vec<u8>>: Reusable,
+    {
         let doc = Element::read_one("[[0]]")?;
-        let mut idle = Writer::<BinaryEncoding_1_0, ()>::idle(
-            WriteConfig::<BinaryEncoding_1_0>::new().with_max_depth(1),
-        )?;
-        idle.set_config(WriteConfig::<BinaryEncoding_1_0>::new());
+        let mut idle = Writer::<E, (), S>::idle(with_max_depth(1))?;
+        idle.set_config(config.clone());
         let mut writer = idle.attach(Vec::new());
         writer.write(&doc)?;
-        assert_eq!(Element::read_one(writer.close()?)?, doc);
+        assert_eq!(writer.close()?, encode_fresh(config, &doc)?);
         Ok(())
     }
 
     /// `set_config` can also impose a maximum depth on a writer built without one.
-    #[test]
-    fn set_config_imposes_a_max_depth() -> IonResult<()> {
+    #[apply(reusable_configs)]
+    fn set_config_imposes_a_max_depth<E: Encoding, S: WriterStyle, L: IntoWriterConfig<E, S>>(
+        #[case] config: impl IntoWriterConfig<E, S> + Clone,
+        #[case] with_max_depth: impl Fn(u16) -> L,
+    ) -> IonResult<()>
+    where
+        S::RawWriter<E, Vec<u8>>: Reusable,
+    {
         let doc = Element::read_one("[[0]]")?;
-        let mut idle = idle_binary_writer()?;
-        idle.set_config(WriteConfig::<BinaryEncoding_1_0>::new().with_max_depth(1));
+        let mut idle = Writer::<E, (), S>::idle(config)?;
+        idle.set_config(with_max_depth(1));
         let mut writer = idle.attach(Vec::new());
         assert_depth_error(writer.write(&doc));
         Ok(())
@@ -1568,9 +1627,12 @@ mod reuse_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{BinaryWriter_1_0, TextWriter_1_0, WriterStyle, MAX_DEPTH_EXCEEDED};
+    use super::{
+        BinaryWriter_1_0, IntoWriterConfig, TextWriter_1_0, WriterStyle, MAX_DEPTH_EXCEEDED,
+    };
     use crate::lazy::encoding::{BinaryEncoding_1_0, TextEncoding_1_0};
     use crate::text::whitespace_config::{CompactText, LinesText, PrettyText, RuntimeStyle};
+    use crate::write_config::StyledWriteConfig;
     use crate::{v1_0, Element, Encoding, IonError, IonResult, TextFormat, WriteConfig, Writer};
     use rstest::rstest;
     use std::any::type_name;
@@ -1657,6 +1719,11 @@ mod tests {
         type_name::<TextEncoding_1_0>(),
         type_name::<PrettyText>()
     )]
+    #[case::styled_write_config(
+        Writer::new(v1_0::CompactText.with_max_depth(4), Vec::new()),
+        type_name::<TextEncoding_1_0>(),
+        type_name::<CompactText>()
+    )]
     fn new_infers_the_encoding_and_style<E: Encoding, S: WriterStyle>(
         #[case] writer: IonResult<Writer<E, Vec<u8>, S>>,
         #[case] expected_encoding: &str,
@@ -1674,6 +1741,10 @@ mod tests {
     #[case::text(Writer::idle(v1_0::Text), type_name::<RuntimeStyle>())]
     #[case::text_default_style(Writer::<v1_0::Text, ()>::idle(v1_0::Text), type_name::<RuntimeStyle>())]
     #[case::compact(Writer::idle(v1_0::CompactText), type_name::<CompactText>())]
+    #[case::styled_write_config(
+        Writer::idle(v1_0::PrettyText.with_max_depth(4)),
+        type_name::<PrettyText>()
+    )]
     fn idle_infers_the_style<S: WriterStyle>(
         #[case] writer: IonResult<Writer<TextEncoding_1_0, (), S>>,
         #[case] expected_style: &str,
@@ -1908,6 +1979,25 @@ mod tests {
             .into_iter()
             .collect();
         assert_round_trips(format, Some(2), &values)
+    }
+
+    /// A managed writer built from a configuration of a zero-sized style enforces that
+    /// configuration's maximum depth; the last `with_max_depth` replaces any earlier one.
+    #[rstest]
+    #[case::compact(v1_0::CompactText.with_max_depth(1))]
+    #[case::lines(v1_0::LinesText.with_max_depth(1))]
+    #[case::pretty(v1_0::PrettyText.with_max_depth(1))]
+    #[case::replaced(v1_0::CompactText.with_max_depth(0).with_max_depth(1))]
+    fn styled_writer_applies_the_max_depth<S: WriterStyle>(
+        #[case] config: StyledWriteConfig<S>,
+    ) -> IonResult<()>
+    where
+        StyledWriteConfig<S>: IntoWriterConfig<TextEncoding_1_0, S>,
+    {
+        let mut writer = Writer::new(config, Vec::new())?;
+        writer.write(Element::read_one("[0]")?)?;
+        assert_depth_error(writer.write(Element::read_one("[[0]]")?));
+        Ok(())
     }
 
     /// A limit above the `u8` range is enforced exactly.

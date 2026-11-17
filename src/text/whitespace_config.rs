@@ -224,8 +224,10 @@ macro_rules! impl_static_text_style {
 /// Ion 1.0 text in the [`TextFormat::Compact`] layout, fixed at compile time.
 ///
 /// [`Writer::new`](crate::Writer::new) and [`Writer::idle`](crate::Writer::idle) accept this
-/// marker and build a `Writer<v1_0::Text, Output, v1_0::CompactText>`, whose code is specialized
-/// to the compact layout. It writes the same text as a writer built from
+/// marker, or the [`StyledWriteConfig`](crate::v1_0::StyledWriteConfig) that its `with_max_depth`
+/// returns, and build a
+/// `Writer<v1_0::Text, Output, v1_0::CompactText>`, whose code is specialized to the compact
+/// layout. It writes the same text as a writer built from
 /// `v1_0::Text.with_format(TextFormat::Compact)`, a `TextWriter<Output>` that reads its layout at
 /// run time. `encode_as` and `encode_to` take only run-time-styled configurations.
 ///
@@ -233,11 +235,20 @@ macro_rules! impl_static_text_style {
 ///# use ion_rs::IonResult;
 ///# #[cfg(feature = "experimental-reader-writer")]
 ///# fn main() -> IonResult<()> {
-/// use ion_rs::{v1_0, Writer};
+/// use ion_rs::{v1_0, Element, IonError, Writer};
 ///
 /// let mut writer = Writer::new(v1_0::CompactText, Vec::new())?;
 /// writer.write(1)?.write([2, 3])?;
 /// assert_eq!(writer.close()?, b"1 [2, 3, ] ");
+///
+/// // A configuration of the marker's style can limit the nesting depth.
+/// let config = v1_0::CompactText.with_max_depth(1);
+/// let mut writer = Writer::new(config, Vec::new())?;
+/// writer.write([1])?;
+/// assert!(matches!(
+///     writer.write(Element::read_one("[[1]]")?),
+///     Err(IonError::Encoding(_))
+/// ));
 ///# Ok(())
 ///# }
 ///# #[cfg(not(feature = "experimental-reader-writer"))]
