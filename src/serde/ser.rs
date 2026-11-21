@@ -9,6 +9,7 @@ use crate::lazy::encoder::value_writer::{SequenceWriter, StructWriter, ValueWrit
 use crate::lazy::encoder::writer::{IntoWriterConfig, Writer, WriterStyle};
 use crate::lazy::encoding::{BinaryEncoding_1_0, Encoding};
 use crate::result::IonFailure;
+use crate::serde::de::{max_recursion_depth_exceeded_message, MAX_RECURSION_DEPTH};
 use crate::serde::decimal::TUNNELED_DECIMAL_TYPE_NAME;
 use crate::serde::timestamp::TUNNELED_TIMESTAMP_TYPE_NAME;
 use crate::serde::TunnelBytes;
@@ -16,6 +17,7 @@ use crate::symbol_ref::AsSymbolRef;
 use crate::write_config::WriteConfig;
 use crate::Value::Null;
 use crate::{v1_0, Decimal, IonError, IonResult, IonType, Timestamp};
+use ice_code::ice as cold_path;
 
 // `to_pretty` and `to_string` each use a marker style, which trades code size for speed: a type
 // serialized as both pretty and compact text has its serializer compiled once per style.
@@ -69,17 +71,42 @@ pub struct ValueSerializer<'a, V: ValueWriter> {
     pub(crate) value_writer: V,
     pub(crate) is_human_readable: bool,
     pub(crate) annotations: Vec<&'static str>,
+    /// The number of containers, newtype variants, and `Some` values that may be entered, counting
+    /// this value.
+    remaining_recursion: u16,
     lifetime: PhantomData<&'a ()>,
 }
 
 impl<V: ValueWriter> ValueSerializer<'_, V> {
     pub fn new(value_writer: V, is_human_readable: bool) -> Self {
+        Self::with_remaining_recursion(value_writer, is_human_readable, MAX_RECURSION_DEPTH)
+    }
+
+    fn with_remaining_recursion(
+        value_writer: V,
+        is_human_readable: bool,
+        remaining_recursion: u16,
+    ) -> Self {
         Self {
             value_writer,
             is_human_readable,
             annotations: vec![],
+            remaining_recursion,
             lifetime: PhantomData,
         }
+    }
+}
+
+/// Returns the `remaining_recursion` of the children of a container, or of the payload of a newtype
+/// variant or `Some` value, that has `remaining_recursion` levels left, or an error if that would
+/// exceed [`MAX_RECURSION_DEPTH`].
+#[inline]
+fn child_recursion_depth(remaining_recursion: u16) -> IonResult<u16> {
+    match remaining_recursion.checked_sub(1) {
+        Some(children) => Ok(children),
+        None => cold_path!(IonResult::encoding_error(
+            max_recursion_depth_exceeded_message()
+        )),
     }
 }
 
@@ -205,7 +232,11 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(self)
+        let remaining_recursion = child_recursion_depth(self.remaining_recursion)?;
+        value.serialize(ValueSerializer {
+            remaining_recursion,
+            ..self
+        })
     }
 
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
@@ -262,25 +293,30 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
     where
         T: ?Sized + Serialize,
     {
+        self.remaining_recursion = child_recursion_depth(self.remaining_recursion)?;
         self.annotations.push(variant);
         value.serialize(self)
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         Ok(SeqWriter {
             seq_writer: self
                 .value_writer
                 .with_annotations(self.annotations)?
                 .list_writer()?,
             is_human_readable: self.is_human_readable,
+            child_recursion,
         })
     }
 
     fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         let writer = self.value_writer.with_annotations(self.annotations)?;
         Ok(SeqWriter {
             seq_writer: writer.list_writer()?,
             is_human_readable: self.is_human_readable,
+            child_recursion,
         })
     }
 
@@ -289,6 +325,7 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
         name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         let ValueSerializer {
             value_writer,
             is_human_readable,
@@ -299,6 +336,7 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
         Ok(SeqWriter {
             seq_writer: value_writer.with_annotations(annotations)?.list_writer()?,
             is_human_readable,
+            child_recursion,
         })
     }
 
@@ -309,6 +347,7 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         let ValueSerializer {
             value_writer,
             is_human_readable,
@@ -319,16 +358,19 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
         Ok(SeqWriter {
             seq_writer: value_writer.with_annotations(annotations)?.list_writer()?,
             is_human_readable,
+            child_recursion,
         })
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         Ok(MapWriter {
             map_writer: self
                 .value_writer
                 .with_annotations(self.annotations)?
                 .struct_writer()?,
             is_human_readable: self.is_human_readable,
+            child_recursion,
         })
     }
 
@@ -337,12 +379,14 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         Ok(MapWriter {
             map_writer: self
                 .value_writer
                 .with_annotations(self.annotations)?
                 .struct_writer()?,
             is_human_readable: self.is_human_readable,
+            child_recursion,
         })
     }
 
@@ -353,6 +397,7 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        let child_recursion = child_recursion_depth(self.remaining_recursion)?;
         let ValueSerializer {
             value_writer,
             is_human_readable,
@@ -365,6 +410,7 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
                 .with_annotations(annotations)?
                 .struct_writer()?,
             is_human_readable,
+            child_recursion,
         })
     }
 }
@@ -372,6 +418,8 @@ impl<'a, V: ValueWriter + 'a> ser::Serializer for ValueSerializer<'a, V> {
 pub struct SeqWriter<V: ValueWriter> {
     seq_writer: V::ListWriter,
     is_human_readable: bool,
+    /// The `remaining_recursion` of each child.
+    child_recursion: u16,
 }
 
 impl<V: ValueWriter> Deref for SeqWriter<V> {
@@ -396,8 +444,11 @@ impl<V: ValueWriter> ser::SerializeSeq for SeqWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        value.serialize(ValueSerializer::new(self.value_writer(), is_human_readable))
+        value.serialize(ValueSerializer::with_remaining_recursion(
+            self.seq_writer.value_writer(),
+            self.is_human_readable,
+            self.child_recursion,
+        ))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -413,8 +464,11 @@ impl<V: ValueWriter> ser::SerializeTuple for SeqWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        value.serialize(ValueSerializer::new(self.value_writer(), is_human_readable))
+        value.serialize(ValueSerializer::with_remaining_recursion(
+            self.seq_writer.value_writer(),
+            self.is_human_readable,
+            self.child_recursion,
+        ))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -430,8 +484,11 @@ impl<V: ValueWriter> ser::SerializeTupleStruct for SeqWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        value.serialize(ValueSerializer::new(self.value_writer(), is_human_readable))
+        value.serialize(ValueSerializer::with_remaining_recursion(
+            self.seq_writer.value_writer(),
+            self.is_human_readable,
+            self.child_recursion,
+        ))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -447,8 +504,11 @@ impl<V: ValueWriter> ser::SerializeTupleVariant for SeqWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        value.serialize(ValueSerializer::new(self.value_writer(), is_human_readable))
+        value.serialize(ValueSerializer::with_remaining_recursion(
+            self.seq_writer.value_writer(),
+            self.is_human_readable,
+            self.child_recursion,
+        ))
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -459,6 +519,8 @@ impl<V: ValueWriter> ser::SerializeTupleVariant for SeqWriter<V> {
 pub struct MapWriter<V: ValueWriter> {
     map_writer: V::StructWriter,
     is_human_readable: bool,
+    /// The `remaining_recursion` of each child.
+    child_recursion: u16,
 }
 
 impl<V: ValueWriter> Deref for MapWriter<V> {
@@ -494,8 +556,11 @@ impl<V: ValueWriter> ser::SerializeMap for MapWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        let serializer = ValueSerializer::new(self.make_value_writer(), is_human_readable);
+        let serializer = ValueSerializer::with_remaining_recursion(
+            self.map_writer.make_value_writer(),
+            self.is_human_readable,
+            self.child_recursion,
+        );
         value.serialize(serializer)
     }
 
@@ -512,8 +577,11 @@ impl<V: ValueWriter> ser::SerializeStructVariant for MapWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        let serializer = ValueSerializer::new(self.field_writer(key), is_human_readable);
+        let serializer = ValueSerializer::with_remaining_recursion(
+            self.map_writer.field_writer(key),
+            self.is_human_readable,
+            self.child_recursion,
+        );
         value.serialize(serializer)
     }
 
@@ -530,8 +598,11 @@ impl<V: ValueWriter> ser::SerializeStruct for MapWriter<V> {
     where
         T: ?Sized + Serialize,
     {
-        let is_human_readable = self.is_human_readable;
-        let serializer = ValueSerializer::new(self.field_writer(key), is_human_readable);
+        let serializer = ValueSerializer::with_remaining_recursion(
+            self.map_writer.field_writer(key),
+            self.is_human_readable,
+            self.child_recursion,
+        );
         value.serialize(serializer)
     }
 

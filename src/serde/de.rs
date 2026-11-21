@@ -2,16 +2,83 @@ use serde::de;
 use serde::de::value::BytesDeserializer;
 use serde::de::{DeserializeOwned, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, Visitor};
 
+use crate::constants::MAX_READ_WRITE_DEPTH;
 use crate::lazy::any_encoding::AnyEncoding;
 use crate::lazy::r#struct::{LazyField, StructIterator};
 use crate::lazy::streaming_raw_reader::IonInput;
 use crate::lazy::value::LazyValue;
 use crate::lazy::value_ref::ValueRef;
+use crate::read_config::child_read_depth;
 use crate::result::IonFailure;
 use crate::serde::decimal::TUNNELED_DECIMAL_TYPE_NAME;
 use crate::serde::timestamp::TUNNELED_TIMESTAMP_TYPE_NAME;
 use crate::serde::TunnelBytes;
 use crate::{IonError, IonResult, IonType, SystemReader};
+use ice_code::ice as cold_path;
+
+/// The limit on the combined nesting of containers, newtype enum variants, and `Some` values: 4
+/// times [`MAX_READ_WRITE_DEPTH`], up to 65535. Newtype variants are encoded as annotations on one
+/// value and `Some` as the value itself, so they recurse without entering a container and are not
+/// limited by [`MAX_READ_WRITE_DEPTH`]. Unless the product is capped at 65535, this allows up to
+/// three of them per container level when containers are nested to [`MAX_READ_WRITE_DEPTH`].
+pub(crate) const MAX_RECURSION_DEPTH: u16 = MAX_READ_WRITE_DEPTH.saturating_mul(4);
+
+/// The start of the description of every maximum recursion depth error.
+pub(crate) const MAX_RECURSION_DEPTH_EXCEEDED_PREFIX: &str =
+    "nesting of containers, newtype enum variants, and `Some` values exceeds the maximum \
+     recursion depth";
+
+/// Describes the decoding or encoding error raised when a value would exceed
+/// [`MAX_RECURSION_DEPTH`].
+#[cold]
+pub(crate) fn max_recursion_depth_exceeded_message() -> String {
+    format!(
+        "{MAX_RECURSION_DEPTH_EXCEEDED_PREFIX} ({MAX_RECURSION_DEPTH}); it can be raised by \
+         setting `ION_RS_MAX_READ_WRITE_DEPTH` when building `ion-rs`"
+    )
+}
+
+/// The nesting that a value being deserialized may still use.
+#[derive(Clone, Copy)]
+pub(crate) struct DepthBudget {
+    /// The number of container levels that may be entered, counting this value.
+    containers: u16,
+    /// The number of containers, newtype variants, and `Some` values that may be entered, counting
+    /// this value.
+    recursion: u16,
+}
+
+impl DepthBudget {
+    /// The budget of a top-level value.
+    const MAX: Self = Self {
+        containers: MAX_READ_WRITE_DEPTH,
+        recursion: MAX_RECURSION_DEPTH,
+    };
+
+    /// Returns the budget of the children of a container that has this budget, or an error if
+    /// they would exceed [`MAX_READ_WRITE_DEPTH`] or [`MAX_RECURSION_DEPTH`].
+    #[inline]
+    fn enter_container(self) -> IonResult<Self> {
+        Ok(Self {
+            // The binary reader rejects this depth first, except with a limit greater than 255.
+            containers: child_read_depth(self.containers)?,
+            recursion: self.enter_payload()?.recursion,
+        })
+    }
+
+    /// Returns the budget of the payload of a newtype variant or `Some` value that has this
+    /// budget, or an error if it would exceed [`MAX_RECURSION_DEPTH`]. The payload is the same Ion
+    /// value, so it uses no container level.
+    #[inline]
+    fn enter_payload(self) -> IonResult<Self> {
+        match self.recursion.checked_sub(1) {
+            Some(recursion) => Ok(Self { recursion, ..self }),
+            None => cold_path!(IonResult::decoding_error(
+                max_recursion_depth_exceeded_message()
+            )),
+        }
+    }
+}
 
 /// Generic method that can deserialize an object from any given type
 /// that implements `IonInput`.
@@ -25,25 +92,42 @@ where
         return IonResult::decoding_error("stream did not contain any values");
     };
     let is_human_readable = value.raw().is_some_and(|raw| raw.encoding().is_text());
-    T::deserialize(ValueDeserializer::new(&value, is_human_readable))
+    T::deserialize(ValueDeserializer::new(
+        &value,
+        is_human_readable,
+        DepthBudget::MAX,
+    ))
 }
 
 #[derive(Clone, Copy)]
 pub struct ValueDeserializer<'a, 'de> {
     pub(crate) value: &'a LazyValue<'de, AnyEncoding>,
     is_human_readable: bool,
+    budget: DepthBudget,
     variant_nesting_depth: usize, // Holds the number of nested variants we are for tracking
                                   // variant names in annotations. 0 indicates we're not in a
                                   // variant.
 }
 
 impl<'a, 'de> ValueDeserializer<'a, 'de> {
-    pub(crate) fn new(value: &'a LazyValue<'de, AnyEncoding>, is_human_readable: bool) -> Self {
+    pub(crate) fn new(
+        value: &'a LazyValue<'de, AnyEncoding>,
+        is_human_readable: bool,
+        budget: DepthBudget,
+    ) -> Self {
         Self {
             value,
             is_human_readable,
+            budget,
             variant_nesting_depth: 0,
         }
+    }
+
+    /// Returns a `SequenceIterator` over `children`, the values in this value, which is a list or
+    /// s-expression.
+    fn child_sequence<S>(&self, children: S) -> IonResult<SequenceIterator<S>> {
+        let budget = self.budget.enter_container()?;
+        Ok(SequenceIterator(children, self.is_human_readable, budget))
     }
 
     fn deserialize_as_sequence<V: Visitor<'de>>(
@@ -52,8 +136,8 @@ impl<'a, 'de> ValueDeserializer<'a, 'de> {
     ) -> Result<V::Value, <Self as de::Deserializer<'de>>::Error> {
         use ValueRef::*;
         match self.value.read()? {
-            List(l) => visitor.visit_seq(SequenceIterator(l.iter(), self.is_human_readable)),
-            SExp(l) => visitor.visit_seq(SequenceIterator(l.iter(), self.is_human_readable)),
+            List(l) => visitor.visit_seq(self.child_sequence(l.iter())?),
+            SExp(l) => visitor.visit_seq(self.child_sequence(l.iter())?),
             _ => IonResult::decoding_error("expected a list or sexp"),
         }
     }
@@ -62,7 +146,8 @@ impl<'a, 'de> ValueDeserializer<'a, 'de> {
         visitor: V,
     ) -> Result<V::Value, <Self as de::Deserializer<'de>>::Error> {
         let strukt = self.value.read()?.expect_struct()?;
-        let struct_as_map = StructAsMap::new(strukt.iter(), self.is_human_readable);
+        let budget = self.budget.enter_container()?;
+        let struct_as_map = StructAsMap::new(strukt.iter(), self.is_human_readable, budget);
 
         visitor.visit_map(struct_as_map)
     }
@@ -293,7 +378,10 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'_, 'de> {
         if self.value.is_null() {
             visitor.visit_none()
         } else {
-            visitor.visit_some(self)
+            visitor.visit_some(ValueDeserializer {
+                budget: self.budget.enter_payload()?,
+                ..self
+            })
         }
     }
 
@@ -327,6 +415,8 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'_, 'de> {
         let TunnelBytes(payload) = match name {
             TUNNELED_TIMESTAMP_TYPE_NAME => TunnelBytes::from(&value.expect_timestamp()?),
             TUNNELED_DECIMAL_TYPE_NAME => TunnelBytes::from(&value.expect_decimal()?),
+            // Not counted toward `MAX_RECURSION_DEPTH`: a type that refers to itself through
+            // newtype structs alone recurses on every input, so it cannot be deserialized.
             _ => return visitor.visit_newtype_struct(self),
         };
         visitor.visit_newtype_struct(BytesDeserializer::<IonError>::new(&payload))
@@ -405,6 +495,18 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'_, 'de> {
             .transpose()?;
         match our_annotation {
             None => {
+                // Only the enum after the one named by the value's last annotation reads the
+                // value itself as its variant name.
+                let follows_last_annotation = self.variant_nesting_depth == 1
+                    || self
+                        .value
+                        .annotations()
+                        .nth(self.variant_nesting_depth - 2)
+                        .transpose()?
+                        .is_some();
+                if !follows_last_annotation {
+                    return IonResult::decoding_error("expected an enum variant annotation");
+                }
                 let symbol = self.value.read()?.expect_symbol()?;
                 let symbol_text = symbol.text().ok_or_else(|| {
                     IonError::decoding_error(
@@ -431,7 +533,8 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'_, 'de> {
     }
 }
 
-pub(crate) struct SequenceIterator<S>(pub(crate) S, bool);
+/// Deserializes each value from `S`; `.2` is the budget of each value.
+pub(crate) struct SequenceIterator<S>(pub(crate) S, bool, DepthBudget);
 
 impl<'de, S> SeqAccess<'de> for SequenceIterator<S>
 where
@@ -446,7 +549,7 @@ where
         let Some(lazy_value) = self.0.next().transpose()? else {
             return Ok(None);
         };
-        let deserializer = ValueDeserializer::new(&lazy_value, self.1);
+        let deserializer = ValueDeserializer::new(&lazy_value, self.1, self.2);
         seed.deserialize(deserializer).map(Some)
     }
 }
@@ -455,14 +558,21 @@ struct StructAsMap<'de> {
     iter: StructIterator<'de, AnyEncoding>,
     current_field: Option<LazyField<'de, AnyEncoding>>,
     is_human_readable: bool,
+    /// The budget of each field value.
+    child_budget: DepthBudget,
 }
 
 impl<'de> StructAsMap<'de> {
-    pub fn new(iter: StructIterator<'de, AnyEncoding>, is_human_readable: bool) -> Self {
+    pub fn new(
+        iter: StructIterator<'de, AnyEncoding>,
+        is_human_readable: bool,
+        child_budget: DepthBudget,
+    ) -> Self {
         Self {
             iter,
             current_field: None,
             is_human_readable,
+            child_budget,
         }
     }
 }
@@ -498,6 +608,7 @@ impl<'de> MapAccess<'de> for StructAsMap<'de> {
             // so we can unwrap this safely.
             &self.current_field.as_ref().unwrap().value(),
             self.is_human_readable,
+            self.child_budget,
         ))
     }
 }
@@ -541,7 +652,10 @@ impl<'de> de::VariantAccess<'de> for VariantAccess<'_, 'de> {
     where
         T: DeserializeSeed<'de>,
     {
-        seed.deserialize(self.de)
+        seed.deserialize(ValueDeserializer {
+            budget: self.de.budget.enter_payload()?,
+            ..self.de
+        })
     }
 
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>

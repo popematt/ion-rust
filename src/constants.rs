@@ -7,17 +7,28 @@
 /// the error when the container is read, by `LazyValue::read` or a method that calls it such as
 /// `LazyStruct::get`, not when the container is reached with `Reader::next` or a container's
 /// iterator. Depth counts from the top-level value of the input, including when a nested value is
-/// converted to an `Element` or written to a writer. Serde deserialization of binary input reads
-/// lists, s-expressions, and structs with `LazyValue::read`, so it is limited too. With a limit
-/// greater than 255, lazy binary navigation never returns the error, because binary values store
-/// their depth in a `u8` that saturates at 255; conversions still check the limit. Raw writers and
-/// `Display` do not check this limit.
+/// converted to an `Element` or written to a writer. With a limit greater than 255, lazy binary
+/// navigation never returns the error, because binary values store their depth in a `u8` that
+/// saturates at 255; conversions and serde deserialization still check the limit. Serde
+/// deserialization checks this limit for lists, s-expressions, and structs.
+/// It also limits the combined nesting of containers, newtype enum variants, and `Some` values to
+/// 4 times this limit, up to 65535, because newtype variants are encoded as annotations on one
+/// value and `Some` as the value itself, so they recurse without entering a container. Values that
+/// the target type skips are not read, so they are not checked. Recursion through newtype structs
+/// is not counted, because a type that refers to itself through newtype structs alone recurses on
+/// every input and so cannot be deserialized. Serde serialization applies the same limits, so the
+/// values it writes are within the limits that deserialization checks. Raw writers and `Display`
+/// do not check this limit.
 ///
 /// Parsing text, converting values to `Element`s, and encoding values recurse at least once per
 /// level of nesting. The default (64) leaves room in a 2 MiB thread stack (the default for threads
 /// spawned by `std`) in both debug and release builds. Reading nested text structs uses the most
 /// stack per level of the inputs measured; it exhausts that stack at roughly 100 levels in a debug
-/// build.
+/// build. Serde deserialization recurses at least once per container, newtype enum variant, and
+/// `Some` value, so it can recurse up to the combined limit. The stack it uses per level depends on
+/// the type being deserialized. In a debug build, the deepest accepted inputs measured fit in a
+/// 2 MiB stack; the one that used the most stack, a struct with 25 fields nested 63 levels, did not
+/// fit in 1 MiB.
 ///
 /// The default can be overridden at build time by setting the `ION_RS_MAX_READ_WRITE_DEPTH`
 /// environment variable to a base-10 integer no greater than 65535, e.g.

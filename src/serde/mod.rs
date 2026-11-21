@@ -1038,4 +1038,501 @@ mod tests {
         assert!(to_string(&timestamp).is_err());
         assert!(to_binary(&timestamp).is_err());
     }
+
+    mod depth_limit {
+        use std::fmt::Debug;
+        use std::thread;
+
+        use rstest::rstest;
+        use serde::{Deserialize, Serialize};
+
+        use crate::constants::MAX_READ_WRITE_DEPTH;
+        use crate::lazy::binary::test_utilities::{
+            binary_nested, binary_type_descriptor, binary_value, to_binary_ion,
+            LAZY_BINARY_DEPTH_IS_CHECKED,
+        };
+        use crate::read_config::assert_max_read_depth_exceeded;
+        use crate::serde::de::{
+            max_recursion_depth_exceeded_message, MAX_RECURSION_DEPTH,
+            MAX_RECURSION_DEPTH_EXCEEDED_PREFIX,
+        };
+        use crate::serde::{from_ion, to_binary, to_string};
+        use crate::{IonError, IonResult, IonType};
+
+        const MAX: usize = MAX_READ_WRITE_DEPTH as usize;
+        const MAX_RECURSION: usize = MAX_RECURSION_DEPTH as usize;
+
+        #[derive(Deserialize, Debug)]
+        struct ListTree(#[allow(dead_code)] Vec<ListTree>);
+
+        /// Binary structs built by `binary_nested` have one field, named `name`.
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct StructTree {
+            name: Option<Box<StructTree>>,
+        }
+
+        /// `levels` nested `StructTree`s.
+        fn struct_tree(levels: usize) -> StructTree {
+            (1..levels).fold(StructTree { name: None }, |inner, _| StructTree {
+                name: Some(Box::new(inner)),
+            })
+        }
+
+        /// Refers to itself through `Option` alone, so deserialization reads any non-null value as
+        /// nested `Some`s. Every `SelfOpt` serializes as `null`.
+        #[derive(Serialize, Deserialize, Debug)]
+        struct SelfOpt(Option<Box<SelfOpt>>);
+
+        /// A `SelfOpt` with `somes` nested `Some`s.
+        fn self_opt(somes: usize) -> SelfOpt {
+            (0..somes).fold(SelfOpt(None), |inner, _| SelfOpt(Some(Box::new(inner))))
+        }
+
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        enum Chain {
+            Leaf,
+            Wrap(Box<Chain>),
+            List(Vec<Chain>),
+            Struct(Child),
+        }
+
+        /// The payload of `Chain::Struct`.
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct Child {
+            child: Box<Chain>,
+        }
+
+        /// A `Chain` with `wraps` newtype variants around `Leaf`.
+        fn chain(wraps: usize) -> Chain {
+            (0..wraps).fold(Chain::Leaf, |inner, _| Chain::Wrap(Box::new(inner)))
+        }
+
+        /// The number of `Wrap`s around each container in `wrapped_containers`.
+        const WRAPS_PER_LEVEL: usize = MAX_RECURSION / MAX - 2;
+
+        /// The part of the recursion limit that `wrapped_containers` leaves for its innermost
+        /// `Wrap`s.
+        const REMAINDER: usize = MAX_RECURSION % MAX;
+
+        /// `chain(innermost_wraps)` in `MAX` nested `container` variants (`List` or `Struct`), each
+        /// in `WRAPS_PER_LEVEL` `Wrap`s. Each level uses the `List` or `Struct` variant, its
+        /// container, and the `Wrap`s. With `innermost_wraps` of 0, the result uses all of the
+        /// recursion limit except `REMAINDER`.
+        fn wrapped_containers(container: &str, innermost_wraps: usize) -> Chain {
+            (0..MAX).fold(chain(innermost_wraps), |inner, _| {
+                let level = match container {
+                    "List" => Chain::List(vec![inner]),
+                    "Struct" => Chain::Struct(Child {
+                        child: Box::new(inner),
+                    }),
+                    _ => {
+                        unreachable!("not a `Chain` variant with a container payload: {container}")
+                    }
+                };
+                (0..WRAPS_PER_LEVEL).fold(level, |inner, _| Chain::Wrap(Box::new(inner)))
+            })
+        }
+
+        /// Encodes `wrapped_containers(container, innermost_wraps)` in `outer_wraps` more `Wrap`s
+        /// as binary Ion if `binary` is true, and as text Ion otherwise. The serializer rejects
+        /// values beyond the recursion limit, so the text is written by hand.
+        fn wrapped_containers_data(
+            container: &str,
+            outer_wraps: usize,
+            innermost_wraps: usize,
+            binary: bool,
+        ) -> IonResult<Vec<u8>> {
+            let wraps = "Wrap::".repeat(WRAPS_PER_LEVEL);
+            let innermost = format!("{}Leaf", "Wrap::".repeat(innermost_wraps));
+            let text = (0..MAX).fold(innermost, |inner, _| match container {
+                "List" => format!("{wraps}List::[{inner}]"),
+                "Struct" => format!("{wraps}Struct::{{child: {inner}}}"),
+                _ => unreachable!("not a `Chain` variant with a container payload: {container}"),
+            });
+            let text = format!("{}{text}", "Wrap::".repeat(outer_wraps));
+            if binary {
+                to_binary_ion(&text)
+            } else {
+                Ok(text.into_bytes())
+            }
+        }
+
+        /// With `Body`, a recursive type with two newtype variants and one list per level.
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        enum Message {
+            Payload(Body),
+        }
+
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        enum Body {
+            Items(Vec<Message>),
+        }
+
+        /// A `Message` with `levels` nested lists, the innermost of which is empty.
+        fn message(levels: usize) -> Message {
+            let items = (1..levels).fold(vec![], |items, _| {
+                vec![Message::Payload(Body::Items(items))]
+            });
+            Message::Payload(Body::Items(items))
+        }
+
+        /// Encodes `message(levels)` as an Ion 1.0 binary stream. The managed writer rejects values
+        /// deeper than the limit, so the encoding is written by hand.
+        fn binary_message(levels: usize) -> Vec<u8> {
+            let body = (0..levels).fold(vec![], |items, _| {
+                // Annotated with `Payload` (`$10`) and `Items` (`$11`).
+                binary_value(
+                    0xE0,
+                    [vec![0x82, 0x8A, 0x8B], binary_value(0xB0, items)].concat(),
+                )
+            });
+            binary_stream(&["Payload", "Items"], body)
+        }
+
+        /// A recursive enum with one variant of each kind whose payload is a container.
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        enum Node {
+            Leaf,
+            List(Vec<Node>),
+            Tuple(Box<Node>, u8),
+            Struct { child: Box<Node> },
+        }
+
+        /// `Leaf` in `levels` nested `variant` variants.
+        fn node(variant: &str, levels: usize) -> Node {
+            (0..levels).fold(Node::Leaf, |child, _| match variant {
+                "List" => Node::List(vec![child]),
+                "Tuple" => Node::Tuple(Box::new(child), 0),
+                "Struct" => Node::Struct {
+                    child: Box::new(child),
+                },
+                _ => unreachable!("not a `Node` variant with a container payload: {variant}"),
+            })
+        }
+
+        /// Encodes `node(variant, levels)` as an Ion 1.0 binary stream. The managed writer rejects
+        /// values deeper than the limit, so the encoding is written by hand.
+        fn binary_node(variant: &str, levels: usize) -> Vec<u8> {
+            let leaf = binary_value(0x70, vec![10]);
+            let body = (0..levels).fold(leaf, |child, _| {
+                let (annotation, container) = match variant {
+                    "List" => (11, binary_value(0xB0, child)),
+                    // The second element is the integer 0.
+                    "Tuple" => (12, binary_value(0xB0, [child, vec![0x20]].concat())),
+                    // The field is named `child` (`$14`).
+                    "Struct" => (13, binary_value(0xD0, [vec![0x80 | 14], child].concat())),
+                    _ => unreachable!("not a `Node` variant with a container payload: {variant}"),
+                };
+                binary_value(0xE0, [vec![0x81, 0x80 | annotation], container].concat())
+            });
+            binary_stream(&["Leaf", "List", "Tuple", "Struct", "child"], body)
+        }
+
+        /// Encodes `body` as an Ion 1.0 binary stream whose local symbol table defines `symbols`
+        /// as `$10` onward.
+        fn binary_stream(symbols: &[&str], body: Vec<u8>) -> Vec<u8> {
+            let symbols = symbols
+                .iter()
+                .flat_map(|text| binary_value(0x80, text.as_bytes().to_vec()))
+                .collect();
+            // `{symbols: [...]}` annotated with `$ion_symbol_table` (`$3`).
+            let symbol_table = binary_value(
+                0xE0,
+                [
+                    vec![0x81, 0x83],
+                    binary_value(0xD0, [vec![0x87], binary_value(0xB0, symbols)].concat()),
+                ]
+                .concat(),
+            );
+            [vec![0xE0, 0x01, 0x00, 0xEA], symbol_table, body].concat()
+        }
+
+        /// Encodes `value` as binary Ion if `binary` is true, and as text Ion otherwise.
+        fn encode(value: &impl Serialize, binary: bool) -> IonResult<Vec<u8>> {
+            if binary {
+                to_binary(value)
+            } else {
+                to_string(value).map(String::into_bytes)
+            }
+        }
+
+        /// Deserializes binary input made of `containers` nested containers of type `kind`, the
+        /// innermost of which is empty.
+        fn from_binary_nested(kind: IonType, containers: usize) -> IonResult<()> {
+            let data = binary_nested(kind, containers - 1, vec![binary_type_descriptor(kind)]);
+            match kind {
+                IonType::List | IonType::SExp => from_ion::<ListTree, _>(data).map(drop),
+                IonType::Struct => from_ion::<StructTree, _>(data).map(drop),
+                _ => unreachable!("not a tested container type: {kind}"),
+            }
+        }
+
+        /// Runs `test` on a thread with a 2 MiB stack, the default for threads spawned by `std`.
+        fn on_2_mib_stack(test: impl FnOnce() -> IonResult<()> + Send + 'static) -> IonResult<()> {
+            thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(test)?
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }
+
+        /// Asserts that `result` is a decoding error whose description starts with `prefix`.
+        #[track_caller]
+        fn assert_decoding_error(result: IonResult<impl Debug>, prefix: &str) {
+            match result {
+                Err(IonError::Decoding(e)) if e.description().starts_with(prefix) => {}
+                other => {
+                    panic!("expected a decoding error starting with {prefix:?}, found {other:?}")
+                }
+            }
+        }
+
+        #[rstest]
+        fn reads_binary_containers_at_the_maximum_depth(
+            #[values(IonType::List, IonType::SExp, IonType::Struct)] kind: IonType,
+        ) -> IonResult<()> {
+            from_binary_nested(kind, MAX)
+        }
+
+        #[rstest]
+        fn rejects_binary_containers_beyond_the_maximum_depth(
+            #[values(IonType::List, IonType::SExp, IonType::Struct)] kind: IonType,
+        ) {
+            assert_max_read_depth_exceeded(from_binary_nested(kind, MAX + 1));
+        }
+
+        #[rstest]
+        #[cfg_attr(miri, ignore = "too slow under Miri")]
+        fn rejects_binary_containers_far_beyond_the_maximum_depth(
+            #[values(IonType::List, IonType::SExp, IonType::Struct)] kind: IonType,
+        ) {
+            assert_max_read_depth_exceeded(from_binary_nested(kind, 10_000));
+        }
+
+        /// Deserializing an `i64` from a list fails with an error that describes the list.
+        #[test]
+        fn rejects_lists_nested_beyond_the_maximum_depth_as_an_i64() {
+            let data = binary_nested(IonType::List, MAX + 1, vec![0x21, 0x01]);
+            assert_decoding_error(from_ion::<i64, _>(data), "expected an int");
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "too slow under Miri")]
+        fn rejects_lists_nested_far_beyond_the_maximum_depth_as_an_i64() {
+            // Formatting the list recurses once per level until a list cannot be read, so without
+            // the depth check it would recurse 100,000 times.
+            if !LAZY_BINARY_DEPTH_IS_CHECKED {
+                return;
+            }
+            let data = binary_nested(IonType::List, 100_000, vec![0x21, 0x01]);
+            assert_decoding_error(from_ion::<i64, _>(data), "expected an int");
+        }
+
+        /// Newtype variants do not use container levels, so two of them per list do not lower the
+        /// number of lists that can be nested.
+        #[rstest]
+        fn round_trips_newtype_variants_in_containers_at_the_maximum_depth(
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            on_2_mib_stack(move || {
+                let expected = message(MAX);
+                assert_eq!(
+                    from_ion::<Message, _>(encode(&expected, binary)?)?,
+                    expected
+                );
+                Ok(())
+            })
+        }
+
+        #[test]
+        fn reads_hand_encoded_newtype_variants_in_containers_at_the_maximum_depth() -> IonResult<()>
+        {
+            assert_eq!(from_ion::<Message, _>(binary_message(MAX))?, message(MAX));
+            Ok(())
+        }
+
+        #[test]
+        fn rejects_newtype_variants_in_containers_beyond_the_maximum_depth() {
+            assert_max_read_depth_exceeded(from_ion::<Message, _>(binary_message(MAX + 1)));
+        }
+
+        /// A variant whose payload is a container uses one level, like the container alone.
+        #[rstest]
+        fn round_trips_container_variants_at_the_maximum_depth(
+            #[values("List", "Tuple", "Struct")] variant: &str,
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            let expected = node(variant, MAX);
+            assert_eq!(from_ion::<Node, _>(encode(&expected, binary)?)?, expected);
+            Ok(())
+        }
+
+        #[rstest]
+        fn reads_hand_encoded_container_variants_at_the_maximum_depth(
+            #[values("List", "Tuple", "Struct")] variant: &str,
+        ) -> IonResult<()> {
+            let actual: Node = from_ion(binary_node(variant, MAX))?;
+            assert_eq!(actual, node(variant, MAX));
+            Ok(())
+        }
+
+        #[rstest]
+        fn rejects_container_variants_beyond_the_maximum_depth(
+            #[values("List", "Tuple", "Struct")] variant: &str,
+        ) {
+            assert_max_read_depth_exceeded(from_ion::<Node, _>(binary_node(variant, MAX + 1)));
+        }
+
+        /// The binary reader rejects annotation sequences longer than 255 bytes, which is fewer
+        /// than `MAX_RECURSION` one-byte symbol IDs by default, so this chain is read from text.
+        #[test]
+        #[cfg_attr(miri, ignore = "too slow under Miri")]
+        fn round_trips_newtype_variants_at_the_maximum_recursion_depth() -> IonResult<()> {
+            on_2_mib_stack(|| {
+                let expected = chain(MAX_RECURSION);
+                assert_eq!(from_ion::<Chain, _>(to_string(&expected)?)?, expected);
+                Ok(())
+            })
+        }
+
+        /// Newtype variants are annotations on one value, so a chain of them recurses without
+        /// entering any container.
+        #[rstest]
+        #[cfg_attr(miri, ignore = "too slow under Miri")]
+        fn rejects_newtype_variants_beyond_the_maximum_recursion_depth(
+            #[values(MAX_RECURSION + 1, 10_000)] wraps: usize,
+        ) {
+            let text = format!("{}Leaf", "Wrap::".repeat(wraps));
+            assert_decoding_error(
+                from_ion::<Chain, _>(text),
+                MAX_RECURSION_DEPTH_EXCEEDED_PREFIX,
+            );
+        }
+
+        /// `Some` is the value itself, so a type that refers to itself through `Option` recurses on
+        /// any non-null value until the recursion limit.
+        #[test]
+        fn rejects_a_type_that_recurses_through_option() -> IonResult<()> {
+            on_2_mib_stack(|| {
+                assert_decoding_error(
+                    from_ion::<SelfOpt, _>("1"),
+                    MAX_RECURSION_DEPTH_EXCEEDED_PREFIX,
+                );
+                Ok(())
+            })
+        }
+
+        /// Each level uses one struct and one `Some`, so `MAX` levels are within the recursion
+        /// limit.
+        #[rstest]
+        fn round_trips_optional_struct_fields_at_the_maximum_depth(
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            let expected = struct_tree(MAX);
+            assert_eq!(
+                from_ion::<StructTree, _>(encode(&expected, binary)?)?,
+                expected
+            );
+            Ok(())
+        }
+
+        #[rstest]
+        fn round_trips_containers_and_newtype_variants_at_the_maximum_recursion_depth(
+            #[values("List", "Struct")] container: &str,
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            let container = container.to_owned();
+            on_2_mib_stack(move || {
+                let expected = wrapped_containers(&container, REMAINDER);
+                assert_eq!(from_ion::<Chain, _>(encode(&expected, binary)?)?, expected);
+                Ok(())
+            })
+        }
+
+        /// One more `Wrap` innermost exceeds the recursion limit at a newtype variant. One more
+        /// outermost, with none innermost, exceeds it on entering the innermost container.
+        #[rstest]
+        #[case::at_a_newtype_variant(0, REMAINDER + 1)]
+        #[case::entering_a_container(REMAINDER + 1, 0)]
+        fn rejects_containers_and_newtype_variants_beyond_the_maximum_recursion_depth(
+            #[case] outer_wraps: usize,
+            #[case] innermost_wraps: usize,
+            #[values("List", "Struct")] container: &str,
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            let data = wrapped_containers_data(container, outer_wraps, innermost_wraps, binary)?;
+            assert_decoding_error(
+                from_ion::<Chain, _>(data),
+                MAX_RECURSION_DEPTH_EXCEEDED_PREFIX,
+            );
+            Ok(())
+        }
+
+        /// The binary reader cannot read `chain(MAX_RECURSION)` back (see
+        /// `round_trips_newtype_variants_at_the_maximum_recursion_depth`), and every `SelfOpt` is
+        /// written as `null`, so these values are only written.
+        #[rstest]
+        #[case::newtype_variants(|binary| encode(&chain(MAX_RECURSION), binary))]
+        #[case::somes(|binary| encode(&self_opt(MAX_RECURSION), binary))]
+        fn writes_values_at_the_maximum_recursion_depth(
+            #[case] write: fn(bool) -> IonResult<Vec<u8>>,
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            write(binary).map(drop)
+        }
+
+        /// Serialization applies the recursion limit that deserialization checks.
+        #[rstest]
+        #[case::newtype_variants(|binary| encode(&chain(MAX_RECURSION + 1), binary))]
+        #[case::somes(|binary| encode(&self_opt(MAX_RECURSION + 1), binary))]
+        #[case::lists(|binary| encode(&wrapped_containers("List", REMAINDER + 1), binary))]
+        #[case::structs(|binary| encode(&wrapped_containers("Struct", REMAINDER + 1), binary))]
+        fn rejects_writing_values_beyond_the_maximum_recursion_depth(
+            #[case] write: fn(bool) -> IonResult<Vec<u8>>,
+            #[values(false, true)] binary: bool,
+        ) {
+            match write(binary) {
+                Err(IonError::Encoding(e))
+                    if e.to_string() == max_recursion_depth_exceeded_message() => {}
+                other => panic!("expected a maximum recursion depth error, found {other:?}"),
+            }
+        }
+
+        /// The value's own symbol names the variant of the enum after the one named by its last
+        /// annotation, and no enum after that.
+        #[rstest]
+        fn reads_variant_names_from_annotations_and_the_symbol(
+            #[values(("Leaf", 0), ("Wrap::Leaf", 1), ("Wrap::Wrap::Leaf", 2))] case: (&str, usize),
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            let (text, wraps) = case;
+            let data = if binary {
+                to_binary_ion(text)?
+            } else {
+                text.as_bytes().to_vec()
+            };
+            assert_eq!(from_ion::<Chain, _>(data)?, chain(wraps));
+            Ok(())
+        }
+
+        /// The symbol `Wrap` names the variant of the enum after the one named by the value's last
+        /// annotation. The newtype variant's payload is another enum on the same value, which has
+        /// neither an annotation nor the symbol to name its variant.
+        #[rstest]
+        fn rejects_a_newtype_variant_payload_without_a_variant_annotation(
+            #[values("Wrap", "Wrap::Wrap")] text: &str,
+            #[values(false, true)] binary: bool,
+        ) -> IonResult<()> {
+            let data = if binary {
+                to_binary_ion(text)?
+            } else {
+                text.as_bytes().to_vec()
+            };
+            assert_decoding_error(
+                from_ion::<Chain, _>(data),
+                "expected an enum variant annotation",
+            );
+            Ok(())
+        }
+    }
 }

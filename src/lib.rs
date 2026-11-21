@@ -114,11 +114,18 @@
 //! returns the error when the container is read, by `LazyValue::read` or a method that calls it
 //! such as `LazyStruct::get`, not when the container is reached with `Reader::next` or a
 //! container's iterator. Depth counts from the top-level value of the input, including when a
-//! nested value is converted to an `Element` or written to a writer. Serde deserialization of
-//! binary input reads lists, s-expressions, and structs with `LazyValue::read`, so it is limited
-//! too. With a limit greater than 255, lazy binary navigation never returns the error, because
-//! binary values store their depth in a `u8` that saturates at 255; conversions still check the
-//! limit. Raw writers and `Display` do not check the limit.
+//! nested value is converted to an `Element` or written to a writer. With a limit greater than 255,
+//! lazy binary navigation never returns the error, because binary values store their depth in a
+//! `u8` that saturates at 255; conversions and serde deserialization still check the limit. Serde
+//! deserialization checks the limit for lists, s-expressions, and structs. It
+//! also limits the combined nesting of containers, newtype enum variants, and `Some` values to 4
+//! times the limit, up to 65535, because newtype variants are encoded as annotations on one value
+//! and `Some` as the value itself, so they recurse without entering a container. Values that the
+//! target type skips are not read, so they are not checked. Recursion through newtype structs is
+//! not counted, because a type that refers to itself through newtype structs alone recurses on
+//! every input and so cannot be deserialized. Serde serialization applies the same limits, so the
+//! values it writes are within the limits that deserialization checks. Raw writers and `Display`
+//! do not check the limit.
 //!
 //! To change this limit, set the `ION_RS_MAX_READ_WRITE_DEPTH` environment variable to a base-10
 //! integer when building `ion-rs`, for example in the `[env]` table of your project's
